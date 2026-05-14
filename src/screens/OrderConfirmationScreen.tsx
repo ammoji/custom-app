@@ -1,17 +1,23 @@
 import { CommonActions, useNavigation, useRoute } from '@react-navigation/native';
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../components/common/Button';
 import { colors, radii, spacing, typography } from '../constants/theme';
-import { useOrderStore } from '../store/useOrderStore';
+import { orderService } from '../services/orderService';
+import type { Order } from '../types';
 import { formatRupees } from '../utils/format';
 
 export default function OrderConfirmationScreen() {
   const route = useRoute<any>();
   const nav = useNavigation<any>();
   const { orderId } = route.params as { orderId: string };
-  const order = useOrderStore(s => s.getById(orderId));
+  const [order, setOrder] = useState<Order | null>(null);
+
+  useEffect(() => {
+    const unsub = orderService.watchOrder(orderId, setOrder);
+    return unsub;
+  }, [orderId]);
 
   const goHome = () => {
     nav.dispatch(
@@ -47,6 +53,36 @@ export default function OrderConfirmationScreen() {
     Math.round((order.estimatedDeliveryAt - order.createdAt) / 60_000),
   );
 
+  const isOnline = order.paymentMethod === 'online';
+  const paymentStatus = order.paymentStatus;
+
+  const title =
+    !isOnline || paymentStatus === 'paid'
+      ? 'Order placed!'
+      : paymentStatus === 'failed'
+        ? 'Order placed, payment failed'
+        : paymentStatus === 'expired'
+          ? 'Order cancelled — payment expired'
+          : 'Order placed, payment processing…';
+
+  const paymentLabel = !isOnline
+    ? 'Cash on Delivery'
+    : paymentStatus === 'paid'
+      ? 'Paid ✓'
+      : paymentStatus === 'failed'
+        ? 'Failed'
+        : paymentStatus === 'expired'
+          ? 'Expired'
+          : 'Processing…';
+
+  const paymentColor = !isOnline
+    ? colors.textPrimary
+    : paymentStatus === 'paid'
+      ? colors.success
+      : paymentStatus === 'failed' || paymentStatus === 'expired'
+        ? colors.danger
+        : colors.textSecondary;
+
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <View style={styles.content}>
@@ -54,14 +90,14 @@ export default function OrderConfirmationScreen() {
           <Text style={styles.check}>✓</Text>
         </View>
 
-        <Text style={styles.title}>Order placed!</Text>
+        <Text style={styles.title}>{title}</Text>
         <Text style={styles.subtitle}>We've notified {order.shopName}</Text>
 
         <View style={styles.card}>
           <Row label="Order ID" value={order.id} />
           <Row label="ETA" value={`~${etaMinutes} min`} />
           <Row label="Total" value={formatRupees(order.total)} />
-          <Row label="Payment" value="Cash on Delivery" />
+          <Row label="Payment" value={paymentLabel} valueColor={paymentColor} />
         </View>
 
         <View style={styles.buttons}>
@@ -73,11 +109,11 @@ export default function OrderConfirmationScreen() {
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
   return (
     <View style={styles.row}>
       <Text style={[typography.body, { color: colors.textSecondary }]}>{label}</Text>
-      <Text style={typography.bodyBold}>{value}</Text>
+      <Text style={[typography.bodyBold, valueColor ? { color: valueColor } : null]}>{value}</Text>
     </View>
   );
 }

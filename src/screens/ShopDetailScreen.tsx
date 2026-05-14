@@ -8,9 +8,11 @@ import ScreenHeader from '../components/common/ScreenHeader';
 import ProductCard from '../components/product/ProductCard';
 import { CATEGORIES } from '../constants/categories';
 import { colors, radii, spacing, typography } from '../constants/theme';
+import { Analytics } from '../services/analytics';
 import { productService } from '../services/productService';
 import { shopService } from '../services/shopService';
 import { useCartStore } from '../store/useCartStore';
+import { useLocationStore } from '../store/useLocationStore';
 import { Product, Shop } from '../types';
 import { formatDistance, formatRupees } from '../utils/format';
 
@@ -32,21 +34,24 @@ export default function ShopDetailScreen() {
   const decrement = useCartStore(s => s.decrement);
   const itemCount = useCartStore(s => s.itemCount());
   const subtotal = useCartStore(s => s.subtotal());
+  const location = useLocationStore(s => s.location);
 
   const cartHasThisShop = cartShopId === shopId;
 
   useEffect(() => {
+    if (!location) return;
     (async () => {
       setLoading(true);
       const [s, p] = await Promise.all([
-        shopService.getById(shopId),
+        shopService.getById(shopId, location),
         productService.getByShop(shopId),
       ]);
       setShop(s);
       setProducts(p);
       setLoading(false);
+      if (s) Analytics.view_shop_detail({ shop_id: s.id, shop_name: s.name });
     })();
-  }, [shopId]);
+  }, [shopId, location]);
 
   const sections = useMemo(() => {
     const groups: Record<string, Product[]> = {};

@@ -1,3 +1,5 @@
+import { Platform } from 'react-native';
+
 export const colors = {
   primary: '#0E7C3A',
   primaryDark: '#0A5E2C',
@@ -37,11 +39,14 @@ export const typography = {
 };
 
 export const shadow = {
-  card: {
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
-  },
+  card: Platform.select({
+    web: { boxShadow: '0px 2px 6px rgba(0,0,0,0.06)' } as object,
+    default: {
+      elevation: 2,
+      shadowColor: '#000',
+      shadowOpacity: 0.06,
+      shadowRadius: 6,
+      shadowOffset: { width: 0, height: 2 },
+    },
+  }),
 };

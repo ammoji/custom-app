@@ -5,21 +5,36 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../components/common/Button';
 import { CATEGORIES } from '../constants/categories';
 import { colors, radii, spacing, typography } from '../constants/theme';
+import { useAuthStore } from '../store/useAuthStore';
 import { useCartStore } from '../store/useCartStore';
-import { useOrderStore } from '../store/useOrderStore';
+import { useLocationStore } from '../store/useLocationStore';
 import { formatRupees } from '../utils/format';
 
 export default function HomeScreen() {
   const nav = useNavigation<any>();
   const itemCount = useCartStore(s => s.itemCount());
   const total = useCartStore(s => s.total());
-  const orderCount = useOrderStore(s => s.orders.length);
+  const uid = useAuthStore(s => s.uid);
+  const isAnonymous = useAuthStore(s => s.isAnonymous);
+  const isAdmin = useAuthStore(s => s.isAdmin);
+  const source = useLocationStore(s => s.source);
+  const locationLabel =
+    source === 'gps'
+      ? 'Deliver to your location'
+      : 'Deliver to Green Park, Delhi (default)';
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <ScrollView contentContainerStyle={styles.content}>
         <Text style={[styles.greeting, { paddingHorizontal: spacing.lg }]}>Hello 👋</Text>
-        <Text style={[styles.location, { paddingHorizontal: spacing.lg }]}>Deliver to Green Park, New Delhi</Text>
+        <Text style={[styles.location, { paddingHorizontal: spacing.lg }]}>{locationLabel}</Text>
+        {source === 'fallback' && (
+          <View style={styles.fallbackBanner}>
+            <Text style={styles.fallbackText}>
+              📍 Using default location. Enable location to find shops near you.
+            </Text>
+          </View>
+        )}
 
         <Pressable
           onPress={() => nav.navigate('Search')}
@@ -57,15 +72,37 @@ export default function HomeScreen() {
           </View>
         </View>
 
-        {orderCount > 0 && (
+        <Pressable
+          style={styles.ordersRow}
+          onPress={() => nav.navigate('Orders')}
+          accessibilityRole="button"
+          accessibilityLabel="My Orders"
+        >
+          <Text style={styles.ordersText}>📦  My Orders</Text>
+          <Text style={styles.ordersChevron}>›</Text>
+        </Pressable>
+
+        {isAdmin && (
           <Pressable
-            style={styles.ordersRow}
-            onPress={() => nav.navigate('Orders')}
+            style={styles.adminRow}
+            onPress={() => nav.navigate('AdminOrders')}
             accessibilityRole="button"
-            accessibilityLabel={`My Orders, ${orderCount} order${orderCount > 1 ? 's' : ''}`}
+            accessibilityLabel="Shop Dashboard"
           >
-            <Text style={styles.ordersText}>📦  My Orders</Text>
-            <Text style={styles.ordersChevron}>›</Text>
+            <Text style={styles.adminText}>🛠️  Shop Dashboard</Text>
+            <Text style={styles.adminChevron}>›</Text>
+          </Pressable>
+        )}
+
+        {isAnonymous && (
+          <Pressable
+            style={styles.signInRow}
+            onPress={() => nav.navigate('Login')}
+            accessibilityRole="button"
+            accessibilityLabel="Sign in with phone"
+          >
+            <Text style={styles.signInText}>📱  Sign in with phone</Text>
+            <Text style={styles.signInChevron}>›</Text>
           </Pressable>
         )}
 
@@ -75,6 +112,12 @@ export default function HomeScreen() {
           <Step n="2" title="Add to cart" desc="Choose your groceries" />
           <Step n="3" title="Place order" desc="Pay on delivery, get it fast" />
         </View>
+
+        {__DEV__ && (
+          <Text style={{ fontSize: 10, color: colors.textMuted, marginTop: spacing.xl, paddingHorizontal: spacing.lg }}>
+            uid: {uid ?? 'pending'} {isAnonymous ? '[Anon]' : ''} {isAdmin ? '[Admin]' : '[Not admin]'}
+          </Text>
+        )}
       </ScrollView>
 
       {itemCount > 0 && (
@@ -113,6 +156,15 @@ const styles = StyleSheet.create({
   content: { paddingVertical: spacing.lg, paddingBottom: 120 },
   greeting: { ...typography.h1 },
   location: { ...typography.body, color: colors.textSecondary, marginTop: spacing.xs },
+  fallbackBanner: {
+    marginTop: spacing.md,
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.primaryLight,
+    borderRadius: radii.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  fallbackText: { ...typography.caption, color: colors.primaryDark },
   searchBox: {
     marginTop: spacing.lg,
     backgroundColor: colors.surface,
@@ -156,6 +208,34 @@ const styles = StyleSheet.create({
   },
   ordersText: { ...typography.bodyBold },
   ordersChevron: { ...typography.h2, color: colors.textSecondary },
+  adminRow: {
+    marginTop: spacing.md,
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.primaryDark,
+    borderRadius: radii.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  adminText: { ...typography.bodyBold, color: '#fff' },
+  adminChevron: { ...typography.h2, color: '#fff' },
+  signInRow: {
+    marginTop: spacing.sm,
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  signInText: { ...typography.body, color: colors.textPrimary },
+  signInChevron: { ...typography.h2, color: colors.textSecondary },
   heroTitle: { ...typography.h2, color: colors.primaryDark },
   heroSubtitle: { ...typography.body, color: colors.primaryDark, marginTop: spacing.xs },
   sectionTitle: { ...typography.h3, marginTop: spacing.xl, marginBottom: spacing.md },

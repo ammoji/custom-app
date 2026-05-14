@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
+import { Analytics } from '../services/analytics';
 import { CartItem, Product, Shop } from '../types';
 import { formatPackLabel } from '../utils/format';
 
@@ -41,7 +42,7 @@ export const useCartStore = create<CartState>()(
     return { ok: true };
   },
 
-  forceAddItem: (product, shop) =>
+  forceAddItem: (product, shop) => {
     set(state => {
       const base = state.shopId === product.shopId ? state.items : [];
       const existing = base.find(i => i.productId === product.id);
@@ -66,7 +67,14 @@ export const useCartStore = create<CartState>()(
         shopName: shop.name,
         deliveryFee: shop.deliveryFee,
       };
-    }),
+    });
+    Analytics.add_to_cart({
+      product_id: product.id,
+      shop_id: product.shopId,
+      price: product.price,
+      quantity: 1,
+    });
+  },
 
   increment: id =>
     set(state => ({
@@ -89,13 +97,15 @@ export const useCartStore = create<CartState>()(
         : { items: next };
     }),
 
-  removeItem: id =>
+  removeItem: id => {
     set(state => {
       const next = state.items.filter(i => i.productId !== id);
       return next.length === 0
         ? { items: [], shopId: null, shopName: null, deliveryFee: 0 }
         : { items: next };
-    }),
+    });
+    Analytics.remove_from_cart({ product_id: id });
+  },
 
   clearCart: () =>
     set({ items: [], shopId: null, shopName: null, deliveryFee: 0 }),

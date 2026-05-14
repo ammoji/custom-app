@@ -1,5 +1,5 @@
 import { useNavigation, useRoute } from '@react-navigation/native';
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Image, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import EmptyState from '../components/common/EmptyState';
@@ -7,18 +7,32 @@ import Loader from '../components/common/Loader';
 import ScreenHeader from '../components/common/ScreenHeader';
 import OrderStatusChip from '../components/order/OrderStatusChip';
 import { colors, radii, spacing, typography } from '../constants/theme';
-import { useOrderStore } from '../store/useOrderStore';
-import { useOrderStoreHydrated } from '../store/useStoreHydration';
+import { Analytics } from '../services/analytics';
+import { orderService } from '../services/orderService';
+import type { Order } from '../types';
 import { formatOrderTime, formatRupees } from '../utils/format';
 
 export default function OrderDetailScreen() {
   const nav = useNavigation<any>();
   const route = useRoute<any>();
   const orderId: string = route.params.orderId;
-  const order = useOrderStore(s => s.getById(orderId));
-  const hydrated = useOrderStoreHydrated();
+  const [order, setOrder] = useState<Order | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  if (!hydrated) {
+  useEffect(() => {
+    let firstLoad = true;
+    const unsub = orderService.watchOrder(orderId, o => {
+      setOrder(o);
+      setLoading(false);
+      if (firstLoad && o) {
+        firstLoad = false;
+        Analytics.view_order({ order_id: o.id, status: o.status });
+      }
+    });
+    return unsub;
+  }, [orderId]);
+
+  if (loading && !order) {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
         <ScreenHeader title="Order" onBack={() => nav.goBack()} />
@@ -107,20 +121,72 @@ export default function OrderDetailScreen() {
         {/* Payment */}
         <Text style={styles.sectionTitle}>Payment</Text>
         <View style={styles.card}>
-          <Row label="Method" value="Cash on Delivery" />
+          <Row
+            label="Method"
+            value={order.paymentMethod === 'online' ? 'Online (Razorpay)' : 'Cash on Delivery'}
+          />
+          {order.paymentMethod === 'online' && (
+            <Row
+              label="Status"
+              value={
+                order.paymentStatus === 'paid'
+                  ? 'Paid ✓'
+                  : order.paymentStatus === 'failed'
+                    ? 'Failed'
+                    : order.paymentStatus === 'expired'
+                      ? 'Expired'
+                      : 'Processing…'
+              }
+              valueColor={
+                order.paymentStatus === 'paid'
+                  ? colors.success
+                  : order.paymentStatus === 'failed' || order.paymentStatus === 'expired'
+                    ? colors.danger
+                    : colors.textSecondary
+              }
+            />
+          )}
+          {order.paymentMethod === 'online' && order.paymentStatus === 'failed' && (
+            <Text style={styles.paymentNote}>
+              Payment didn't complete. Contact support to retry.
+            </Text>
+          )}
+          {order.paymentMethod === 'online' && order.paymentStatus === 'expired' && (
+            <Text style={styles.paymentNote}>
+              Payment session expired and the order was auto-cancelled.
+              Place a new order to try again.
+            </Text>
+          )}
         </View>
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-function Row({ label, value, bold }: { label: string; value: string; bold?: boolean }) {
+function Row({
+  label,
+  value,
+  bold,
+  valueColor,
+}: {
+  label: string;
+  value: string;
+  bold?: boolean;
+  valueColor?: string;
+}) {
   return (
     <View style={styles.row}>
       <Text style={bold ? typography.bodyBold : [typography.body, { color: colors.textSecondary }]}>
         {label}
       </Text>
-      <Text style={bold ? typography.bodyBold : typography.body}>{value}</Text>
+      <Text
+        style={[
+          bold ? typography.bodyBold : typography.body,
+          valueColor ? { color: valueColor } : null,
+        ]}
+      >
+        {value}
+      </Text>
     </View>
   );
 }
@@ -150,4 +216,5 @@ const styles = StyleSheet.create({
   itemMeta: { ...typography.caption, marginTop: 2 },
   row: { flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.xs },
   divider: { height: 1, backgroundColor: colors.border, marginVertical: spacing.sm },
+  paymentNote: { ...typography.caption, color: colors.danger, marginTop: spacing.sm },
 });

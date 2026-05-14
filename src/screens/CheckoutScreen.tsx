@@ -1,18 +1,34 @@
 import { useNavigation } from '@react-navigation/native';
 import React, { useState } from 'react';
-import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../components/common/Button';
 import EmptyState from '../components/common/EmptyState';
 import Input from '../components/common/Input';
 import ScreenHeader from '../components/common/ScreenHeader';
 import { colors, radii, spacing, typography } from '../constants/theme';
+import { Analytics } from '../services/analytics';
+import { orderService } from '../services/orderService';
+import { Sentry } from '../services/sentry';
+import { useAuthStore } from '../store/useAuthStore';
 import { useCartStore } from '../store/useCartStore';
-import { useOrderStore } from '../store/useOrderStore';
-import type { Address } from '../types';
+import type { Address, PaymentMethod } from '../types';
 import { formatRupees } from '../utils/format';
+import { loadRazorpayScript, openRazorpayCheckout } from '../utils/razorpay';
 
 type Errors = Partial<Record<'name' | 'line1' | 'city' | 'pincode' | 'phone', string>>;
+
+const showAlert = (title: string, message: string) => {
+  if (Platform.OS === 'web' && typeof window !== 'undefined') {
+    // eslint-disable-next-line no-alert
+    window.alert(`${title}\n\n${message}`);
+  } else {
+    // Lazy import keeps react-native-web's flaky Alert export off the web bundle path.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { Alert } = require('react-native');
+    Alert.alert(title, message);
+  }
+};
 
 export default function CheckoutScreen() {
   const nav = useNavigation<any>();
@@ -23,7 +39,8 @@ export default function CheckoutScreen() {
   const subtotal = useCartStore(s => s.subtotal());
   const total = useCartStore(s => s.total());
   const clearCart = useCartStore(s => s.clearCart);
-  const placeOrderInStore = useOrderStore(s => s.placeOrder);
+
+  const onlineSupported = Platform.OS === 'web';
 
   const [name, setName] = useState('Sudhir Davim');
   const [line1, setLine1] = useState('');
@@ -33,6 +50,7 @@ export default function CheckoutScreen() {
   const [phone, setPhone] = useState('');
   const [errors, setErrors] = useState<Errors>({});
   const [placing, setPlacing] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cod');
 
   const validate = (): Errors => {
     const e: Errors = {};
@@ -45,13 +63,43 @@ export default function CheckoutScreen() {
   };
 
   const placeOrder = async () => {
+    // Phone-auth gate: anonymous users must sign in before placing an
+    // order so we can confirm + send delivery updates. Browsing/cart
+    // still work anonymously (conversion-optimal funnel).
+    if (useAuthStore.getState().isAnonymous) {
+      const goSignIn = () =>
+        nav.navigate('Login', { returnTo: 'Checkout' });
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        // eslint-disable-next-line no-alert
+        const ok = window.confirm(
+          'Sign in to place order\n\n' +
+            'Add your phone number so we can confirm your order and send ' +
+            'delivery updates.',
+        );
+        if (ok) goSignIn();
+      } else {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { Alert } = require('react-native');
+        Alert.alert(
+          'Sign in to place order',
+          'Add your phone number so we can confirm your order and send ' +
+            'delivery updates.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Sign in', onPress: goSignIn },
+          ],
+        );
+      }
+      return;
+    }
+
+    Analytics.begin_checkout({ value: total, item_count: items.length });
     const e = validate();
     setErrors(e);
     if (Object.keys(e).length > 0) return;
     if (!shopId) return;
 
     setPlacing(true);
-    await new Promise(res => setTimeout(res, 600));
 
     const address: Address = {
       name: name.trim(),
@@ -62,19 +110,76 @@ export default function CheckoutScreen() {
       phone: phone.trim(),
     };
 
-    const order = placeOrderInStore({
-      cart: items,
-      address,
-      shopId,
-      shopName: shopName ?? '',
-      subtotal,
-      deliveryFee,
-      total,
-      etaMinutes: 30,
-    });
+    try {
+      const result = await orderService.placeOrder({
+        shopId,
+        items,
+        address,
+        paymentMethod,
+      });
+      Analytics.place_order({
+        order_id: result.orderId,
+        value: total,
+        payment_method: paymentMethod,
+      });
 
-    nav.replace('OrderConfirmation', { orderId: order.id });
-    clearCart();
+      if (paymentMethod === 'cod') {
+        clearCart();
+        nav.replace('OrderConfirmation', { orderId: result.orderId });
+        return;
+      }
+
+      // Online path — Razorpay Checkout overlay (web).
+      if (!result.razorpayOrderId || !result.razorpayKeyId) {
+        throw new Error('Payment session not created');
+      }
+      await loadRazorpayScript();
+
+      const rzp = openRazorpayCheckout({
+        key: result.razorpayKeyId,
+        order_id: result.razorpayOrderId,
+        amount: Math.round(result.total * 100),
+        currency: 'INR',
+        name: 'grocery-mvp',
+        description: `Order ${result.orderId}`,
+        prefill: { name: address.name, contact: address.phone },
+        theme: { color: colors.primary },
+        handler: () => {
+          // Payment success — webhook will mark paymentStatus='paid'
+          // asynchronously; OrderConfirmation's snapshot listener picks it up.
+          Analytics.payment_success({ order_id: result.orderId, value: result.total });
+          clearCart();
+          nav.replace('OrderConfirmation', { orderId: result.orderId });
+        },
+        modal: {
+          ondismiss: () => {
+            setPlacing(false);
+            showAlert(
+              'Payment cancelled',
+              'Your order was created but payment was not completed. ' +
+                'You can retry from your order details later.',
+            );
+          },
+        },
+      });
+      rzp.on('payment.failed', (err: any) => {
+        setPlacing(false);
+        const reason: string = err?.error?.description ?? 'unknown';
+        Analytics.payment_failed({ order_id: result.orderId, reason });
+        Sentry.captureMessage(
+          `Payment failed for order ${result.orderId}: ${reason}`,
+          'warning',
+        );
+        showAlert(
+          'Payment failed',
+          err?.error?.description ?? 'Please try a different payment method.',
+        );
+      });
+    } catch (err: any) {
+      setPlacing(false);
+      const message = err?.message || 'Could not place order. Please try again.';
+      showAlert('Order failed', message);
+    }
   };
 
   if (items.length === 0) {
@@ -158,15 +263,31 @@ export default function CheckoutScreen() {
           </View>
 
           <Text style={styles.label}>Payment</Text>
-          <View style={styles.paymentCard}>
-            <Text style={typography.bodyBold}>Cash on Delivery</Text>
-            <Text style={[typography.caption, { marginTop: 2 }]}>Pay when your order arrives</Text>
-          </View>
+          <PaymentOption
+            selected={paymentMethod === 'cod'}
+            onPress={() => setPaymentMethod('cod')}
+            title="Cash on Delivery"
+            subtitle="Pay when your order arrives"
+          />
+          <View style={{ height: spacing.md }} />
+          <PaymentOption
+            selected={paymentMethod === 'online'}
+            onPress={() => onlineSupported && setPaymentMethod('online')}
+            disabled={!onlineSupported}
+            title="Pay Online (UPI / Cards / NetBanking)"
+            subtitle={onlineSupported ? 'Powered by Razorpay' : 'Available on web for now'}
+          />
         </ScrollView>
 
         <View style={styles.ctaWrap}>
           <Button
-            title={placing ? 'Placing order...' : `Place Order · ${formatRupees(total)}`}
+            title={
+              placing
+                ? 'Placing order...'
+                : paymentMethod === 'cod'
+                  ? `Place Order · ${formatRupees(total)}`
+                  : `Pay ${formatRupees(total)}`
+            }
             onPress={placeOrder}
             loading={placing}
             fullWidth
@@ -174,6 +295,42 @@ export default function CheckoutScreen() {
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
+  );
+}
+
+function PaymentOption({
+  selected,
+  onPress,
+  title,
+  subtitle,
+  disabled,
+}: {
+  selected: boolean;
+  onPress: () => void;
+  title: string;
+  subtitle: string;
+  disabled?: boolean;
+}) {
+  return (
+    <Pressable
+      onPress={disabled ? undefined : onPress}
+      accessibilityRole="radio"
+      accessibilityState={{ selected, disabled: !!disabled }}
+      accessibilityLabel={title}
+      style={[
+        styles.payOption,
+        selected && styles.payOptionSelected,
+        disabled && styles.payOptionDisabled,
+      ]}
+    >
+      <View style={[styles.radio, selected && styles.radioSelected]}>
+        {selected && <View style={styles.radioDot} />}
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={typography.bodyBold}>{title}</Text>
+        <Text style={[typography.caption, { marginTop: 2 }]}>{subtitle}</Text>
+      </View>
+    </Pressable>
   );
 }
 
@@ -191,10 +348,36 @@ const styles = StyleSheet.create({
   },
   summaryRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.sm },
   divider: { height: 1, backgroundColor: colors.border, marginVertical: spacing.sm },
-  paymentCard: {
-    backgroundColor: colors.primaryLight,
+  payOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    backgroundColor: colors.surface,
     borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
     padding: spacing.lg,
+  },
+  payOptionSelected: {
+    backgroundColor: colors.primaryLight,
+    borderColor: colors.primary,
+  },
+  payOptionDisabled: { opacity: 0.5 },
+  radio: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  radioSelected: { borderColor: colors.primary },
+  radioDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: colors.primary,
   },
   ctaWrap: {
     padding: spacing.lg,

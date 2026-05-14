@@ -1,5 +1,5 @@
 import { useNavigation } from '@react-navigation/native';
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import EmptyState from '../components/common/EmptyState';
@@ -7,24 +7,44 @@ import Loader from '../components/common/Loader';
 import ScreenHeader from '../components/common/ScreenHeader';
 import OrderStatusChip from '../components/order/OrderStatusChip';
 import { colors, radii, shadow, spacing, typography } from '../constants/theme';
-import { useOrderStore } from '../store/useOrderStore';
-import { useOrderStoreHydrated } from '../store/useStoreHydration';
+import { orderService } from '../services/orderService';
+import { useAuthStore } from '../store/useAuthStore';
+import type { Order } from '../types';
 import { formatOrderTime, formatRupees } from '../utils/format';
 
 export default function OrdersScreen() {
   const nav = useNavigation<any>();
-  const orders = useOrderStore(s => s.orders);
-  const hydrated = useOrderStoreHydrated();
+  const uid = useAuthStore(s => s.uid);
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!uid) {
+      setOrders([]);
+      setLoading(false);
+      return;
+    }
+    try {
+      const data = await orderService.listMine(uid);
+      setOrders(data);
+    } catch (err) {
+      console.warn('[orders] listMine failed:', err);
+    }
+  }, [uid]);
+
+  useEffect(() => {
+    setLoading(true);
+    load().finally(() => setLoading(false));
+  }, [load]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    // Orders are local; this is a UX gesture only.
-    await new Promise(res => setTimeout(res, 400));
+    await load();
     setRefreshing(false);
-  }, []);
+  }, [load]);
 
-  if (!hydrated) {
+  if (loading) {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
         <ScreenHeader title="My Orders" onBack={() => nav.goBack()} />

@@ -52,6 +52,9 @@ export type Address = {
   phone: string;
 };
 
+export type PaymentMethod = 'cod' | 'online';
+export type PaymentStatus = 'pending' | 'paid' | 'failed' | 'expired' | 'not_required';
+
 export type Order = {
   id: string;
   shopId: string;
@@ -61,7 +64,12 @@ export type Order = {
   deliveryFee: number;
   total: number;
   deliveryAddress: Address;
-  paymentMethod: 'cod';
+  paymentMethod: PaymentMethod;
+  // Present for online orders; COD orders may omit these entirely.
+  paymentStatus?: PaymentStatus;
+  razorpayOrderId?: string;
+  razorpayPaymentId?: string;
+  paidAt?: number;
   status: 'pending' | 'accepted' | 'preparing' | 'out_for_delivery' | 'delivered' | 'cancelled';
   createdAt: number;
   estimatedDeliveryAt: number;

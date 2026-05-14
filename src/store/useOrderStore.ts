@@ -1,6 +1,5 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
-import { createJSONStorage, persist } from 'zustand/middleware';
+import { orderService } from '../services/orderService';
 import { Address, CartItem, Order } from '../types';
 
 type PlaceOrderInput = {
@@ -15,42 +14,34 @@ type PlaceOrderInput = {
 };
 
 type OrderState = {
-  orders: Order[];
-  placeOrder: (input: PlaceOrderInput) => Order;
-  getById: (orderId: string) => Order | undefined;
+  placeOrder: (input: PlaceOrderInput) => Promise<Order>;
 };
 
-export const useOrderStore = create<OrderState>()(
-  persist(
-    (set, get) => ({
-      orders: [],
-
-      placeOrder: input => {
+// Orders no longer live in client state. Reads come from Firestore directly
+// (orderService.listMine / watchOrder). This store is a thin pass-through
+// for placeOrder so call-sites stay stable.
+export const useOrderStore = create<OrderState>(() => ({
+  placeOrder: async input => {
+    const { orderId, total, etaMinutes, shopName } = await orderService.placeOrder({
+      shopId: input.shopId,
+      items: input.cart,
+      address: input.address,
+    });
     const createdAt = Date.now();
     const order: Order = {
-      id: `ORD-${createdAt}`,
+      id: orderId,
       shopId: input.shopId,
-      shopName: input.shopName,
+      shopName,
       items: input.cart,
-      subtotal: input.subtotal,
+      subtotal: total - input.deliveryFee,
       deliveryFee: input.deliveryFee,
-      total: input.total,
+      total,
       deliveryAddress: input.address,
       paymentMethod: 'cod',
       status: 'pending',
       createdAt,
-      estimatedDeliveryAt: createdAt + input.etaMinutes * 60_000,
+      estimatedDeliveryAt: createdAt + etaMinutes * 60_000,
     };
-        set(state => ({ orders: [order, ...state.orders] }));
-        return order;
-      },
-
-      getById: orderId => get().orders.find(o => o.id === orderId),
-    }),
-    {
-      name: 'orders-v1',
-      storage: createJSONStorage(() => AsyncStorage),
-      partialize: state => ({ orders: state.orders }),
-    }
-  )
-);
+    return order;
+  },
+}));

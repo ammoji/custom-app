@@ -1,15 +1,15 @@
-import { MOCK_PRODUCTS } from '../mocks/products';
+import { collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore';
 import { Product } from '../types';
-
-const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
+import { db } from './firebase';
 
 export const productService = {
   async getByShop(shopId: string): Promise<Product[]> {
-    await delay(200);
-    return MOCK_PRODUCTS.filter(p => p.shopId === shopId);
+    const q = query(collection(db, 'products'), where('shopId', '==', shopId));
+    const snap = await getDocs(q);
+    return snap.docs.map(d => d.data() as Product);
   },
   async getById(productId: string): Promise<Product | null> {
-    await delay(100);
-    return MOCK_PRODUCTS.find(p => p.id === productId) ?? null;
+    const snap = await getDoc(doc(db, 'products', productId));
+    return snap.exists() ? (snap.data() as Product) : null;
   },
 };

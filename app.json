@@ -12,6 +12,8 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.sudhirdavim.grocerymvp",
+      "versionCode": 1,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -22,11 +24,10 @@
       "predictiveBackGestureEnabled": false
     },
     "web": {
-      "output": "static",
+      "output": "single",
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
-      "expo-router",
       [
         "expo-splash-screen",
         {
@@ -38,11 +39,30 @@
             "backgroundColor": "#000000"
           }
         }
-      ]
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow grocery-mvp to use your location to find nearby shops.",
+          "locationWhenInUsePermission": "Allow grocery-mvp to use your location to find nearby shops.",
+          "isAndroidBackgroundLocationEnabled": false,
+          "isIosBackgroundLocationEnabled": false
+        }
+      ],
+      "@sentry/react-native"
     ],
-    "experiments": {
-      "typedRoutes": true,
-      "reactCompiler": true
+    "experiments": {},
+    "extra": {
+      "eas": {
+        "projectId": "25064a20-cfd6-4a98-ac27-4d435095e50a"
+      }
+    },
+    "owner": "ammoji",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/25064a20-cfd6-4a98-ac27-4d435095e50a"
     }
   }
 }

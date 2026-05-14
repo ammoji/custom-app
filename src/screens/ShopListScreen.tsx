@@ -8,8 +8,10 @@ import Loader from '../components/common/Loader';
 import ScreenHeader from '../components/common/ScreenHeader';
 import ShopCard from '../components/shop/ShopCard';
 import { colors, radii, spacing, typography } from '../constants/theme';
+import { Analytics } from '../services/analytics';
 import { shopService } from '../services/shopService';
 import { useCartStore } from '../store/useCartStore';
+import { useLocationStore } from '../store/useLocationStore';
 import { Shop } from '../types';
 import { formatRupees } from '../utils/format';
 
@@ -22,25 +24,30 @@ export default function ShopListScreen() {
 
   const itemCount = useCartStore(s => s.itemCount());
   const total = useCartStore(s => s.total());
+  const location = useLocationStore(s => s.location);
 
   const load = useCallback(async () => {
-    const data = await shopService.getNearbyShops();
+    if (!location) return;
+    const data = await shopService.getNearbyShops(location);
     setShops(data);
-  }, []);
+    Analytics.view_shop_list({ count: data.length });
+  }, [location]);
 
   useEffect(() => {
+    if (!location) return;
     (async () => {
       setLoading(true);
       await load();
       setLoading(false);
     })();
-  }, [load]);
+  }, [load, location]);
 
   const onRefresh = useCallback(async () => {
+    if (!location) return;
     setRefreshing(true);
     await load();
     setRefreshing(false);
-  }, [load]);
+  }, [load, location]);
 
   const filtered = shops.filter(s =>
     s.name.toLowerCase().includes(query.trim().toLowerCase())

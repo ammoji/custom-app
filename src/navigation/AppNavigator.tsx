@@ -4,12 +4,14 @@ import { CategoryId } from '../constants/categories';
 import CartScreen from '../screens/CartScreen';
 import CheckoutScreen from '../screens/CheckoutScreen';
 import HomeScreen from '../screens/HomeScreen';
+import LoginScreen from '../screens/LoginScreen';
 import OrderConfirmationScreen from '../screens/OrderConfirmationScreen';
 import OrderDetailScreen from '../screens/OrderDetailScreen';
 import OrdersScreen from '../screens/OrdersScreen';
 import SearchScreen from '../screens/SearchScreen';
 import ShopDetailScreen from '../screens/ShopDetailScreen';
 import ShopListScreen from '../screens/ShopListScreen';
+import AdminOrdersScreen from '../screens/admin/AdminOrdersScreen';
 
 export type RootStackParamList = {
   Home: undefined;
@@ -21,6 +23,8 @@ export type RootStackParamList = {
   Orders: undefined;
   OrderDetail: { orderId: string };
   Search: { query?: string; category?: CategoryId } | undefined;
+  AdminOrders: undefined;
+  Login: { returnTo?: keyof RootStackParamList } | undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -37,6 +41,8 @@ export default function AppNavigator() {
       <Stack.Screen name="Orders" component={OrdersScreen} />
       <Stack.Screen name="OrderDetail" component={OrderDetailScreen} />
       <Stack.Screen name="Search" component={SearchScreen} />
+      <Stack.Screen name="AdminOrders" component={AdminOrdersScreen} />
+      <Stack.Screen name="Login" component={LoginScreen} />
     </Stack.Navigator>
   );
 }
