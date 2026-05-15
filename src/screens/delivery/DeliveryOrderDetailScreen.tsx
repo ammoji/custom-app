@@ -1,13 +1,13 @@
 import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import React, { useEffect, useState } from 'react';
 import {
-  Alert,
-  Linking,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
+    Alert,
+    Linking,
+    Pressable,
+    ScrollView,
+    StyleSheet,
+    Text,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../../components/common/Button';
@@ -47,14 +47,22 @@ export default function DeliveryOrderDetailScreen() {
   const [order, setOrder] = useState<Order | null>(null);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isDelivery) {
       setLoading(false);
       return;
     }
-    const off = orderService.watchOrder(orderId, o => {
-      setOrder(o);
+    const off = orderService.watchOrder(orderId, (o, err) => {
+      if (err) {
+        // Keep whatever was previously rendered; surface the message.
+        setLoadError(err.message || 'Could not load order. Try again.');
+      } else {
+        setLoadError(null);
+        setOrder(o);
+      }
+      // ALWAYS — see watcher contract refactor.
       setLoading(false);
     });
     return off;
@@ -153,6 +161,11 @@ export default function DeliveryOrderDetailScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <ScreenHeader title="Delivery" onBack={() => nav.goBack()} />
+      {loadError && (
+        <View style={styles.errorBanner}>
+          <Text style={styles.errorText}>{loadError}</Text>
+        </View>
+      )}
       <ScrollView contentContainerStyle={styles.content}>
         <View style={styles.card}>
           <Text style={styles.label}>Pickup from</Text>
@@ -328,4 +341,14 @@ const styles = StyleSheet.create({
     color: colors.primaryDark,
     textAlign: 'center',
   },
+  errorBanner: {
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.md,
+    padding: spacing.md,
+    backgroundColor: '#FEF2F2',
+    borderColor: colors.danger,
+    borderWidth: 1,
+    borderRadius: radii.md,
+  },
+  errorText: { ...typography.body, color: colors.danger },
 });

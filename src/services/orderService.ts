@@ -186,7 +186,15 @@ export const orderService = {
     await fn({ orderId });
   },
 
-  watchOrder(orderId: string, cb: (order: Order | null) => void): () => void {
+  // Watcher contract (post-loader-spin hotfix): every cb is called as
+  // cb(data, undefined) on success and cb(emptyValue, error) on
+  // failure. Screens MUST set their loading state from the callback —
+  // never from the success branch alone — so a transient network blip
+  // can't leave the loader spinning forever.
+  watchOrder(
+    orderId: string,
+    cb: (order: Order | null, error?: Error) => void,
+  ): () => void {
     if (isNative) {
       // Polling fallback for native (no RNFB Firestore = no snapshot
       // listeners). 5s cadence balances freshness vs Function-invocation
@@ -197,15 +205,20 @@ export const orderService = {
         try {
           const fn = getNativeFunctions().httpsCallable('getOrder');
           const result = await fn({ orderId });
-          if (!cancelled) cb(toOrder(result.data));
+          if (!cancelled) cb(toOrder(result.data), undefined);
         } catch (e) {
-          // not-found surfaces as null so the UI can render a missing
-          // state instead of getting stuck on stale data.
+          // not-found surfaces as null (success branch) so the UI can
+          // render a missing state instead of getting stuck on stale
+          // data. Anything else is a real error and goes through the
+          // error path.
           const code = (e as any)?.code;
           if (code === 'functions/not-found' || code === 'not-found') {
-            if (!cancelled) cb(null);
+            if (!cancelled) cb(null, undefined);
           } else {
             console.warn('[watchOrder] poll failed:', e);
+            if (!cancelled) {
+              cb(null, e instanceof Error ? e : new Error(String(e)));
+            }
           }
         }
       };
@@ -216,9 +229,14 @@ export const orderService = {
         clearInterval(interval);
       };
     }
-    return onSnapshot(doc(db, 'orders', orderId), snap => {
-      cb(snap.exists() ? toOrder(snap.data()) : null);
-    });
+    return onSnapshot(
+      doc(db, 'orders', orderId),
+      snap => cb(snap.exists() ? toOrder(snap.data()) : null, undefined),
+      err => {
+        console.warn('[watchOrder] snapshot failed:', err);
+        cb(null, err instanceof Error ? err : new Error(String(err)));
+      },
+    );
   },
 
   async updateOrderStatus(input: {
@@ -510,7 +528,7 @@ export const orderService = {
   // (or admin) — see listShopOrders in functions/src/index.ts.
   watchShopOrders(
     shopId: string,
-    cb: (orders: Order[]) => void,
+    cb: (orders: Order[], error?: Error) => void,
   ): () => void {
     if (isNative) {
       let cancelled = false;
@@ -519,9 +537,16 @@ export const orderService = {
         try {
           const fn = getNativeFunctions().httpsCallable('listShopOrders');
           const result = await fn({ shopId });
-          if (!cancelled) cb((result.data as any[]).map(toOrder));
+          if (!cancelled) cb((result.data as any[]).map(toOrder), undefined);
         } catch (e) {
+          // Surface the error so the screen can flip its loader off
+          // and render a retry banner. Previously this branch only
+          // console.warn'd, which left ShopOwnerDashboardScreen
+          // spinning forever on the very first failed poll.
           console.warn('[watchShopOrders] poll failed:', e);
+          if (!cancelled) {
+            cb([], e instanceof Error ? e : new Error(String(e)));
+          }
         }
       };
       poll();
@@ -540,9 +565,14 @@ export const orderService = {
       orderBy('createdAt', 'desc'),
       limit(100),
     );
-    return onSnapshot(q, snap => {
-      cb(snap.docs.map(d => toOrder(d.data())));
-    });
+    return onSnapshot(
+      q,
+      snap => cb(snap.docs.map(d => toOrder(d.data())), undefined),
+      err => {
+        console.warn('[watchShopOrders] snapshot failed:', err);
+        cb([], err instanceof Error ? err : new Error(String(err)));
+      },
+    );
   },
 
   // ──────────────────────────────────────────────────────────
@@ -617,15 +647,20 @@ export const orderService = {
   // Available pickups churn fast (multiple delivery people racing), so
   // 15s is the upper bound the spec calls for. My-deliveries needs to
   // be snappier because the user is actively tapping buttons → 10s.
-  watchAvailableDeliveries(cb: (orders: Order[]) => void): () => void {
+  watchAvailableDeliveries(
+    cb: (orders: Order[], error?: Error) => void,
+  ): () => void {
     let cancelled = false;
     const poll = async () => {
       if (cancelled) return;
       try {
         const list = await this.listAvailableDeliveries();
-        if (!cancelled) cb(list);
+        if (!cancelled) cb(list, undefined);
       } catch (e) {
         console.warn('[watchAvailableDeliveries] poll failed:', e);
+        if (!cancelled) {
+          cb([], e instanceof Error ? e : new Error(String(e)));
+        }
       }
     };
     poll();
@@ -636,15 +671,20 @@ export const orderService = {
     };
   },
 
-  watchMyDeliveries(cb: (orders: Order[]) => void): () => void {
+  watchMyDeliveries(
+    cb: (orders: Order[], error?: Error) => void,
+  ): () => void {
     let cancelled = false;
     const poll = async () => {
       if (cancelled) return;
       try {
         const list = await this.listMyDeliveries();
-        if (!cancelled) cb(list);
+        if (!cancelled) cb(list, undefined);
       } catch (e) {
         console.warn('[watchMyDeliveries] poll failed:', e);
+        if (!cancelled) {
+          cb([], e instanceof Error ? e : new Error(String(e)));
+        }
       }
     };
     poll();
@@ -655,7 +695,9 @@ export const orderService = {
     };
   },
 
-  watchAllOrders(cb: (orders: Order[]) => void): () => void {
+  watchAllOrders(
+    cb: (orders: Order[], error?: Error) => void,
+  ): () => void {
     if (isNative) {
       // Admin dashboard polling. 10s cadence — admins typically have
       // the screen open longer; halving function invocations is worth
@@ -666,9 +708,12 @@ export const orderService = {
         try {
           const fn = getNativeFunctions().httpsCallable('listAllOrders');
           const result = await fn();
-          if (!cancelled) cb((result.data as any[]).map(toOrder));
+          if (!cancelled) cb((result.data as any[]).map(toOrder), undefined);
         } catch (e) {
           console.warn('[watchAllOrders] poll failed:', e);
+          if (!cancelled) {
+            cb([], e instanceof Error ? e : new Error(String(e)));
+          }
         }
       };
       poll();
@@ -683,8 +728,13 @@ export const orderService = {
       orderBy('createdAt', 'desc'),
       limit(100),
     );
-    return onSnapshot(q, snap => {
-      cb(snap.docs.map(d => toOrder(d.data())));
-    });
+    return onSnapshot(
+      q,
+      snap => cb(snap.docs.map(d => toOrder(d.data())), undefined),
+      err => {
+        console.warn('[watchAllOrders] snapshot failed:', err);
+        cb([], err instanceof Error ? err : new Error(String(err)));
+      },
+    );
   },
 };

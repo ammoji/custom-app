@@ -14,12 +14,17 @@
     "set-shop-owner": "tsx scripts/set-shop-owner.ts",
     "set-delivery": "tsx scripts/set-delivery.ts",
     "backfill-menus": "tsx scripts/backfill-shop-menus.ts",
+    "reset:test-data": "tsx scripts/reset-test-data.ts",
     "update-order": "tsx scripts/update-order.ts",
     "import-images": "tsx scripts/import-from-openfoodfacts.ts",
     "generate-branding": "tsx scripts/generate-branding.ts",
     "audit": "node scripts/audit-integrity.js",
     "test:rules": "firebase emulators:exec --only firestore,auth --project grocery-mvp-test \"jest --config tests/jest.config.js\"",
-    "test:rules:watch": "firebase emulators:exec --only firestore,auth --project grocery-mvp-test \"jest --config tests/jest.config.js --watch\""
+    "test:rules:watch": "firebase emulators:exec --only firestore,auth --project grocery-mvp-test \"jest --config tests/jest.config.js --watch\"",
+    "test:unit": "jest --config tests/jest.unit.config.js",
+    "test:unit:watch": "jest --config tests/jest.unit.config.js --watch",
+    "test": "npm run audit && npm run test:unit",
+    "test:full": "npm run audit && npm run test:unit && npm run test:rules"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",

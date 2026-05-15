@@ -660,6 +660,319 @@ Phase that introduced the requirement.
       Check token is rejected. Pairs with the Security checklist
       item near the top of this file. [pre-launch]
 
+## 🧪 Testing standard (project-wide, post-v2-iii hotfix)
+
+**Every PR going forward must include automated tests for what it
+changes or fixes.** Sudhir explicitly added this after the
+loader-stuck-forever incident — manual smoke testing missed both the
+shopService Plan-B gap AND the watcher silent-swallow bug because
+neither produced a console error and neither was covered by the
+rules tests. PRs without tests for new behaviour are rejected at
+review. The two test runners now in the repo:
+
+- [x] **Rules tests** — `npm run test:rules` (52/52 passing,
+      emulator-backed). Locks down `firestore.rules` behaviour by role.
+      Untouched by this PR.
+- [x] **Unit tests** — `npm run test:unit` (24/24 passing as of this
+      hotfix, in-process, no emulator). Covers Cloud Function pure
+      logic, service-layer Plan-B dispatch, watcher contract, and
+      screen-load state machines. Config:
+      `tests/jest.unit.config.js`. Module mocks under
+      `tests/__mocks__/` keep the suite running in plain Node — no
+      Metro / RN runtime needed.
+      [Phase 12a-v2-iii-hotfix-tests]
+- [ ] **CI integration for unit tests** — currently local-only
+      alongside `test:rules`. When the GitHub Actions workflow for
+      rules ships, add `npm run test:unit` to the same workflow.
+      [pre-launch]
+- [ ] **React Native rendering tests (RNTL)** — out of scope for the
+      hotfix. The unit-test infra deliberately avoids RNTL setup
+      cost; the loader-stuck-forever bug class is tested at the
+      hook/service layer instead. Revisit when the screen layer
+      stabilises post Phase 12c. [post-Phase 12c]
+
+### Resetting test data (before family role-play)
+
+After Phase 12c finishes and solo + automated testing wraps, the dev
+project is full of stale test orders, half-edited shops, ad-hoc
+admin-approved menus, and one-off sign-ins. Before the family role-
+play session we want fresh users walking up to the app cold — no
+prior orders, shops going through the registration + approval flow
+as workflow rather than legacy state. Use `scripts/reset-test-data.ts`
+for the wipe.
+
+**Default invocation (dry-run, safe):**
+
+```powershell
+$env:ADMIN_PROTECT_UID = "<your admin uid>"
+npm run reset:test-data
+```
+
+Prints the deletion plan (orders / shops / menu / users / auth) and
+exits without touching data. Audit log goes to
+`scripts/.cleanup-logs/<ISO-timestamp>.json` either way.
+
+**Real run (destructive, type-the-project-id confirmation required):**
+
+```powershell
+npm run reset:test-data -- --execute
+```
+
+The script asks you to type `grocery-mvp-dev` to confirm. Any other
+input aborts with exit 1, no data touched.
+
+**Selective flags:**
+
+| Flag | Effect |
+|---|---|
+| `--keep-shops` | Wipe orders + users + auth; preserve `/shops` + their `/menu` subcollections |
+| `--keep-orders` | Preserve `/orders`; wipe shops + menu + users + auth |
+| `--no-confirm` | Skip the interactive prompt (CI use). Requires `--execute` separately — never a single-flag operation. |
+| `--admin-uid=<uid>` | Override `ADMIN_PROTECT_UID` env var. |
+
+**What it wipes (default `--execute`):**
+
+1. `/orders/*`
+2. `/shops/{shopId}/menu/*` (subcollection per shop, traversed explicitly)
+3. `/shops/*`
+4. `/users/*` (except `ADMIN_PROTECT_UID`)
+5. Firebase Auth users (except `ADMIN_PROTECT_UID`, in batches of 1000)
+
+**What it preserves (allowlist-based — anything not above is untouched):**
+
+- `/products` — the full global catalog (expensive to rebuild)
+- Admin UID's auth account + all custom claims (admin/shopOwner/delivery)
+- Service accounts, Cloud Functions, rules, indexes
+- Any collection not explicitly listed above (e.g. future `/notifications`,
+  `/deliveryReports`) — the script is allowlist, not denylist, so a
+  new collection ships safe-by-default and only gets cleanup support
+  via a follow-up PR.
+
+**Safety guards (non-negotiable, pinned by tests):**
+
+- Hardcoded project allowlist (`ALLOWED_PROJECTS = ['grocery-mvp-dev']`)
+  — not configurable by flag or env. Editing the list requires a
+  separate, reviewable commit.
+- `ADMIN_PROTECT_UID` must be set; if it's not in the auth user list,
+  the script aborts (means the operator set the wrong UID, or the
+  admin has already been deleted — both warrant human attention).
+- `--no-confirm` rejected without `--execute` (typo guard).
+- Unknown flags rejected (typo guard — `--keep-shop` singular would
+  otherwise silently fall through to "delete everything").
+- Service account email is printed; if it contains "prod" or doesn't
+  contain "dev", a loud warning fires but the operator still has the
+  call (judgment belongs to the human).
+- Idempotent: re-running after a successful execute returns 0/0/0
+  counts.
+- Audit log JSON written every run (dry-run too) to
+  `scripts/.cleanup-logs/`. Git-ignored except for `.gitkeep`.
+
+**Out-of-scope (explicitly deferred):**
+
+- Razorpay test-payment cleanup — external system, dev-mode payments
+  are inert; the script just prints a reminder at the end.
+- Cloud Storage cleanup — no uploads yet; revisit when image upload
+  ships.
+- Cloud Functions / Scheduler state — separate ops concern.
+- Production wipe — the script refuses to run against anything other
+  than `grocery-mvp-dev`. Adding prod support is a deliberate,
+  reviewable commit, not a flag.
+
+Tests: `tests/scripts/reset-test-data.test.ts` (22 tests covering
+project guard, admin filter, flag parser, deletion plan). Pinned
+under `npm run test:unit` — total unit-test count is now 46/46
+(24 from the v2-iii hotfix + 22 from this PR). [Phase 12c-prep]
+
+## 🛒 Customer-side native fetch + loader-stuck-forever sweep (post-v2-iii hotfix)
+
+Sudhir hit "Browse shops near me" on his Android device and the loader
+spun forever. Root cause: `shopService.getNearbyShops` was reading
+Firestore directly through the Firebase Web SDK, which hangs on this
+RN setup (Expo SDK 54 + RN 0.81 + static frameworks — same
+incompatibility that motivated the orderService Plan-B). Compounded by
+`ShopListScreen` not having a try/catch around the load, so even a
+thrown `getDocs` would never reset the loader. Pinned here so future
+"loading forever" reports check the SDK split first.
+
+- [x] **`shopService.getNearbyShops` — Plan B via `listShopsPublic`**
+      — new public callable in `functions/src/index.ts` (next to
+      `listShopMenuPublic`), filters `status=='active'` server-side
+      (defense in depth with `firestore.rules`), computes
+      `distanceKm` via haversine, and sorts ascending by distance
+      when `userLocation` is provided. `src/services/shopService.ts`
+      now dispatches via `Platform.OS`: web keeps the existing
+      `getDocs(collection(db, 'shops'))` path; native uses RNFB
+      `httpsCallable('listShopsPublic')`. The
+      `FORCE_SHOW_ALL_SHOPS_IN_DEV` override is still applied
+      client-side on both paths so dev behaviour matches production.
+      [Phase 12a-v2-iii-hotfix]
+- [x] **`shopService.getById` — Plan B via reusing
+      `listShopMenuPublic`** — native path calls the existing
+      `listShopMenuPublic` callable (which already returns
+      `{ shop, items }`) instead of a fresh `getShopPublic` callable;
+      keeps the callable surface small. `not-found` errors from the
+      server (missing or non-active shops) are caught and surfaced as
+      `null` to match the web path's semantics. There are currently
+      no callers of `shopService.getById` in `src/`, but the method
+      is fixed pre-emptively rather than left as a future foot-gun.
+      [Phase 12a-v2-iii-hotfix]
+- [x] **`ShopListScreen` — guaranteed loading reset + error UI** —
+      `src/screens/ShopListScreen.tsx` now wraps the `load()` call
+      in `try/catch` and the initial-load effect's `setLoading(false)`
+      is called from a `finally` block that runs regardless of how
+      the promise settles. A new `error` state renders a red banner
+      with a Retry button (styled with `colors.danger` from
+      `src/constants/theme.ts`). The "no location yet" branch flips
+      `loading` to false instead of sitting on the spinner — the app
+      always falls back to `MOCK_USER_LOCATION` so this state should
+      be transient anyway, but it's no longer indistinguishable from
+      a stuck network call. [Phase 12a-v2-iii-hotfix]
+- [ ] **`productService.getByShop` needs Plan B** —
+      `src/services/productService.ts:6-10` reads
+      `query(collection(db, 'products'), where('shopId', '==', shopId))`
+      via the Web SDK. Reachable from native via
+      `src/screens/SearchScreen.tsx:53` (called inside the customer
+      Search flow). Has the same hang risk as the shop list bug —
+      Sudhir just didn't trip it because Search hits `getNearbyShops`
+      first and bails on the loader. Out of scope for this hotfix
+      because Search already has a TS error
+      (`shopService.getNearbyShops()` called with no args at
+      `SearchScreen.tsx:49`) which suggests the screen is partially
+      bit-rotted; bundle the Plan B refactor with a Search audit pass
+      so we don't half-fix a stale screen. Suggested fix: a
+      `listProductsByShopPublic` callable mirroring
+      `listShopsPublic` / `listShopMenuPublic`. [Phase 12a-v2-iii-followup]
+- [ ] **`productService.getById` needs Plan B (low priority)** —
+      `src/services/productService.ts:11-14`. Currently has zero
+      callers under `src/` (grep showed only `productService.getByShop`
+      reachable). Leave the method in place for now — it'll naturally
+      get the same Plan B treatment if/when something starts calling
+      it, or get deleted if v2-iii's per-shop-menu model fully
+      replaces it. [Phase 12a-v2-iii-followup]
+- [x] **`orderService` web-SDK reads / `onSnapshot`s — already
+      Plan B for the dispatch axis** — verified during the audit.
+      `listMine` (line 143), `watchOrder` (line 219),
+      `watchShopOrders` (line 537), and `watchAllOrders` (line 681)
+      all gate their Web SDK calls behind `if (isNative) { … return }`
+      blocks that route through RNFB callables (`listMyOrders`,
+      `getOrder`, `listShopOrders`, `listAllOrders`). The dispatch
+      itself is fine; the *callback contract* needed fixing — see
+      next entry. [audit-only]
+- [x] **Watcher contract refactor: `(data, error?)` callback shape**
+      — `src/services/orderService.ts` `watchOrder`,
+      `watchShopOrders`, `watchAllOrders`, `watchAvailableDeliveries`,
+      `watchMyDeliveries` previously called the consumer's callback
+      only on success and `console.warn`'d on failure. That left
+      `ShopOwnerDashboardScreen` (and any other consumer that flipped
+      `loading=false` only inside the success branch) spinning
+      forever on the very first failed poll. New contract: every
+      watcher invokes `cb(data, undefined)` on success and
+      `cb(emptyValue, error)` on failure. The web-side `onSnapshot`
+      paths pass an error callback through too, so behaviour is
+      symmetric. Pinned by
+      `tests/services/orderService.watchers.test.ts` — 9 tests
+      covering all five watchers + the cleanup-on-cancel path; the
+      "never silently swallows" assertion deliberate-break demo
+      reverted one watcher's catch and watched the test fail (1
+      failed / 8 passed), then re-applied the fix. `watchOrder`
+      keeps its `not-found` → `cb(null, undefined)` semantics
+      because consumers render that as an EmptyState, not an error.
+      [Phase 12a-v2-iii-hotfix]
+- [x] **Consumer screens adopted the new contract** —
+      `src/screens/shop/ShopOwnerDashboardScreen.tsx`,
+      `src/screens/admin/AdminOrdersScreen.tsx`,
+      `src/screens/OrderDetailScreen.tsx`,
+      `src/screens/delivery/DeliveryDashboardScreen.tsx`,
+      `src/screens/delivery/DeliveryOrderDetailScreen.tsx`, and
+      `src/screens/OrderConfirmationScreen.tsx` all destructure
+      `(data, err)` from the watcher cb, route errors to a banner
+      (Retry button on the dashboards, inline banner on the detail
+      screens) and ALWAYS flip `loading=false` on the first callback
+      regardless of err. Retry on the dashboards re-subscribes by
+      bumping a `retryNonce` state in the effect deps — re-creating
+      the watcher rather than racing its existing interval.
+      `OrderConfirmationScreen` adopts the contract minimally
+      (warns on err) because that screen renders an "Order saved"
+      splash regardless of whether the live order doc has loaded.
+      [Phase 12a-v2-iii-hotfix]
+- [x] **`ShopListScreen` extracted to a testable hook** — load /
+      error state machine moved to
+      `src/screens/ShopListScreen.useShopListData.ts` so it can be
+      unit-tested in plain Node. The screen is now a thin presenter
+      (`useShopListData(location ?? null)`); the analytics fire
+      stays in the screen because the hook deliberately stays free
+      of side-effects. `loadShopListOnce` is exported separately
+      and pinned by `tests/hooks/useShopListData.test.ts` (4 tests:
+      success, network-throw, no-message-prop fallback, settled-
+      not-rejected guard). [Phase 12a-v2-iii-hotfix]
+
+### Generic loader-stuck audit across `src/screens/`
+
+Audited every screen with `useState(true)` for the symptom pattern.
+Status (✓ = safe, ★ = fixed in this PR, ⚠ = logged follow-up):
+
+- ✓ `ShopListScreen` (★ — hook + try/finally + error UI)
+- ✓ `ShopDetailScreen` — already had try/catch/finally with
+  `errorMsg` state; no change needed.
+- ✓ `ShopOwnerDashboardScreen` (★ — new contract + retry banner)
+- ✓ `ShopMenuScreen` — try/finally guard around the fetch.
+- ✓ `ShopMenuItemEditScreen` — try/finally with cancellation guard.
+- ✓ `OrderDetailScreen` (★ — new contract + inline error banner)
+- ✓ `DeliveryOrderDetailScreen` (★ — new contract + inline banner)
+- ✓ `DeliveryDashboardScreen` (★ — new contract on both watchers
+  with reconcileError merging; banner shows only when BOTH watchers
+  have errored, so a single-source blip stays quiet)
+- ✓ `AdminOrdersScreen` (★ — new contract + retry banner)
+- ✓ `OrderConfirmationScreen` (★ — new contract, log-only)
+- ⚠ `OrdersScreen` (`src/screens/OrdersScreen.tsx:31-33`) —
+  `await orderService.listMine(uid)` is wrapped in try/catch but
+  the catch only does `console.warn`; on failure the screen
+  silently flips to "No orders" instead of surfacing a retry. Not
+  the loader-stuck bug class (the finally path works), but it's a
+  sibling silent-failure that the new testing standard would have
+  caught. Fix when the screen gets touched next. Suggested:
+  copy the `(data, err)` pattern from the watcher refactor.
+  [Phase 12a-v2-iii-followup]
+- ⚠ `WaitingForApprovalScreen` (`src/screens/roles/WaitingForApprovalScreen.tsx`)
+  — polling `getShopForOwner`; catch sets loading false but logs
+  warn only. User just sees the loading vanish with no shop card
+  and no error message. Same low-severity sibling. Fix when next
+  touched. [Phase 12a-v2-iii-followup]
+- ⚠ Admin screens (`PendingShopsScreen`, `ShopDetailManagementScreen`,
+  `UserManagementScreen`, `UserDetailScreen`,
+  `ShopRegistrationDetailScreen`, `ShopManagementScreen`) — not
+  exercised in this audit; admin role's first launch will surface
+  any loader issues. Out of customer/owner/delivery happy path so
+  acceptable to defer. Add to a future "admin polish" sweep.
+  [Phase 12a-v2-iii-followup]
+
+### Tests added in this PR
+
+- [x] `tests/functions/listShopsPublic.test.ts` — 5 tests for the
+      `rankShopsByDistance` pure helper extracted from
+      `functions/src/index.ts`. Covers sort, no-location passthrough,
+      malformed-location fallback, no-location-shop sentinel, and
+      input-immutability.
+- [x] `tests/services/shopService.test.ts` — 6 tests for Plan-B
+      dispatch. Native + web paths for both `getNearbyShops` and
+      `getById`, plus error propagation and not-found → null
+      mapping.
+- [x] `tests/services/orderService.watchers.test.ts` — 9 tests for
+      the new watcher contract across all five `watch*` methods.
+      Covers success, failure (the bug being fixed), watchOrder's
+      not-found special case, and cleanup-on-cancel.
+- [x] `tests/hooks/useShopListData.test.ts` — 4 tests for the
+      ShopList load state machine, including the
+      "loadShopListOnce never re-throws" regression guard so a
+      future contributor can't accidentally bring back the
+      loader-stuck-forever symptom by re-throwing.
+- **Total new tests: 24** (tests/jest.unit.config.js suite). Plus
+  pre-existing 52 rules tests untouched. New `npm run test:unit`
+  script + module-mock harness under `tests/__mocks__/` (one stub
+  per heavy native dep — `react-native`, `@react-native-firebase/app`,
+  `firebase/firestore`, `firebase/functions`, `services/firebase`,
+  `services/sentry`).
+
 ---
 
 **Maintenance rule:** any time we add a temporary dev hack, env-only flag,

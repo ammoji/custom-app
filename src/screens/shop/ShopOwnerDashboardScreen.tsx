@@ -60,20 +60,35 @@ export default function ShopOwnerDashboardScreen() {
 
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<Record<string, OrderStatus | null>>({});
   const [showAll, setShowAll] = useState(false);
+  // Manual remount lever for the watcher: bumping this re-runs the
+  // effect and re-subscribes after a Retry tap. Re-creating the
+  // watcher is the right thing to do here — calling its own poll
+  // again from outside would race the existing interval.
+  const [retryNonce, setRetryNonce] = useState(0);
 
   useEffect(() => {
     if (!isShopOwner || !shopId) {
       setLoading(false);
       return;
     }
-    const unsubscribe = orderService.watchShopOrders(shopId, list => {
-      setOrders(list);
+    const unsubscribe = orderService.watchShopOrders(shopId, (list, err) => {
+      if (err) {
+        setError(err.message || 'Could not load orders. Pull to refresh.');
+        setOrders([]);
+      } else {
+        setOrders(list);
+        setError(null);
+      }
+      // ALWAYS clear loading on the first callback, regardless of
+      // success/failure — the whole reason for the watcher contract
+      // refactor (post-loader-spin hotfix).
       setLoading(false);
     });
     return unsubscribe;
-  }, [isShopOwner, shopId]);
+  }, [isShopOwner, shopId, retryNonce]);
 
   const stats = useMemo(() => {
     let countToday = 0;
@@ -139,6 +154,19 @@ export default function ShopOwnerDashboardScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <ScreenHeader title="My Shop" onBack={() => nav.goBack()} />
+      {error && (
+        <View style={styles.errorBanner}>
+          <Text style={styles.errorText}>{error}</Text>
+          <Pressable
+            onPress={() => setRetryNonce(n => n + 1)}
+            style={styles.retryBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading orders"
+          >
+            <Text style={styles.retryText}>Retry</Text>
+          </Pressable>
+        </View>
+      )}
       <FlatList
         data={visibleOrders}
         keyExtractor={o => o.id}
@@ -348,4 +376,29 @@ const styles = StyleSheet.create({
   },
   manageMenuText: { ...typography.bodyBold },
   manageMenuChevron: { ...typography.h2, color: colors.textSecondary },
+  errorBanner: {
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.md,
+    padding: spacing.md,
+    backgroundColor: '#FEF2F2',
+    borderColor: colors.danger,
+    borderWidth: 1,
+    borderRadius: radii.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  errorText: {
+    ...typography.body,
+    color: colors.danger,
+    flex: 1,
+    marginRight: spacing.md,
+  },
+  retryBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.danger,
+    borderRadius: radii.sm,
+  },
+  retryText: { ...typography.bodyBold, color: '#fff' },
 });

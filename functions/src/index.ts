@@ -2586,3 +2586,76 @@ export const listShopMenuPublic = onCall<{ shopId: string }>(
     };
   },
 );
+
+// Hotfix (post-v2-iii): the customer-facing shop list previously hit
+// Firestore directly through the Firebase Web SDK from native, which
+// hangs on RN here (same incompatibility that motivated the
+// listMyOrders / getOrder Plan-B in orderService). This callable
+// gives native a Plan-B route — read shops server-side, optionally
+// compute distance + sort by it, return a plain JSON payload.
+//
+// Public callable (no auth) to mirror listShopMenuPublic. Filter
+// `status == 'active'` matches firestore.rules and the client-side
+// filter — defense in depth. Legacy shops without a `status` field
+// are excluded; the fix for those is scripts/backfill-shop-menus.ts,
+// not loosening this filter.
+export type LatLng = { lat: number; lng: number };
+
+export function haversineKm(a: LatLng, b: LatLng): number {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+// Exported as a pure helper so tests can verify the rank/filter logic
+// without spinning up firebase-admin or the emulator. The Firestore
+// query (status == 'active') already excludes legacy no-status shops
+// and pending/suspended/rejected ones; this function just decorates
+// the surviving rows with distanceKm and sorts them.
+export function rankShopsByDistance<T extends { location?: LatLng }>(
+  shops: T[],
+  userLocation: LatLng | undefined,
+): (T & { distanceKm?: number })[] {
+  const out = shops.map(s => ({ ...s }) as T & { distanceKm?: number });
+  if (
+    !userLocation ||
+    typeof userLocation.lat !== 'number' ||
+    typeof userLocation.lng !== 'number'
+  ) {
+    return out;
+  }
+  for (const s of out) {
+    if (s.location?.lat != null && s.location?.lng != null) {
+      s.distanceKm = haversineKm(userLocation, s.location);
+    }
+  }
+  out.sort(
+    (a, b) => (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity),
+  );
+  return out;
+}
+
+export const listShopsPublic = onCall<{ userLocation?: LatLng }>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const userLocation = request.data?.userLocation;
+
+    const snap = await db
+      .collection('shops')
+      .where('status', '==', 'active')
+      .get();
+
+    const rows = snap.docs.map(
+      d => ({ id: d.id, ...d.data() }) as Record<string, any>,
+    );
+    const shops = rankShopsByDistance(rows, userLocation);
+    return { shops };
+  },
+);

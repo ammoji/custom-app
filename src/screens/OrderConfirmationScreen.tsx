@@ -15,7 +15,19 @@ export default function OrderConfirmationScreen() {
   const [order, setOrder] = useState<Order | null>(null);
 
   useEffect(() => {
-    const unsub = orderService.watchOrder(orderId, setOrder);
+    // Adopting the (data, error?) watcher contract here is mostly
+    // formal — this screen renders an "Order saved" splash regardless
+    // of whether `order` is populated, and a watcher error here would
+    // just mean the live status chip stays placeholder for a few
+    // seconds. Still, log the error so we don't silently lose
+    // intermittent failures during launch.
+    const unsub = orderService.watchOrder(orderId, (o, err) => {
+      if (err) {
+        console.warn('[OrderConfirmation] watchOrder failed:', err);
+        return;
+      }
+      setOrder(o);
+    });
     return unsub;
   }, [orderId]);
 

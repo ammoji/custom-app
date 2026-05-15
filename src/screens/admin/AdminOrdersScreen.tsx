@@ -1,6 +1,6 @@
 import { useNavigation } from '@react-navigation/native';
 import React, { useEffect, useState } from 'react';
-import { Alert, FlatList, StyleSheet, Text, View } from 'react-native';
+import { Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../../components/common/Button';
 import EmptyState from '../../components/common/EmptyState';
@@ -23,19 +23,28 @@ export default function AdminOrdersScreen() {
   const isAdmin = useAuthStore(s => s.isAdmin);
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<Record<string, OrderStatus | null>>({});
+  const [retryNonce, setRetryNonce] = useState(0);
 
   useEffect(() => {
     if (!isAdmin) {
       setLoading(false);
       return;
     }
-    const unsubscribe = orderService.watchAllOrders(list => {
-      setOrders(list);
+    const unsubscribe = orderService.watchAllOrders((list, err) => {
+      if (err) {
+        setError(err.message || 'Could not load orders. Tap Retry.');
+        setOrders([]);
+      } else {
+        setOrders(list);
+        setError(null);
+      }
+      // ALWAYS — see watcher contract refactor.
       setLoading(false);
     });
     return unsubscribe;
-  }, [isAdmin]);
+  }, [isAdmin, retryNonce]);
 
   if (!isAdmin) {
     return (
@@ -87,6 +96,19 @@ export default function AdminOrdersScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <ScreenHeader title="Shop Dashboard" onBack={() => nav.goBack()} />
+      {error && (
+        <View style={styles.errorBanner}>
+          <Text style={styles.errorText}>{error}</Text>
+          <Pressable
+            onPress={() => setRetryNonce(n => n + 1)}
+            style={styles.retryBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading orders"
+          >
+            <Text style={styles.retryText}>Retry</Text>
+          </Pressable>
+        </View>
+      )}
       <FlatList
         data={orders}
         keyExtractor={o => o.id}
@@ -176,4 +198,29 @@ const styles = StyleSheet.create({
   },
   actionBtn: { flexGrow: 1, minWidth: 140 },
   cancelBtn: { backgroundColor: '#fde2e2' },
+  errorBanner: {
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.md,
+    padding: spacing.md,
+    backgroundColor: '#FEF2F2',
+    borderColor: colors.danger,
+    borderWidth: 1,
+    borderRadius: radii.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  errorText: {
+    ...typography.body,
+    color: colors.danger,
+    flex: 1,
+    marginRight: spacing.md,
+  },
+  retryBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.danger,
+    borderRadius: radii.sm,
+  },
+  retryText: { ...typography.bodyBold, color: '#fff' },
 });

@@ -1,5 +1,5 @@
 import { useNavigation } from '@react-navigation/native';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import EmptyState from '../components/common/EmptyState';
@@ -9,45 +9,41 @@ import ScreenHeader from '../components/common/ScreenHeader';
 import ShopCard from '../components/shop/ShopCard';
 import { colors, radii, spacing, typography } from '../constants/theme';
 import { Analytics } from '../services/analytics';
-import { shopService } from '../services/shopService';
 import { useCartStore } from '../store/useCartStore';
 import { useLocationStore } from '../store/useLocationStore';
-import { Shop } from '../types';
+import type { Shop } from '../types';
 import { formatRupees } from '../utils/format';
+import { useShopListData } from './ShopListScreen.useShopListData';
 
 export default function ShopListScreen() {
   const nav = useNavigation<any>();
-  const [shops, setShops] = useState<Shop[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [query, setQuery] = useState('');
 
   const itemCount = useCartStore(s => s.itemCount());
   const total = useCartStore(s => s.total());
   const location = useLocationStore(s => s.location);
 
-  const load = useCallback(async () => {
-    if (!location) return;
-    const data = await shopService.getNearbyShops(location);
-    setShops(data);
-    Analytics.view_shop_list({ count: data.length });
-  }, [location]);
+  // State machine extracted to ./ShopListScreen.useShopListData so
+  // the loader-stuck-forever bug class can be unit-tested without
+  // mounting React Native components. The hook's contract:
+  //   - `loading` ALWAYS resets in finally
+  //   - errors surface via `error`, never via thrown promises
+  //   - `reload()` re-runs the same load with the same guarantee
+  const { shops, loading, refreshing, error, reload } = useShopListData(
+    location ?? null,
+  );
 
+  // Fire the view_shop_list analytics event on each successful load.
+  // Done here rather than in the hook so the hook stays pure / testable.
+  const lastLoggedRef = useRef<number>(-1);
   useEffect(() => {
-    if (!location) return;
-    (async () => {
-      setLoading(true);
-      await load();
-      setLoading(false);
-    })();
-  }, [load, location]);
+    if (loading || error) return;
+    if (lastLoggedRef.current === shops.length) return;
+    lastLoggedRef.current = shops.length;
+    Analytics.view_shop_list({ count: shops.length });
+  }, [loading, error, shops.length]);
 
-  const onRefresh = useCallback(async () => {
-    if (!location) return;
-    setRefreshing(true);
-    await load();
-    setRefreshing(false);
-  }, [load, location]);
+  const onRefresh = reload;
 
   // Phase 12a-v2-iii: customers see only `status === 'active'` shops
   // (or legacy seeded shops without a status field — see
@@ -57,7 +53,7 @@ export default function ShopListScreen() {
   // every state via Shop Management. The active-shop guarantee is
   // also enforced server-side in `listShopMenuPublic` so a leaked
   // shop URL can't bypass this filter.
-  const filtered = shops.filter(s => {
+  const filtered = shops.filter((s: Shop) => {
     const status = (s as Shop & { status?: string }).status;
     const isLive = status === undefined || status === 'active';
     if (!isLive) return false;
@@ -83,6 +79,19 @@ export default function ShopListScreen() {
       <View style={styles.searchWrap}>
         <Input value={query} onChangeText={setQuery} placeholder="Search shop name" />
       </View>
+      {error && !loading && (
+        <View style={styles.errorBanner}>
+          <Text style={styles.errorText}>{error}</Text>
+          <Pressable
+            onPress={onRefresh}
+            style={styles.retryBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading shops"
+          >
+            <Text style={styles.retryText}>Retry</Text>
+          </Pressable>
+        </View>
+      )}
       {loading ? (
         <Loader fullScreen />
       ) : (
@@ -143,4 +152,29 @@ const styles = StyleSheet.create({
   },
   cartText: { ...typography.bodyBold, color: '#fff' },
   cartCta: { ...typography.bodyBold, color: '#fff' },
+  errorBanner: {
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.md,
+    padding: spacing.md,
+    backgroundColor: '#FEF2F2', // light red wash
+    borderColor: colors.danger,
+    borderWidth: 1,
+    borderRadius: radii.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  errorText: {
+    ...typography.body,
+    color: colors.danger,
+    flex: 1,
+    marginRight: spacing.md,
+  },
+  retryBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.danger,
+    borderRadius: radii.sm,
+  },
+  retryText: { ...typography.bodyBold, color: '#fff' },
 });

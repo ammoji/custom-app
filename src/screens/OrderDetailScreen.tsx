@@ -54,15 +54,24 @@ export default function OrderDetailScreen() {
   const [paying, setPaying] = useState(false);
   const [cancelling, setCancelling] = useState(false);
 
+  const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let firstLoad = true;
-    const unsub = orderService.watchOrder(orderId, o => {
-      setOrder(o);
-      setLoading(false);
-      if (firstLoad && o) {
-        firstLoad = false;
-        Analytics.view_order({ order_id: o.id, status: o.status });
+    const unsub = orderService.watchOrder(orderId, (o, err) => {
+      if (err) {
+        setError(err.message || 'Could not load order. Pull back later.');
+        // Keep `order` as-is so any previously-displayed data stays
+        // on screen; just show the error banner above it.
+      } else {
+        setError(null);
+        setOrder(o);
+        if (firstLoad && o) {
+          firstLoad = false;
+          Analytics.view_order({ order_id: o.id, status: o.status });
+        }
       }
+      // ALWAYS — see watcher contract refactor.
+      setLoading(false);
     });
     return unsub;
   }, [orderId]);
@@ -95,6 +104,11 @@ export default function OrderDetailScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <ScreenHeader title="Order details" onBack={() => nav.goBack()} />
+      {error && (
+        <View style={styles.errorBanner}>
+          <Text style={styles.errorText}>{error}</Text>
+        </View>
+      )}
       <ScrollView contentContainerStyle={styles.content}>
         {/* Status header */}
         <View style={styles.statusCard}>
@@ -388,4 +402,14 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     marginTop: spacing.xs,
   },
+  errorBanner: {
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.md,
+    padding: spacing.md,
+    backgroundColor: '#FEF2F2',
+    borderColor: colors.danger,
+    borderWidth: 1,
+    borderRadius: radii.md,
+  },
+  errorText: { ...typography.body, color: colors.danger },
 });

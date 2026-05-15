@@ -55,3 +55,8 @@ ui-debug.log
 auth-debug.log
 firebase-export-*/
 coverage/
+
+# Audit logs from scripts/reset-test-data.ts — keep the directory
+# tracked (via .gitkeep) but never commit individual run logs.
+scripts/.cleanup-logs/*
+!scripts/.cleanup-logs/.gitkeep

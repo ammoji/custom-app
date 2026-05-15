@@ -1,13 +1,13 @@
 import { useNavigation } from '@react-navigation/native';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Alert,
-  FlatList,
-  Pressable,
-  StyleSheet,
-  Switch,
-  Text,
-  View,
+    Alert,
+    FlatList,
+    Pressable,
+    StyleSheet,
+    Switch,
+    Text,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../../components/common/Button';
@@ -44,41 +44,74 @@ export default function DeliveryDashboardScreen() {
   const [available, setAvailable] = useState<Order[]>([]);
   const [mine, setMine] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [online, setOnline] = useState(false);
   const [togglingOnline, setTogglingOnline] = useState(false);
   const [pendingClaim, setPendingClaim] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [showAvailable, setShowAvailable] = useState(true);
   const [showMine, setShowMine] = useState(true);
+  const [retryNonce, setRetryNonce] = useState(0);
 
   // Subscribe to the two pollers. Both fire immediately on mount and
   // then every 10/15s respectively. The "loading" flag flips once
-  // EITHER list arrives — good enough as a "first paint" signal.
+  // EITHER list's first callback arrives — success OR failure — so a
+  // failed first poll on either watcher can never leave the loader
+  // spinning forever.
   useEffect(() => {
     if (!isDelivery) {
       setLoading(false);
       return;
     }
     let firstSeen = false;
+    let availableErr: Error | null = null;
+    let mineErr: Error | null = null;
+    const reconcileError = () => {
+      // Only show error banner if BOTH watchers have errored — if just
+      // one source is healthy, render whatever it produced and stay
+      // quiet. Latest error wins so the user sees the freshest cause.
+      if (availableErr && mineErr) {
+        setError(
+          (mineErr.message || availableErr.message) ||
+            'Could not load deliveries. Tap Retry.',
+        );
+      } else {
+        setError(null);
+      }
+    };
     const markLoaded = () => {
       if (!firstSeen) {
         firstSeen = true;
         setLoading(false);
       }
     };
-    const off1 = orderService.watchAvailableDeliveries(list => {
-      setAvailable(list);
+    const off1 = orderService.watchAvailableDeliveries((list, err) => {
+      if (err) {
+        availableErr = err;
+        setAvailable([]);
+      } else {
+        availableErr = null;
+        setAvailable(list);
+      }
+      reconcileError();
       markLoaded();
     });
-    const off2 = orderService.watchMyDeliveries(list => {
-      setMine(list);
+    const off2 = orderService.watchMyDeliveries((list, err) => {
+      if (err) {
+        mineErr = err;
+        setMine([]);
+      } else {
+        mineErr = null;
+        setMine(list);
+      }
+      reconcileError();
       markLoaded();
     });
     return () => {
       off1();
       off2();
     };
-  }, [isDelivery]);
+  }, [isDelivery, retryNonce]);
 
   const stats = useMemo(() => {
     let completedToday = 0;
@@ -224,6 +257,19 @@ export default function DeliveryDashboardScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <ScreenHeader title="Delivery Dashboard" onBack={() => nav.goBack()} />
+      {error && (
+        <View style={styles.errorBanner}>
+          <Text style={styles.errorText}>{error}</Text>
+          <Pressable
+            onPress={() => setRetryNonce(n => n + 1)}
+            style={styles.retryBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading deliveries"
+          >
+            <Text style={styles.retryText}>Retry</Text>
+          </Pressable>
+        </View>
+      )}
       <FlatList
         data={showAvailable ? available : []}
         keyExtractor={o => `avail-${o.id}`}
@@ -580,4 +626,29 @@ const styles = StyleSheet.create({
     marginTop: spacing.xs,
   },
   meta: { ...typography.body, marginTop: spacing.sm },
+  errorBanner: {
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.md,
+    padding: spacing.md,
+    backgroundColor: '#FEF2F2',
+    borderColor: colors.danger,
+    borderWidth: 1,
+    borderRadius: radii.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  errorText: {
+    ...typography.body,
+    color: colors.danger,
+    flex: 1,
+    marginRight: spacing.md,
+  },
+  retryBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.danger,
+    borderRadius: radii.sm,
+  },
+  retryText: { ...typography.bodyBold, color: '#fff' },
 });
