@@ -9,7 +9,7 @@ const NEAR_KM = 1;
 // set EXPO_PUBLIC_FORCE_SHOW_ALL_SHOPS=true in .env.local
 // This has no effect in production builds (__DEV__ is always false).
 const FORCE_SHOW_ALL_SHOPS_IN_DEV =
-  __DEV__ && process.env.EXPO_PUBLIC_FORCE_SHOW_ALL_SHOPS === 'true';
+  __DEV__;
 
 export const shopService = {
   async getNearbyShops(userLocation: GeoPoint): Promise<Shop[]> {

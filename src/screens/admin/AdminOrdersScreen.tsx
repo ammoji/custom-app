@@ -50,10 +50,24 @@ export default function AdminOrdersScreen() {
   }
 
   const handleAction = async (orderId: string, newStatus: OrderStatus) => {
+    // Optimistic update: flip the chip immediately so the UI doesn't
+    // wait up to 10s for the next watchAllOrders poll cycle. Capture the
+    // previous list BEFORE the setOrders call so a rollback restores the
+    // exact pre-optimistic state — using `prev` inside setOrders would
+    // close over the already-mutated value.
+    const previousOrders = orders;
+    setOrders(prev =>
+      prev.map(o => (o.id === orderId ? { ...o, status: newStatus } : o)),
+    );
     setPending(prev => ({ ...prev, [orderId]: newStatus }));
     try {
       await orderService.updateOrderStatus({ orderId, newStatus });
+      // Success: next poll (within 10s) confirms the server state.
+      // No success toast — optimistic UX implies confirmation by absence
+      // of an error.
     } catch (err: any) {
+      // Rollback the optimistic write and surface the failure.
+      setOrders(previousOrders);
       const message = err?.message || 'Failed to update order status.';
       Alert.alert('Update failed', message);
     } finally {

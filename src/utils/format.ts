@@ -17,6 +17,20 @@ export function formatDistance(km?: number): string {
   return `${km.toFixed(1)} km`;
 }
 
+// True iff the given epoch-ms timestamp falls on the local-device
+// "today" (calendar date, not last-24h). Phase 12b uses this for the
+// dashboard "deliveries completed today" counter.
+export function isToday(timestamp: number | null | undefined): boolean {
+  if (!timestamp) return false;
+  const d = new Date(timestamp);
+  const now = new Date();
+  return (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  );
+}
+
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 function formatTimeOfDay(d: Date): string {

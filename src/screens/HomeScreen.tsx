@@ -1,13 +1,15 @@
-import { useNavigation } from '@react-navigation/native';
-import React from 'react';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import React, { useCallback, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../components/common/Button';
 import { CATEGORIES } from '../constants/categories';
 import { colors, radii, spacing, typography } from '../constants/theme';
+import { orderService } from '../services/orderService';
 import { useAuthStore } from '../store/useAuthStore';
 import { useCartStore } from '../store/useCartStore';
 import { useLocationStore } from '../store/useLocationStore';
+import type { Shop } from '../types';
 import { formatRupees } from '../utils/format';
 
 export default function HomeScreen() {
@@ -17,7 +19,50 @@ export default function HomeScreen() {
   const uid = useAuthStore(s => s.uid);
   const isAnonymous = useAuthStore(s => s.isAnonymous);
   const isAdmin = useAuthStore(s => s.isAdmin);
+  const isShopOwner = useAuthStore(s => s.isShopOwner);
+  const isDelivery = useAuthStore(s => s.isDelivery);
   const source = useLocationStore(s => s.source);
+
+  // Phase 12a-v2-i. If the user has a shop in flight (registered but
+  // not yet approved, or rejected), surface a "Awaiting approval"
+  // tile so they can re-open the WaitingForApproval screen without
+  // hunting through nav. We refetch on focus so a freshly-rejected
+  // shop appears as soon as the user returns to Home.
+  const [pendingShop, setPendingShop] = useState<Shop | null>(null);
+  useFocusEffect(
+    useCallback(() => {
+      if (isAnonymous || isShopOwner) {
+        setPendingShop(null);
+        return;
+      }
+      let cancelled = false;
+      orderService
+        .getShopForOwner()
+        .then(shop => {
+          if (cancelled) return;
+          // Active is handled by the isShopOwner branch (claim is set
+          // by approveShop). We only show this tile for in-flight or
+          // rejected registrations.
+          if (shop && shop.status !== 'active') {
+            setPendingShop(shop);
+          } else {
+            setPendingShop(null);
+          }
+        })
+        .catch(err => {
+          // Best-effort — failing to fetch shouldn't block Home.
+          console.warn('[Home] getShopForOwner failed:', err);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }, [isAnonymous, isShopOwner]),
+  );
+
+  // A user has a "non-customer role" when they wear at least one extra
+  // hat. We use this to decide whether to render the "Your Roles"
+  // section header.
+  const hasAnyExtraRole = isAdmin || isShopOwner || isDelivery;
   const locationLabel =
     source === 'gps'
       ? 'Deliver to your location'
@@ -82,18 +127,6 @@ export default function HomeScreen() {
           <Text style={styles.ordersChevron}>›</Text>
         </Pressable>
 
-        {isAdmin && (
-          <Pressable
-            style={styles.adminRow}
-            onPress={() => nav.navigate('AdminOrders')}
-            accessibilityRole="button"
-            accessibilityLabel="Shop Dashboard"
-          >
-            <Text style={styles.adminText}>🛠️  Shop Dashboard</Text>
-            <Text style={styles.adminChevron}>›</Text>
-          </Pressable>
-        )}
-
         {isAnonymous && (
           <Pressable
             style={styles.signInRow}
@@ -106,6 +139,141 @@ export default function HomeScreen() {
           </Pressable>
         )}
 
+        {hasAnyExtraRole && (
+          <>
+            <Text style={[styles.sectionTitle, { paddingHorizontal: spacing.lg }]}>
+              Your Roles
+            </Text>
+            {isShopOwner && (
+              <Pressable
+                style={styles.roleRow}
+                onPress={() => nav.navigate('ShopOwnerDashboard')}
+                accessibilityRole="button"
+                accessibilityLabel="Shop Dashboard"
+              >
+                <Text style={styles.roleText}>🛍️  Shop Dashboard</Text>
+                <Text style={styles.roleChevron}>›</Text>
+              </Pressable>
+            )}
+            {isDelivery && (
+              <Pressable
+                style={styles.roleRow}
+                onPress={() => nav.navigate('DeliveryDashboard')}
+                accessibilityRole="button"
+                accessibilityLabel="Delivery Dashboard"
+              >
+                <Text style={styles.roleText}>🚚  Delivery Dashboard</Text>
+                <Text style={styles.roleChevron}>›</Text>
+              </Pressable>
+            )}
+            {isAdmin && (
+              <Pressable
+                style={styles.adminRow}
+                onPress={() => nav.navigate('AdminOrders')}
+                accessibilityRole="button"
+                accessibilityLabel="Admin Dashboard"
+              >
+                <Text style={styles.adminText}>🛠️  Admin Dashboard</Text>
+                <Text style={styles.adminChevron}>›</Text>
+              </Pressable>
+            )}
+            {isAdmin && (
+              <Pressable
+                style={styles.adminRow}
+                onPress={() => nav.navigate('PendingShops')}
+                accessibilityRole="button"
+                accessibilityLabel="Pending Shop Approvals"
+              >
+                <Text style={styles.adminText}>📋  Pending Shop Approvals</Text>
+                <Text style={styles.adminChevron}>›</Text>
+              </Pressable>
+            )}
+            {isAdmin && (
+              <Pressable
+                style={styles.adminRow}
+                onPress={() => nav.navigate('UserManagement')}
+                accessibilityRole="button"
+                accessibilityLabel="User Management"
+              >
+                <Text style={styles.adminText}>👥  User Management</Text>
+                <Text style={styles.adminChevron}>›</Text>
+              </Pressable>
+            )}
+            {isAdmin && (
+              <Pressable
+                style={styles.adminRow}
+                onPress={() => nav.navigate('ShopManagement')}
+                accessibilityRole="button"
+                accessibilityLabel="All Shops"
+              >
+                <Text style={styles.adminText}>🏪  All Shops</Text>
+                <Text style={styles.adminChevron}>›</Text>
+              </Pressable>
+            )}
+          </>
+        )}
+
+        {pendingShop && (
+          <Pressable
+            style={styles.pendingRow}
+            onPress={() =>
+              nav.navigate('WaitingForApproval', { shopId: pendingShop.id })
+            }
+            accessibilityRole="button"
+            accessibilityLabel={`Awaiting approval for ${pendingShop.name}`}
+          >
+            <Text style={styles.pendingText}>
+              {pendingShop.status === 'rejected' ? '❌' : '📋'}{'  '}
+              {pendingShop.status === 'rejected'
+                ? `Rejected: ${pendingShop.name}`
+                : `Awaiting approval for ${pendingShop.name}`}
+            </Text>
+            <Text style={styles.pendingChevron}>›</Text>
+          </Pressable>
+        )}
+
+        {/* Opt-in section. Hide rows the user has already taken. The
+            section header itself is hidden when there's nothing to
+            opt into (i.e. user holds both roles already). Anonymous
+            users can still see the section — claimShop / becomeDelivery
+            require auth, and the BecomeShopOwner / BecomeDeliveryPartner
+            screens render a "sign in first" empty state. That flow
+            beats hiding the rows entirely (anon users wouldn't know
+            these features exist). */}
+        {(!isShopOwner || !isDelivery) && (
+          <>
+            <Text style={[styles.sectionTitle, { paddingHorizontal: spacing.lg }]}>
+              Become more
+            </Text>
+            {/* Hide the "Open a shop" CTA when the user already has a
+                registration in flight — the pendingShop tile above
+                covers that case. Once the shop is approved the
+                isShopOwner branch above takes over instead. */}
+            {!isShopOwner && !pendingShop && (
+              <Pressable
+                style={styles.optInRow}
+                onPress={() => nav.navigate('RegisterShop')}
+                accessibilityRole="button"
+                accessibilityLabel="Open a shop on Kirana Mart"
+              >
+                <Text style={styles.optInText}>🏪  Open a shop on Kirana Mart</Text>
+                <Text style={styles.optInChevron}>›</Text>
+              </Pressable>
+            )}
+            {!isDelivery && (
+              <Pressable
+                style={styles.optInRow}
+                onPress={() => nav.navigate('BecomeDeliveryPartner')}
+                accessibilityRole="button"
+                accessibilityLabel="Become a delivery partner"
+              >
+                <Text style={styles.optInText}>🚲  Become a delivery partner</Text>
+                <Text style={styles.optInChevron}>›</Text>
+              </Pressable>
+            )}
+          </>
+        )}
+
         <Text style={[styles.sectionTitle, { paddingHorizontal: spacing.lg }]}>How it works</Text>
         <View style={[styles.steps, { paddingHorizontal: spacing.lg }]}>
           <Step n="1" title="Pick a shop" desc="Browse nearby kirana stores" />
@@ -115,7 +283,10 @@ export default function HomeScreen() {
 
         {__DEV__ && (
           <Text style={{ fontSize: 10, color: colors.textMuted, marginTop: spacing.xl, paddingHorizontal: spacing.lg }}>
-            uid: {uid ?? 'pending'} {isAnonymous ? '[Anon]' : ''} {isAdmin ? '[Admin]' : '[Not admin]'}
+            uid: {uid ?? 'pending'} {isAnonymous ? '[Anon]' : ''}{' '}
+            {isAdmin ? '[Admin]' : ''}
+            {isShopOwner ? '[ShopOwner]' : ''}
+            {isDelivery ? '[Delivery]' : ''}
           </Text>
         )}
       </ScrollView>
@@ -236,6 +407,57 @@ const styles = StyleSheet.create({
   },
   signInText: { ...typography.body, color: colors.textPrimary },
   signInChevron: { ...typography.h2, color: colors.textSecondary },
+  // "Your Roles" — solid green for the active shop owner dashboard
+  // entry (mirrors the previous adminRow look). The disabled variant
+  // grays it out to signal "claimed but not yet usable".
+  roleRow: {
+    marginTop: spacing.md,
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.primary,
+    borderRadius: radii.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  roleRowDisabled: { backgroundColor: colors.border, opacity: 0.7 },
+  roleText: { ...typography.bodyBold, color: '#fff' },
+  roleTextDisabled: { color: colors.textSecondary },
+  roleChevron: { ...typography.h2, color: '#fff' },
+  // "Become more" — outlined cards that draw the eye but don't compete
+  // with active role tiles.
+  optInRow: {
+    marginTop: spacing.md,
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.primaryLight,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  optInText: { ...typography.bodyBold, color: colors.primary },
+  optInChevron: { ...typography.h2, color: colors.primary },
+  // "Awaiting approval" tile — same layout as adminRow but warm-toned
+  // so it reads as informational status, not a destructive admin
+  // action. Color comes from theme.warning.
+  pendingRow: {
+    marginTop: spacing.md,
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.warning,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    borderRadius: radii.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  pendingText: { ...typography.bodyBold, color: '#fff', flex: 1 },
+  pendingChevron: { ...typography.h2, color: '#fff' },
   heroTitle: { ...typography.h2, color: colors.primaryDark },
   heroSubtitle: { ...typography.body, color: colors.primaryDark, marginTop: spacing.xs },
   sectionTitle: { ...typography.h3, marginTop: spacing.xl, marginBottom: spacing.md },

@@ -1,13 +1,13 @@
 import { useNavigation, useRoute } from '@react-navigation/native';
-import type { ConfirmationResult } from 'firebase/auth';
 import React, { useState } from 'react';
-import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../components/common/Button';
 import Input from '../components/common/Input';
 import Loader from '../components/common/Loader';
 import ScreenHeader from '../components/common/ScreenHeader';
 import { colors, radii, spacing, typography } from '../constants/theme';
+import type { ConfirmationResult } from '../services/authService';
 import { authService } from '../services/authService';
 import { useAuthStore } from '../store/useAuthStore';
 
@@ -24,20 +24,10 @@ export default function LoginScreen() {
   const [confirmation, setConfirmation] = useState<ConfirmationResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Native phone auth needs @react-native-firebase/auth + iOS/Android
-  // setup (APNs token / SafetyNet). Deferred to Phase 9c. On web we use
-  // invisible reCAPTCHA which works inside react-native-web's DOM.
-  if (Platform.OS !== 'web') {
-    return (
-      <SafeAreaView style={styles.container} edges={['top']}>
-        <ScreenHeader title="Sign in" onBack={() => nav.goBack()} />
-        <View style={styles.body}>
-          <Text style={styles.heading}>Phone sign-in is available on web</Text>
-          <Text style={styles.subtext}>Native support coming soon.</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
+  // Phone auth dispatches inside authService:
+  //   - web: Firebase web SDK + invisible reCAPTCHA (mounted below)
+  //   - native: @react-native-firebase/auth via APNs (iOS) / Play Integrity (Android)
+  // The recaptcha-container View below is harmless on native (no DOM).
 
   const onSendOtp = async () => {
     setError(null);

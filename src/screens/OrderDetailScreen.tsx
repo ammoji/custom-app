@@ -1,7 +1,8 @@
 import { useNavigation, useRoute } from '@react-navigation/native';
 import React, { useEffect, useState } from 'react';
-import { Image, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Image, Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import Button from '../components/common/Button';
 import EmptyState from '../components/common/EmptyState';
 import Loader from '../components/common/Loader';
 import ScreenHeader from '../components/common/ScreenHeader';
@@ -9,8 +10,40 @@ import OrderStatusChip from '../components/order/OrderStatusChip';
 import { colors, radii, spacing, typography } from '../constants/theme';
 import { Analytics } from '../services/analytics';
 import { orderService } from '../services/orderService';
+import { Sentry } from '../services/sentry';
 import type { Order } from '../types';
 import { formatOrderTime, formatRupees } from '../utils/format';
+import { openRazorpayCheckout } from '../utils/razorpay';
+
+const showAlert = (title: string, message: string) => {
+  if (Platform.OS === 'web' && typeof window !== 'undefined') {
+    // eslint-disable-next-line no-alert
+    window.alert(`${title}\n\n${message}`);
+  } else {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { Alert } = require('react-native');
+    Alert.alert(title, message);
+  }
+};
+
+const confirmAlert = (
+  title: string,
+  message: string,
+  onConfirm: () => void,
+  confirmLabel = 'Confirm',
+) => {
+  if (Platform.OS === 'web' && typeof window !== 'undefined') {
+    // eslint-disable-next-line no-alert
+    if (window.confirm(`${title}\n\n${message}`)) onConfirm();
+  } else {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { Alert } = require('react-native');
+    Alert.alert(title, message, [
+      { text: 'Keep order', style: 'cancel' },
+      { text: confirmLabel, style: 'destructive', onPress: onConfirm },
+    ]);
+  }
+};
 
 export default function OrderDetailScreen() {
   const nav = useNavigation<any>();
@@ -18,6 +51,8 @@ export default function OrderDetailScreen() {
   const orderId: string = route.params.orderId;
   const [order, setOrder] = useState<Order | null>(null);
   const [loading, setLoading] = useState(true);
+  const [paying, setPaying] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
 
   useEffect(() => {
     let firstLoad = true;
@@ -158,9 +193,132 @@ export default function OrderDetailScreen() {
             </Text>
           )}
         </View>
+
+        {/* Stuck-payment recovery: if the customer dismissed Razorpay
+            without paying, the order sits in paymentStatus='pending'
+            until the 24h cleanup. Surface Pay Now / Cancel here so they
+            can act immediately. Only shown while the shop hasn't
+            accepted yet — once status moves past 'pending', the order
+            belongs to the shop and admin handles cancellation. */}
+        {order.paymentMethod === 'online' &&
+          order.paymentStatus === 'pending' &&
+          order.status === 'pending' && (
+            <View style={styles.recoveryCard}>
+              <Text style={styles.recoveryTitle}>Payment incomplete</Text>
+              <Text style={styles.recoverySubtitle}>
+                Your order is on hold. Complete payment to confirm it, or
+                cancel if you've changed your mind.
+              </Text>
+              <View style={{ height: spacing.md }} />
+              <Button
+                title={
+                  paying
+                    ? 'Opening payment…'
+                    : `Pay ${formatRupees(order.total)} now`
+                }
+                onPress={handleRetryPayment}
+                loading={paying}
+                disabled={paying || cancelling}
+                fullWidth
+              />
+              <View style={{ height: spacing.sm }} />
+              <Button
+                title="Cancel order"
+                onPress={handleCancel}
+                variant="secondary"
+                loading={cancelling}
+                disabled={paying || cancelling}
+                fullWidth
+              />
+            </View>
+          )}
       </ScrollView>
     </SafeAreaView>
   );
+
+  function handleRetryPayment() {
+    if (!order) return;
+    setPaying(true);
+    (async () => {
+      try {
+        const session = await orderService.retryPayment(order.id);
+        await openRazorpayCheckout({
+          key: session.razorpayKeyId,
+          order_id: session.razorpayOrderId,
+          amount: Math.round(session.total * 100),
+          currency: 'INR',
+          name: 'grocery-mvp',
+          description: `Order ${order.id}`,
+          prefill: {
+            name: order.deliveryAddress.name,
+            contact: order.deliveryAddress.phone,
+          },
+          theme: { color: colors.primary },
+          handler: () => {
+            // Webhook will flip paymentStatus to 'paid'; watchOrder
+            // picks it up within 5s on native or instantly on web.
+            Analytics.payment_success({
+              order_id: order.id,
+              value: session.total,
+            });
+            setPaying(false);
+          },
+          modal: {
+            ondismiss: () => {
+              setPaying(false);
+              showAlert(
+                'Payment cancelled',
+                'Your order is still pending. You can retry any time before it expires.',
+              );
+            },
+          },
+          onError: (err: any) => {
+            setPaying(false);
+            const reason: string =
+              err?.error?.description ?? err?.description ?? 'unknown';
+            Analytics.payment_failed({ order_id: order.id, reason });
+            Sentry.captureMessage(
+              `Payment retry failed for order ${order.id}: ${reason}`,
+              'warning',
+            );
+            showAlert(
+              'Payment failed',
+              reason === 'unknown' ? 'Please try again.' : reason,
+            );
+          },
+        });
+      } catch (err: any) {
+        setPaying(false);
+        showAlert(
+          'Could not retry payment',
+          err?.message ?? 'Try again in a moment.',
+        );
+      }
+    })();
+  }
+
+  function handleCancel() {
+    if (!order) return;
+    confirmAlert(
+      'Cancel this order?',
+      'This will release the order. You can place a new one anytime.',
+      async () => {
+        setCancelling(true);
+        try {
+          await orderService.cancelMyPendingOrder(order.id);
+          // watchOrder snapshot/poll will reflect status='cancelled'.
+        } catch (err: any) {
+          showAlert(
+            'Could not cancel',
+            err?.message ?? 'Please try again.',
+          );
+        } finally {
+          setCancelling(false);
+        }
+      },
+      'Cancel order',
+    );
+  }
 }
 
 function Row({
@@ -217,4 +375,17 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.xs },
   divider: { height: 1, backgroundColor: colors.border, marginVertical: spacing.sm },
   paymentNote: { ...typography.caption, color: colors.danger, marginTop: spacing.sm },
+  recoveryCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    padding: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.danger,
+  },
+  recoveryTitle: { ...typography.h3, color: colors.danger },
+  recoverySubtitle: {
+    ...typography.body,
+    color: colors.textSecondary,
+    marginTop: spacing.xs,
+  },
 });

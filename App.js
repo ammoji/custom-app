@@ -1,6 +1,8 @@
 import { initSentry } from "./src/services/sentry";
 initSentry();
 
+import '@react-native-firebase/functions';
+
 import { NavigationContainer } from "@react-navigation/native";
 import { registerRootComponent } from "expo";
 import { StatusBar } from "expo-status-bar";

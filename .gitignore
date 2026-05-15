@@ -34,6 +34,9 @@ yarn-error.*
 .env*.local
 .env
 service-account.json
+GoogleService-Info.plist
+google-services.json
+
 
 # typescript
 *.tsbuildinfo
@@ -43,3 +46,12 @@ app-example
 # generated native folders
 /ios
 /android
+
+# Firebase emulator + test artifacts
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+auth-debug.log
+firebase-export-*/
+coverage/

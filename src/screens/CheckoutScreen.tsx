@@ -14,7 +14,7 @@ import { useAuthStore } from '../store/useAuthStore';
 import { useCartStore } from '../store/useCartStore';
 import type { Address, PaymentMethod } from '../types';
 import { formatRupees } from '../utils/format';
-import { loadRazorpayScript, openRazorpayCheckout } from '../utils/razorpay';
+import { openRazorpayCheckout } from '../utils/razorpay';
 
 type Errors = Partial<Record<'name' | 'line1' | 'city' | 'pincode' | 'phone', string>>;
 
@@ -40,8 +40,6 @@ export default function CheckoutScreen() {
   const total = useCartStore(s => s.total());
   const clearCart = useCartStore(s => s.clearCart);
 
-  const onlineSupported = Platform.OS === 'web';
-
   const [name, setName] = useState('Sudhir Davim');
   const [line1, setLine1] = useState('');
   const [line2, setLine2] = useState('');
@@ -65,7 +63,8 @@ export default function CheckoutScreen() {
   const placeOrder = async () => {
     // Phone-auth gate: anonymous users must sign in before placing an
     // order so we can confirm + send delivery updates. Browsing/cart
-    // still work anonymously (conversion-optimal funnel).
+    // still work anonymously (conversion-optimal funnel). Active on
+    // both web (reCAPTCHA flow) and native (RNFB phone auth, Phase 9c).
     if (useAuthStore.getState().isAnonymous) {
       const goSignIn = () =>
         nav.navigate('Login', { returnTo: 'Checkout' });
@@ -129,13 +128,13 @@ export default function CheckoutScreen() {
         return;
       }
 
-      // Online path — Razorpay Checkout overlay (web).
+      // Online path — Razorpay Checkout. openRazorpayCheckout dispatches
+      // to the web overlay or the native PaymentSheet based on Platform.OS.
+      // All callbacks fire with the same payload shape on both platforms.
       if (!result.razorpayOrderId || !result.razorpayKeyId) {
         throw new Error('Payment session not created');
       }
-      await loadRazorpayScript();
-
-      const rzp = openRazorpayCheckout({
+      await openRazorpayCheckout({
         key: result.razorpayKeyId,
         order_id: result.razorpayOrderId,
         amount: Math.round(result.total * 100),
@@ -145,8 +144,9 @@ export default function CheckoutScreen() {
         prefill: { name: address.name, contact: address.phone },
         theme: { color: colors.primary },
         handler: () => {
-          // Payment success — webhook will mark paymentStatus='paid'
-          // asynchronously; OrderConfirmation's snapshot listener picks it up.
+          // Payment success — the razorpayWebhook Function flips
+          // paymentStatus to 'paid' asynchronously; OrderConfirmation
+          // picks it up via watchOrder (web SDK snapshot or native poll).
           Analytics.payment_success({ order_id: result.orderId, value: result.total });
           clearCart();
           nav.replace('OrderConfirmation', { orderId: result.orderId });
@@ -161,19 +161,24 @@ export default function CheckoutScreen() {
             );
           },
         },
-      });
-      rzp.on('payment.failed', (err: any) => {
-        setPlacing(false);
-        const reason: string = err?.error?.description ?? 'unknown';
-        Analytics.payment_failed({ order_id: result.orderId, reason });
-        Sentry.captureMessage(
-          `Payment failed for order ${result.orderId}: ${reason}`,
-          'warning',
-        );
-        showAlert(
-          'Payment failed',
-          err?.error?.description ?? 'Please try a different payment method.',
-        );
+        onError: (err: any) => {
+          setPlacing(false);
+          // Web errors come as { error: { description } }; native errors
+          // come as { code, description }. Try both shapes.
+          const reason: string =
+            err?.error?.description ?? err?.description ?? 'unknown';
+          Analytics.payment_failed({ order_id: result.orderId, reason });
+          Sentry.captureMessage(
+            `Payment failed for order ${result.orderId}: ${reason}`,
+            'warning',
+          );
+          showAlert(
+            'Payment failed',
+            reason === 'unknown'
+              ? 'Please try a different payment method.'
+              : reason,
+          );
+        },
       });
     } catch (err: any) {
       setPlacing(false);
@@ -272,10 +277,9 @@ export default function CheckoutScreen() {
           <View style={{ height: spacing.md }} />
           <PaymentOption
             selected={paymentMethod === 'online'}
-            onPress={() => onlineSupported && setPaymentMethod('online')}
-            disabled={!onlineSupported}
+            onPress={() => setPaymentMethod('online')}
             title="Pay Online (UPI / Cards / NetBanking)"
-            subtitle={onlineSupported ? 'Powered by Razorpay' : 'Available on web for now'}
+            subtitle="Powered by Razorpay"
           />
         </ScrollView>
 

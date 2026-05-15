@@ -49,9 +49,20 @@ export default function ShopListScreen() {
     setRefreshing(false);
   }, [load, location]);
 
-  const filtered = shops.filter(s =>
-    s.name.toLowerCase().includes(query.trim().toLowerCase())
-  );
+  // Phase 12a-v2-iii: customers see only `status === 'active'` shops
+  // (or legacy seeded shops without a status field — see
+  // `scripts/backfill-shop-menus.ts` for context). Pending /
+  // suspended / rejected shops are filtered out here so a customer
+  // browsing the home flow never lands on them. Admins still see
+  // every state via Shop Management. The active-shop guarantee is
+  // also enforced server-side in `listShopMenuPublic` so a leaked
+  // shop URL can't bypass this filter.
+  const filtered = shops.filter(s => {
+    const status = (s as Shop & { status?: string }).status;
+    const isLive = status === undefined || status === 'active';
+    if (!isLive) return false;
+    return s.name.toLowerCase().includes(query.trim().toLowerCase());
+  });
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>

@@ -1,20 +1,41 @@
 import { httpsCallable } from '@firebase/functions';
+import { firebase as nativeFirebase } from '@react-native-firebase/app';
+import '@react-native-firebase/functions';
 import {
-  collection,
-  doc,
-  getDocs,
-  limit,
-  onSnapshot,
-  orderBy,
-  query,
-  Timestamp,
-  where,
+    collection,
+    doc,
+    getDocs,
+    limit,
+    onSnapshot,
+    orderBy,
+    query,
+    Timestamp,
+    where,
 } from 'firebase/firestore';
 import { trace } from 'firebase/performance';
-import type { Address, CartItem, Order, PaymentMethod } from '../types';
+import { Platform } from 'react-native';
+import type {
+    Address,
+    CartItem,
+    MenuItem,
+    NewMenuItemInput,
+    Order,
+    PaymentMethod,
+    Shop,
+    UserInfo,
+} from '../types';
 import type { OrderStatus } from '../utils/orderStateMachine';
 import { db, functions, perf } from './firebase';
 import { Sentry } from './sentry';
+
+const isNative = Platform.OS !== 'web';
+
+// Cloud Functions are deployed in asia-south1 (see firebase.ts).
+// RNFB defaults to us-central1, so we must request the regional instance
+// explicitly. Lazy-initialized on first use to avoid touching RNFB on web.
+function getNativeFunctions() {
+  return nativeFirebase.app().functions('asia-south1');
+}
 
 type PlaceOrderInput = {
   shopId: string;
@@ -49,6 +70,13 @@ function toOrder(raw: any): Order {
     ...raw,
     createdAt: tsToMillis(raw.createdAt),
     estimatedDeliveryAt: tsToMillis(raw.estimatedDeliveryAt),
+    // Delivery-flow timestamps (Phase 12b). Server may store these as
+    // Firestore Timestamps OR keep them null on freshly placed orders;
+    // tsToMillis returns 0 for null, so coerce back to null afterward
+    // to preserve the "not yet happened" semantics on the client.
+    pickedUpAt: raw.pickedUpAt ? tsToMillis(raw.pickedUpAt) : null,
+    deliveredAt: raw.deliveredAt ? tsToMillis(raw.deliveredAt) : null,
+    deliveryPersonId: raw.deliveryPersonId ?? null,
     statusHistory: Array.isArray(raw.statusHistory)
       ? raw.statusHistory.map((h: any) => ({ ...h, at: tsToMillis(h.at) }))
       : raw.statusHistory,
@@ -65,19 +93,33 @@ export const orderService = {
       level: 'info',
     });
     try {
-      const fn = httpsCallable<unknown, PlaceOrderResult>(functions, 'placeOrder');
       const compactItems = input.items.map(i => ({
         productId: i.productId,
         quantity: i.quantity,
       }));
-      const result = await fn({
+      const payload = {
         shopId: input.shopId,
         items: compactItems,
         address: input.address,
         paymentMethod: input.paymentMethod,
-      });
+      };
+      let data: PlaceOrderResult;
+      if (isNative) {
+        // Use RNFB so the Cloud Function sees the phone-authed user
+        // (firebase web SDK auth state doesn't reach native callables).
+        const fn = getNativeFunctions().httpsCallable('placeOrder');
+        const result = await fn(payload);
+        data = result.data as PlaceOrderResult;
+      } else {
+        const fn = httpsCallable<unknown, PlaceOrderResult>(
+          functions,
+          'placeOrder',
+        );
+        const result = await fn(payload);
+        data = result.data;
+      }
       t?.putAttribute('paymentMethod', input.paymentMethod);
-      return result.data;
+      return data;
     } finally {
       t?.stop();
     }
@@ -87,6 +129,17 @@ export const orderService = {
     const t = perf ? trace(perf, 'orderService.listMine') : null;
     t?.start();
     try {
+      if (isNative) {
+        // Native path goes through a Cloud Function because
+        // @react-native-firebase/firestore is incompatible with
+        // Expo SDK 54 + RN 0.81 + static frameworks (see PRELAUNCH).
+        // The Function uses request.auth.uid; customerUid is ignored.
+        const fn = getNativeFunctions().httpsCallable('listMyOrders');
+        const result = await fn();
+        // Function returns timestamps already converted to epoch ms;
+        // toOrder is idempotent on numbers, so this is safe.
+        return (result.data as any[]).map(toOrder);
+      }
       const q = query(
         collection(db, 'orders'),
         where('customerUid', '==', customerUid),
@@ -100,7 +153,69 @@ export const orderService = {
     }
   },
 
+  // Creates a fresh Razorpay session for an order whose payment was
+  // dismissed. Returns the new session so the caller can re-open
+  // Razorpay Checkout. The Firestore order doc keeps the same id;
+  // only razorpayOrderId is rotated server-side.
+  async retryPayment(orderId: string): Promise<{
+    orderId: string;
+    total: number;
+    razorpayOrderId: string;
+    razorpayKeyId: string;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('retryPayment');
+      const result = await fn({ orderId });
+      return result.data as any;
+    }
+    const fn = httpsCallable(functions, 'retryPayment');
+    const result = await fn({ orderId });
+    return result.data as any;
+  },
+
+  // Customer-initiated cancellation. Server enforces that the order is
+  // still pending and not paid. Fails for accepted/preparing/etc orders
+  // (those need admin-side cancellation + refund flow).
+  async cancelMyPendingOrder(orderId: string): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('cancelMyPendingOrder');
+      await fn({ orderId });
+      return;
+    }
+    const fn = httpsCallable(functions, 'cancelMyPendingOrder');
+    await fn({ orderId });
+  },
+
   watchOrder(orderId: string, cb: (order: Order | null) => void): () => void {
+    if (isNative) {
+      // Polling fallback for native (no RNFB Firestore = no snapshot
+      // listeners). 5s cadence balances freshness vs Function-invocation
+      // cost. Calls return a cleanup that stops the loop.
+      let cancelled = false;
+      const poll = async () => {
+        if (cancelled) return;
+        try {
+          const fn = getNativeFunctions().httpsCallable('getOrder');
+          const result = await fn({ orderId });
+          if (!cancelled) cb(toOrder(result.data));
+        } catch (e) {
+          // not-found surfaces as null so the UI can render a missing
+          // state instead of getting stuck on stale data.
+          const code = (e as any)?.code;
+          if (code === 'functions/not-found' || code === 'not-found') {
+            if (!cancelled) cb(null);
+          } else {
+            console.warn('[watchOrder] poll failed:', e);
+          }
+        }
+      };
+      poll();
+      const interval = setInterval(poll, 5000);
+      return () => {
+        cancelled = true;
+        clearInterval(interval);
+      };
+    }
     return onSnapshot(doc(db, 'orders', orderId), snap => {
       cb(snap.exists() ? toOrder(snap.data()) : null);
     });
@@ -111,11 +226,458 @@ export const orderService = {
     newStatus: OrderStatus;
     reason?: string;
   }): Promise<void> {
+    if (isNative) {
+      // Use RNFB so the admin custom-claim on the phone-authed user is
+      // read by the Cloud Function. Web SDK's auth doesn't propagate to
+      // native callables.
+      const fn = getNativeFunctions().httpsCallable('updateOrderStatus');
+      await fn(input);
+      return;
+    }
     const fn = httpsCallable(functions, 'updateOrderStatus');
     await fn(input);
   },
 
+  // ──────────────────────────────────────────────────────────
+  // Multi-role: shop owner + delivery partner (Phase 12a)
+  // ──────────────────────────────────────────────────────────
+
+  // ──────────────────────────────────────────────────────────
+  // Shop registration + admin approval (Phase 12a-v2-i)
+  // ──────────────────────────────────────────────────────────
+
+  async registerShop(input: {
+    name: string;
+    address: string;
+    location?: { lat: number; lng: number };
+    phone: string;
+    hours?: { open: string; close: string };
+    gstNumber?: string;
+    fssaiLicense?: string;
+  }): Promise<{ shopId: string }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('registerShop');
+      const result = await fn(input);
+      return result.data as any;
+    }
+    const fn = httpsCallable(functions, 'registerShop');
+    const result = await fn(input);
+    return result.data as any;
+  },
+
+  async approveShop(input: { shopId: string }): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('approveShop');
+      await fn(input);
+      return;
+    }
+    const fn = httpsCallable(functions, 'approveShop');
+    await fn(input);
+  },
+
+  async rejectShop(input: {
+    shopId: string;
+    reason: string;
+  }): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('rejectShop');
+      await fn(input);
+      return;
+    }
+    const fn = httpsCallable(functions, 'rejectShop');
+    await fn(input);
+  },
+
+  async listPendingShops(): Promise<Shop[]> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('listPendingShops');
+      const result = await fn();
+      return ((result.data as any[]) ?? []) as Shop[];
+    }
+    const fn = httpsCallable(functions, 'listPendingShops');
+    const result = await fn();
+    return ((result.data as any[]) ?? []) as Shop[];
+  },
+
+  // Returns the caller's most-recent owned shop (pending/active/rejected),
+  // or null if they don't own one. Used by WaitingForApprovalScreen to
+  // detect status flips without direct Firestore access.
+  async getShopForOwner(): Promise<Shop | null> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('getMyShop');
+      const result = await fn();
+      return (result.data as Shop) ?? null;
+    }
+    const fn = httpsCallable(functions, 'getMyShop');
+    const result = await fn();
+    return (result.data as Shop) ?? null;
+  },
+
+  // ──────────────────────────────────────────────────────────
+  // Admin governance (Phase 12a-v2-i-bis)
+  // ──────────────────────────────────────────────────────────
+  // All callables below require the admin custom claim. The server
+  // refuses uid==auth.uid for revoke* calls (single-admin lockout
+  // protection) — clients should also disable the buttons for self,
+  // but the server is the source of truth.
+
+  async revokeShopOwner(input: {
+    uid: string;
+    reason?: string;
+  }): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('revokeShopOwner');
+      await fn(input);
+      return;
+    }
+    const fn = httpsCallable(functions, 'revokeShopOwner');
+    await fn(input);
+  },
+
+  async revokeDelivery(input: {
+    uid: string;
+    reason?: string;
+  }): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('revokeDelivery');
+      await fn(input);
+      return;
+    }
+    const fn = httpsCallable(functions, 'revokeDelivery');
+    await fn(input);
+  },
+
+  async suspendShop(input: {
+    shopId: string;
+    reason: string;
+  }): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('suspendShop');
+      await fn(input);
+      return;
+    }
+    const fn = httpsCallable(functions, 'suspendShop');
+    await fn(input);
+  },
+
+  async unsuspendShop(input: { shopId: string }): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('unsuspendShop');
+      await fn(input);
+      return;
+    }
+    const fn = httpsCallable(functions, 'unsuspendShop');
+    await fn(input);
+  },
+
+  async listAllUsers(): Promise<UserInfo[]> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('listAllUsers');
+      const result = await fn();
+      return ((result.data as UserInfo[]) ?? []);
+    }
+    const fn = httpsCallable(functions, 'listAllUsers');
+    const result = await fn();
+    return ((result.data as UserInfo[]) ?? []);
+  },
+
+  async listAllShops(): Promise<Shop[]> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('listAllShops');
+      const result = await fn();
+      return ((result.data as Shop[]) ?? []);
+    }
+    const fn = httpsCallable(functions, 'listAllShops');
+    const result = await fn();
+    return ((result.data as Shop[]) ?? []);
+  },
+
+  // ──────────────────────────────────────────────────────────
+  // Per-shop menu management (Phase 12a-v2-ii)
+  // ──────────────────────────────────────────────────────────
+  // All four callables require the shopOwner claim and are
+  // automatically scoped to `claims.shopId` server-side — clients
+  // can't pass a shopId to target someone else's menu.
+
+  async listMyShopMenu(): Promise<MenuItem[]> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('listMyShopMenu');
+      const result = await fn();
+      return ((result.data as MenuItem[]) ?? []);
+    }
+    const fn = httpsCallable(functions, 'listMyShopMenu');
+    const result = await fn();
+    return ((result.data as MenuItem[]) ?? []);
+  },
+
+  async updateMenuItem(input: {
+    menuItemId: string;
+    fields: Partial<{
+      price: number;
+      available: boolean;
+      stock: number | null;
+      name: string;
+      imageUrl: string;
+      packLabel: string;
+      category: string;
+      mrp: number;
+    }>;
+  }): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('updateMenuItem');
+      await fn(input);
+      return;
+    }
+    const fn = httpsCallable(functions, 'updateMenuItem');
+    await fn(input);
+  },
+
+  async addCustomMenuItem(
+    input: NewMenuItemInput,
+  ): Promise<{ menuItemId: string }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('addCustomMenuItem');
+      const result = await fn(input);
+      return result.data as { menuItemId: string };
+    }
+    const fn = httpsCallable(functions, 'addCustomMenuItem');
+    const result = await fn(input);
+    return result.data as { menuItemId: string };
+  },
+
+  async removeMenuItem(input: {
+    menuItemId: string;
+  }): Promise<{ deleted: boolean; softDisabled?: boolean }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('removeMenuItem');
+      const result = await fn(input);
+      return result.data as { deleted: boolean; softDisabled?: boolean };
+    }
+    const fn = httpsCallable(functions, 'removeMenuItem');
+    const result = await fn(input);
+    return result.data as { deleted: boolean; softDisabled?: boolean };
+  },
+
+  // Phase 12a-v2-iii: public read of a shop's available menu for the
+  // customer flow. No auth required (anonymous Auth users hit it from
+  // ShopDetailScreen). The server filters out non-active shops and
+  // unavailable / out-of-stock items, so the client renders the
+  // payload directly without re-filtering.
+  async listShopMenuPublic(
+    shopId: string,
+  ): Promise<{ shop: Shop; items: MenuItem[] }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('listShopMenuPublic');
+      const result = await fn({ shopId });
+      return result.data as { shop: Shop; items: MenuItem[] };
+    }
+    const fn = httpsCallable(functions, 'listShopMenuPublic');
+    const result = await fn({ shopId });
+    return result.data as { shop: Shop; items: MenuItem[] };
+  },
+
+  // Sets the delivery custom claim. UI for delivery dashboard ships in
+  // Phase 12b; this exists in 12a so users who self-register now don't
+  // have to re-register later.
+  async becomeDelivery(): Promise<{ ok: boolean }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('becomeDelivery');
+      const result = await fn();
+      return result.data as any;
+    }
+    const fn = httpsCallable(functions, 'becomeDelivery');
+    const result = await fn();
+    return result.data as any;
+  },
+
+  // Returns shops with no current owner (ownerUid null/missing).
+  // Powers the BecomeShopOwner picker.
+  async listAvailableShops(): Promise<
+    Array<{ id: string; name: string; address: string }>
+  > {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('listAvailableShops');
+      const result = await fn();
+      return (result.data as any[]) ?? [];
+    }
+    const fn = httpsCallable(functions, 'listAvailableShops');
+    const result = await fn();
+    return ((result.data as any[]) ?? []);
+  },
+
+  // Polling-based shop dashboard (10s cadence, mirrors watchAllOrders).
+  // Server enforces that the caller is the shop owner of `shopId`
+  // (or admin) — see listShopOrders in functions/src/index.ts.
+  watchShopOrders(
+    shopId: string,
+    cb: (orders: Order[]) => void,
+  ): () => void {
+    if (isNative) {
+      let cancelled = false;
+      const poll = async () => {
+        if (cancelled) return;
+        try {
+          const fn = getNativeFunctions().httpsCallable('listShopOrders');
+          const result = await fn({ shopId });
+          if (!cancelled) cb((result.data as any[]).map(toOrder));
+        } catch (e) {
+          console.warn('[watchShopOrders] poll failed:', e);
+        }
+      };
+      poll();
+      const interval = setInterval(poll, 10000);
+      return () => {
+        cancelled = true;
+        clearInterval(interval);
+      };
+    }
+    // Web: callable also works fine, but a snapshot listener gives
+    // realtime updates with no extra Function invocations. We mirror
+    // watchAllOrders' web path for consistency.
+    const q = query(
+      collection(db, 'orders'),
+      where('shopId', '==', shopId),
+      orderBy('createdAt', 'desc'),
+      limit(100),
+    );
+    return onSnapshot(q, snap => {
+      cb(snap.docs.map(d => toOrder(d.data())));
+    });
+  },
+
+  // ──────────────────────────────────────────────────────────
+  // Delivery flow (Phase 12b)
+  // ──────────────────────────────────────────────────────────
+
+  async listAvailableDeliveries(): Promise<Order[]> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('listAvailableDeliveries');
+      const result = await fn();
+      return ((result.data as any[]) ?? []).map(toOrder);
+    }
+    const fn = httpsCallable(functions, 'listAvailableDeliveries');
+    const result = await fn();
+    return ((result.data as any[]) ?? []).map(toOrder);
+  },
+
+  async listMyDeliveries(): Promise<Order[]> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('listMyDeliveries');
+      const result = await fn();
+      return ((result.data as any[]) ?? []).map(toOrder);
+    }
+    const fn = httpsCallable(functions, 'listMyDeliveries');
+    const result = await fn();
+    return ((result.data as any[]) ?? []).map(toOrder);
+  },
+
+  async claimDelivery(input: { orderId: string }): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('claimDelivery');
+      await fn(input);
+      return;
+    }
+    const fn = httpsCallable(functions, 'claimDelivery');
+    await fn(input);
+  },
+
+  async markPickedUp(input: { orderId: string }): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('markPickedUp');
+      await fn(input);
+      return;
+    }
+    const fn = httpsCallable(functions, 'markPickedUp');
+    await fn(input);
+  },
+
+  async markDelivered(input: { orderId: string }): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('markDelivered');
+      await fn(input);
+      return;
+    }
+    const fn = httpsCallable(functions, 'markDelivered');
+    await fn(input);
+  },
+
+  async setDeliveryStatus(input: {
+    status: 'online' | 'offline';
+  }): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('setDeliveryStatus');
+      await fn(input);
+      return;
+    }
+    const fn = httpsCallable(functions, 'setDeliveryStatus');
+    await fn(input);
+  },
+
+  // Polling helpers — same shape as watchShopOrders / watchAllOrders.
+  // Available pickups churn fast (multiple delivery people racing), so
+  // 15s is the upper bound the spec calls for. My-deliveries needs to
+  // be snappier because the user is actively tapping buttons → 10s.
+  watchAvailableDeliveries(cb: (orders: Order[]) => void): () => void {
+    let cancelled = false;
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const list = await this.listAvailableDeliveries();
+        if (!cancelled) cb(list);
+      } catch (e) {
+        console.warn('[watchAvailableDeliveries] poll failed:', e);
+      }
+    };
+    poll();
+    const interval = setInterval(poll, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  },
+
+  watchMyDeliveries(cb: (orders: Order[]) => void): () => void {
+    let cancelled = false;
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const list = await this.listMyDeliveries();
+        if (!cancelled) cb(list);
+      } catch (e) {
+        console.warn('[watchMyDeliveries] poll failed:', e);
+      }
+    };
+    poll();
+    const interval = setInterval(poll, 10000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  },
+
   watchAllOrders(cb: (orders: Order[]) => void): () => void {
+    if (isNative) {
+      // Admin dashboard polling. 10s cadence — admins typically have
+      // the screen open longer; halving function invocations is worth
+      // the slightly staler UI.
+      let cancelled = false;
+      const poll = async () => {
+        if (cancelled) return;
+        try {
+          const fn = getNativeFunctions().httpsCallable('listAllOrders');
+          const result = await fn();
+          if (!cancelled) cb((result.data as any[]).map(toOrder));
+        } catch (e) {
+          console.warn('[watchAllOrders] poll failed:', e);
+        }
+      };
+      poll();
+      const interval = setInterval(poll, 10000);
+      return () => {
+        cancelled = true;
+        clearInterval(interval);
+      };
+    }
     const q = query(
       collection(db, 'orders'),
       orderBy('createdAt', 'desc'),

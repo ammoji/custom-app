@@ -1,3 +1,26 @@
+/**
+ * NOTE: Firebase web SDK runs in parallel with @react-native-firebase
+ * on native. authService.ts + orderService.ts dispatch by Platform.OS:
+ *   - web: uses this web SDK for everything (auth, db, functions,
+ *     storage, app check).
+ *   - native: uses @react-native-firebase for auth + functions only.
+ *     Order READS on native go through Cloud Functions
+ *     (listMyOrders, getOrder, listAllOrders) called via RNFB functions,
+ *     because @react-native-firebase/firestore is incompatible with
+ *     Expo SDK 54 + RN 0.81 + static frameworks (Swift module emit
+ *     errors that no Podfile patch could fix). See PRELAUNCH_CHECKLIST
+ *     for the migration target once upstream resolves it.
+ *   - native: still uses this web SDK for storage AND for Firestore
+ *     reads of world-readable collections (shops, products). Those work
+ *     cross-SDK because their security rules don't gate on request.auth.
+ *
+ * Real-time snapshot listeners (onSnapshot) are replaced by polling on
+ * native — see orderService.watchOrder / watchAllOrders. Cadence: 5s
+ * for single-order detail, 10s for admin dashboard.
+ *
+ * Future native App Check / FCM features will use additional
+ * @react-native-firebase packages alongside this web SDK.
+ */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getApps, initializeApp } from 'firebase/app';
 // @ts-ignore - getReactNativePersistence is exported but not in the public types

@@ -10,8 +10,31 @@ const db = getFirestore();
 
 async function seed() {
   console.log(`Seeding ${MOCK_SHOPS.length} shops...`);
+  // Pre-existing demo shops are stamped status='active' so the customer
+  // browsing flow keeps working through the Phase 12a-v2 redesign.
+  // They are flagged (status set + ownerUid: null) and will be deleted
+  // by a cleanup script before family role-play. Real shops created via
+  // registerShop go through pending → active and never use this path.
+  const placeholderRegistration = {
+    phone: '+91-0000000000',
+    hours: { open: '09:00', close: '21:00' },
+    gstNumber: null,
+    fssaiLicense: null,
+    submittedAt: Date.now(),
+  };
   for (const shop of MOCK_SHOPS) {
-    await db.collection('shops').doc(shop.id).set(shop);
+    await db
+      .collection('shops')
+      .doc(shop.id)
+      .set(
+        {
+          ...shop,
+          ownerUid: null,
+          status: 'active',
+          registrationData: placeholderRegistration,
+        },
+        { merge: true },
+      );
     console.log(`  ✓ ${shop.id} ${shop.name}`);
   }
   console.log(`Seeding ${MOCK_PRODUCTS.length} products...`);
