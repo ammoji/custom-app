@@ -1,5 +1,5 @@
 import { useNavigation } from '@react-navigation/native';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../../components/common/Button';
@@ -8,9 +8,11 @@ import Loader from '../../components/common/Loader';
 import ScreenHeader from '../../components/common/ScreenHeader';
 import OrderStatusChip from '../../components/order/OrderStatusChip';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
+import { useOnlineDeliveryCount } from '../../hooks/useOnlineDeliveryCount';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
 import type { Order } from '../../types';
+import { computeAdminOrderStats } from '../../utils/adminStats';
 import { formatOrderTime, formatRupees } from '../../utils/format';
 import {
     ACTION_LABELS,
@@ -26,6 +28,14 @@ export default function AdminOrdersScreen() {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<Record<string, OrderStatus | null>>({});
   const [retryNonce, setRetryNonce] = useState(0);
+  // Phase 12c: stats card. Orders-derived stats refresh whenever the
+  // 10s watcher ticks; the partner count polls on its own 15s rhythm.
+  const { count: onlinePartners } = useOnlineDeliveryCount(isAdmin);
+  const stats = useMemo(
+    () => computeAdminOrderStats(orders, Date.now()),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [orders],
+  );
 
   useEffect(() => {
     if (!isAdmin) {
@@ -114,6 +124,23 @@ export default function AdminOrdersScreen() {
         keyExtractor={o => o.id}
         contentContainerStyle={styles.list}
         ItemSeparatorComponent={() => <View style={{ height: spacing.md }} />}
+        ListHeaderComponent={
+          <View style={styles.statsCard}>
+            <Text style={styles.statsTitle}>Today</Text>
+            <View style={styles.statsRow}>
+              <Stat label="GMV" value={formatRupees(stats.gmvToday)} />
+              <Stat
+                label="Active"
+                value={String(stats.activeCount)}
+                emphasize={stats.activeCount > 0}
+              />
+              <Stat
+                label="Online partners"
+                value={onlinePartners == null ? '—' : String(onlinePartners)}
+              />
+            </View>
+          </View>
+        }
         ListEmptyComponent={
           <EmptyState
             title="No orders yet"
@@ -169,9 +196,55 @@ export default function AdminOrdersScreen() {
   );
 }
 
+function Stat({
+  label,
+  value,
+  emphasize,
+}: {
+  label: string;
+  value: string;
+  emphasize?: boolean;
+}) {
+  return (
+    <View style={styles.stat}>
+      <Text style={[styles.statValue, emphasize && styles.statValueEmphasize]}>
+        {value}
+      </Text>
+      <Text style={styles.statLabel}>{label}</Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg },
   list: { padding: spacing.lg, paddingBottom: spacing.xxl },
+  statsCard: {
+    backgroundColor: colors.primaryLight,
+    borderRadius: radii.lg,
+    padding: spacing.lg,
+    marginBottom: spacing.lg,
+  },
+  statsTitle: {
+    ...typography.caption,
+    color: colors.primaryDark,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: spacing.sm,
+  },
+  statsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: spacing.md,
+  },
+  stat: { flex: 1 },
+  statValue: { ...typography.h2, color: colors.primaryDark },
+  statValueEmphasize: { color: '#b35400' },
+  statLabel: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
   card: {
     backgroundColor: colors.bg,
     borderRadius: radii.md,

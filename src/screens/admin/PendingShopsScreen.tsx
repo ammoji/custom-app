@@ -1,12 +1,12 @@
 import { useNavigation } from '@react-navigation/native';
 import React, { useEffect, useState } from 'react';
 import {
-  FlatList,
-  Pressable,
-  RefreshControl,
-  StyleSheet,
-  Text,
-  View,
+    FlatList,
+    Pressable,
+    RefreshControl,
+    StyleSheet,
+    Text,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import EmptyState from '../../components/common/EmptyState';
@@ -36,6 +36,17 @@ export default function PendingShopsScreen() {
   const fetchOnce = async () => {
     try {
       const list = await orderService.listPendingShops();
+      // Phase 12c: defensive client-side sort by submittedAt asc
+      // (oldest first). The Firestore query already orders by
+      // registrationData.submittedAt asc, but a missing field on a
+      // legacy shop would null-coalesce to 0 server-side and bubble
+      // it to the top in unpredictable order. Sorting here pins the
+      // oldest-first contract regardless of upstream behaviour.
+      list.sort((a, b) => {
+        const sa = a.registrationData?.submittedAt ?? 0;
+        const sb = b.registrationData?.submittedAt ?? 0;
+        return sa - sb;
+      });
       setShops(list);
     } catch (e) {
       console.warn('[PendingShops] fetch failed:', e);
@@ -151,7 +162,32 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     ...shadow.card,
   },
-  name: { ...typography.h3, marginBottom: spacing.xs },
+  cardHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  name: { ...typography.h3, flex: 1 },
+  daysChip: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: radii.sm,
+    backgroundColor: colors.bg,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  daysChipStale: {
+    backgroundColor: '#FEF2E5',
+    borderColor: colors.warning ?? '#E89A3C',
+  },
+  daysChipText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '700',
+  },
+  daysChipTextStale: { color: colors.warning ?? '#B35400' },
   address: {
     ...typography.body,
     color: colors.textSecondary,

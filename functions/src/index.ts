@@ -11,6 +11,15 @@ import { HttpsError, onCall, onRequest } from 'firebase-functions/v2/https';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import * as crypto from 'node:crypto';
 import Razorpay from 'razorpay';
+import { canReadOrder } from './getOrderAuth';
+import { computeOnlineDeliveryCount } from './onlineDeliveryCountHelpers';
+import {
+    promoteDefaultAfterDelete,
+    validateAddressInput,
+    validateProfilePatch,
+    type AddressInput,
+} from './profileHelpers';
+import { validateShopOrdersAccess } from './shopOrdersHelpers';
 
 /**
  * PLATFORM POLICY — DO NOT VIOLATE
@@ -603,9 +612,23 @@ export const getOrder = onCall<{ orderId: string }>(
     }
 
     const data = snap.data() as any;
-    const isOwner = data.customerUid === auth.uid;
-    const isAdmin = auth.token?.admin === true;
-    if (!isOwner && !isAdmin) {
+    // Mirror firestore.rules `match /orders/{orderId}.allow read`.
+    // Callable invocations bypass Firestore rules, so this check
+    // exists in two places by necessity. Extracted to
+    // ./getOrderAuth.ts (canReadOrder) so the rule + function
+    // contracts can be pinned to a single test surface and the
+    // "shop owner sees rejection on native but not on web" class
+    // can't regress. Sudhir hit that exact bug in v2-iv-followup
+    // when the original 2-line check here only allowed customer +
+    // admin, even though the rules allowed shop-owner + delivery
+    // reads via the web SDK.
+    if (
+      !canReadOrder({
+        uid: auth.uid,
+        claims: auth.token ?? {},
+        order: data,
+      })
+    ) {
       throw new HttpsError('permission-denied', 'Not your order');
     }
 
@@ -1009,22 +1032,21 @@ export const listShopOrders = onCall<{ shopId?: string }>(
     const auth = request.auth;
     if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
 
-    const claims = auth.token ?? {};
-    const isAdmin = claims.admin === true;
-    const isShopOwner = claims.shopOwner === true;
-    const ownedShopId =
-      typeof claims.shopId === 'string' ? claims.shopId : undefined;
-
-    const targetShopId = request.data?.shopId ?? ownedShopId;
-    if (!targetShopId) {
-      throw new HttpsError('invalid-argument', 'shopId required');
+    // Validation extracted to ./shopOrdersHelpers.ts so the access
+    // logic can be unit-tested without firebase-functions. Returns a
+    // discriminated result; we wrap in HttpsError here. (The inline
+    // check this replaced was the source of the v2-iv INTERNAL bug:
+    // it concatenated claim values into the error message and the
+    // RNFB SDK surfaced the whole thing as `INTERNAL` instead of the
+    // intended `invalid-argument` / `permission-denied`.)
+    const result = validateShopOrdersAccess({
+      claims: auth.token ?? {},
+      requestedShopId: request.data?.shopId,
+    });
+    if (!result.ok) {
+      throw new HttpsError(result.code, result.message);
     }
-    if (!isAdmin && !(isShopOwner && targetShopId === ownedShopId)) {
-      throw new HttpsError(
-        'permission-denied',
-        'Not authorized for this shop',
-      );
-    }
+    const { targetShopId } = result;
 
     const snap = await db
       .collection('orders')
@@ -2206,6 +2228,33 @@ export const listAllShops = onCall(
   },
 );
 
+// Phase 12c: count of delivery partners currently marked online,
+// used by the AdminOrdersScreen stats card. Admin-only. The query
+// is two equality filters with no orderBy → no composite index is
+// required (Firestore intersects single-field indexes). The same
+// pair is also used by sendNewPickupPushToDelivery, so the field
+// is already indexed by ambient single-field defaults.
+export const getOnlineDeliveryCount = onCall(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const result = await computeOnlineDeliveryCount({
+      auth: request.auth,
+      fetchCount: async () => {
+        const snap = await db
+          .collection('users')
+          .where('isDelivery', '==', true)
+          .where('deliveryStatus', '==', 'online')
+          .get();
+        return snap.size;
+      },
+    });
+    if (!result.ok) {
+      throw new HttpsError(result.code, result.message);
+    }
+    return { count: result.count };
+  },
+);
+
 // ────────────────────────────────────────────────────────────
 // Per-shop menu management (Phase 12a-v2-ii)
 // ────────────────────────────────────────────────────────────
@@ -2659,3 +2708,350 @@ export const listShopsPublic = onCall<{ userLocation?: LatLng }>(
     return { shops };
   },
 );
+
+// ────────────────────────────────────────────────────────────────────
+// Phase 12a-v2-iv: Profile + saved address book.
+//
+// Five callables (all auth-required, no anon access) that own the
+// /users/{uid} document's profile-shaped fields. Validation logic is
+// extracted to functions/src/profileHelpers.ts so the rules can be
+// unit-tested without booting firebase-functions; this file is just
+// the auth-gate + Firestore wiring.
+//
+// All five never return fcmTokens / isAdmin / deliveryStatus — those
+// stay server-internal. The Profile screen has no business reading
+// them; admin auditing reads through getUserDetail (admin-only).
+// (Validation helpers imported at the top of the file from
+// ./profileHelpers — kept testable in plain Node.)
+// ────────────────────────────────────────────────────────────────────
+
+// Server-internal fields stripped from every getMyProfile response.
+// Adding new fields to /users/{uid} that should be hidden from the
+// client? Add them here.
+const PROFILE_INTERNAL_FIELDS = new Set([
+  'fcmTokens',
+  'isAdmin',
+  'isShopOwner',
+  'isDelivery',
+  'deliveryStatus',
+  'deliveryStatusUpdatedAt',
+  'shopId',
+]);
+
+type StoredAddress = {
+  id: string;
+  label: string | null;
+  name: string;
+  phone: string;
+  line1: string;
+  line2: string | null;
+  city: string;
+  pincode: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type StoredProfile = {
+  uid?: string;
+  phone?: string | null;
+  name?: string | null;
+  email?: string | null;
+  addresses?: StoredAddress[];
+  defaultAddressId?: string | null;
+  createdAt?: number | null;
+  updatedAt?: number | null;
+} & Record<string, unknown>;
+
+function publicProfileShape(uid: string, data: StoredProfile) {
+  // Strip internal fields and normalise nulls/defaults so the client
+  // gets the same shape on first-call (doc-just-created) and steady
+  // state (doc has been edited many times).
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (!PROFILE_INTERNAL_FIELDS.has(k)) out[k] = v;
+  }
+  return {
+    uid,
+    phone: (out.phone as string) ?? null,
+    name: (out.name as string) ?? null,
+    email: (out.email as string) ?? null,
+    addresses: Array.isArray(out.addresses) ? (out.addresses as StoredAddress[]) : [],
+    defaultAddressId: (out.defaultAddressId as string) ?? null,
+    createdAt: typeof out.createdAt === 'number' ? out.createdAt : null,
+    updatedAt: typeof out.updatedAt === 'number' ? out.updatedAt : null,
+  };
+}
+
+export const getMyProfile = onCall(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+
+    const uid = auth.uid;
+    const ref = db.doc(`users/${uid}`);
+    const snap = await ref.get();
+    const tokenPhone =
+      typeof auth.token?.phone_number === 'string'
+        ? auth.token.phone_number
+        : null;
+    const now = Date.now();
+
+    if (!snap.exists) {
+      // First-call seeding. We `set({merge:true})` rather than create()
+      // because registerPushToken / becomeDelivery / approveShop may
+      // race with this call — merge keeps any concurrently-written
+      // tokens / claims-mirror fields intact. Phone is only seeded if
+      // the auth token actually carries one (anon users won't); if it
+      // doesn't, we skip silently and let a later call backfill.
+      const seed: Record<string, unknown> = {
+        uid,
+        addresses: [],
+        defaultAddressId: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      if (tokenPhone) seed.phone = tokenPhone;
+      await ref.set(seed, { merge: true });
+      const fresh = await ref.get();
+      return publicProfileShape(uid, (fresh.data() ?? {}) as StoredProfile);
+    }
+
+    // Existing doc — backfill phone if the auth token has one and the
+    // doc doesn't. This is idempotent: once `phone` is set we never
+    // overwrite it (multiple linked phone numbers across the user's
+    // history would otherwise clobber each other).
+    const data = snap.data() as StoredProfile;
+    if (tokenPhone && !data.phone) {
+      await ref.set({ phone: tokenPhone, updatedAt: now }, { merge: true });
+      data.phone = tokenPhone;
+      data.updatedAt = now;
+    }
+    return publicProfileShape(uid, data);
+  },
+);
+
+export const updateMyProfile = onCall<{
+  name?: string | null;
+  email?: string | null;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+
+    const result = validateProfilePatch(request.data ?? {});
+    if (!result.ok) {
+      throw new HttpsError(
+        'invalid-argument',
+        `${result.field}: ${result.message}`,
+      );
+    }
+    const patch = result.value;
+
+    // Build the Firestore update. `null` means "clear" → use
+    // FieldValue.delete() so the field doesn't linger as an explicit
+    // null in the doc (cleaner for downstream consumers that
+    // distinguish "never set" from "set to null").
+    const update: Record<string, unknown> = {
+      updatedAt: Date.now(),
+    };
+    if ('name' in patch) {
+      update.name = patch.name === null ? FieldValue.delete() : patch.name;
+    }
+    if ('email' in patch) {
+      update.email = patch.email === null ? FieldValue.delete() : patch.email;
+    }
+
+    const ref = db.doc(`users/${auth.uid}`);
+    await ref.set(update, { merge: true });
+
+    const snap = await ref.get();
+    return publicProfileShape(auth.uid, (snap.data() ?? {}) as StoredProfile);
+  },
+);
+
+export const saveAddress = onCall<AddressInput>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+
+    const result = validateAddressInput(request.data ?? {});
+    if (!result.ok) {
+      throw new HttpsError(
+        'invalid-argument',
+        `${result.field}: ${result.message}`,
+      );
+    }
+
+    const ref = db.doc(`users/${auth.uid}`);
+    const now = Date.now();
+
+    // Transaction so concurrent saveAddress / deleteAddress calls
+    // don't clobber each other's array writes. Using arrayUnion on an
+    // object array is unsafe (Firestore matches on full equality
+    // including timestamps), so we do read-modify-write inside a tx.
+    const newId = await db.runTransaction(async tx => {
+      const snap = await tx.get(ref);
+      const data: StoredProfile = snap.exists
+        ? (snap.data() as StoredProfile)
+        : {};
+      const existing: StoredAddress[] = Array.isArray(data.addresses)
+        ? [...data.addresses]
+        : [];
+
+      // Update path: input id matches an existing row.
+      const inputId = typeof request.data?.id === 'string' ? request.data.id : null;
+      let targetIdx = inputId
+        ? existing.findIndex(a => a.id === inputId)
+        : -1;
+
+      let id: string;
+      let createdAt: number;
+      if (targetIdx >= 0) {
+        id = existing[targetIdx].id;
+        createdAt = existing[targetIdx].createdAt;
+      } else {
+        // Create path — mint a UUID. crypto.randomUUID() is available
+        // in Node 18+ (the Functions runtime).
+        id = crypto.randomUUID();
+        createdAt = now;
+        targetIdx = existing.length;
+      }
+
+      const next: StoredAddress = {
+        id,
+        label: result.value.label,
+        name: result.value.name,
+        phone: result.value.phone,
+        line1: result.value.line1,
+        line2: result.value.line2,
+        city: result.value.city,
+        pincode: result.value.pincode,
+        createdAt,
+        updatedAt: now,
+      };
+      existing[targetIdx] = next;
+
+      // First address ever → also set defaultAddressId.
+      const update: Record<string, unknown> = {
+        addresses: existing,
+        updatedAt: now,
+      };
+      const currentDefault =
+        typeof data.defaultAddressId === 'string' ? data.defaultAddressId : null;
+      if (!currentDefault) {
+        update.defaultAddressId = id;
+      }
+      // Doc may not exist yet (registerPushToken hasn't run, etc.).
+      // set+merge is safe in both cases.
+      tx.set(ref, update, { merge: true });
+      return id;
+    });
+
+    const finalSnap = await ref.get();
+    return {
+      id: newId,
+      profile: publicProfileShape(
+        auth.uid,
+        (finalSnap.data() ?? {}) as StoredProfile,
+      ),
+    };
+  },
+);
+
+export const deleteAddress = onCall<{ id: string }>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+
+    const id =
+      typeof request.data?.id === 'string' ? request.data.id.trim() : '';
+    if (!id) throw new HttpsError('invalid-argument', 'id is required');
+
+    const ref = db.doc(`users/${auth.uid}`);
+    const now = Date.now();
+
+    await db.runTransaction(async tx => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) {
+        // Idempotent — nothing to delete is success, not an error.
+        return;
+      }
+      const data = snap.data() as StoredProfile;
+      const existing: StoredAddress[] = Array.isArray(data.addresses)
+        ? data.addresses
+        : [];
+      const remaining = existing.filter(a => a.id !== id);
+      if (remaining.length === existing.length) {
+        // Already gone — same idempotency story.
+        return;
+      }
+      const nextDefault = promoteDefaultAfterDelete(
+        remaining,
+        id,
+        data.defaultAddressId ?? null,
+      );
+      tx.set(
+        ref,
+        {
+          addresses: remaining,
+          defaultAddressId: nextDefault,
+          updatedAt: now,
+        },
+        { merge: true },
+      );
+    });
+
+    const finalSnap = await ref.get();
+    return {
+      profile: publicProfileShape(
+        auth.uid,
+        (finalSnap.data() ?? {}) as StoredProfile,
+      ),
+    };
+  },
+);
+
+export const setDefaultAddress = onCall<{ id: string }>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+
+    const id =
+      typeof request.data?.id === 'string' ? request.data.id.trim() : '';
+    if (!id) throw new HttpsError('invalid-argument', 'id is required');
+
+    const ref = db.doc(`users/${auth.uid}`);
+    await db.runTransaction(async tx => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) {
+        throw new HttpsError('not-found', `Address ${id} not found`);
+      }
+      const data = snap.data() as StoredProfile;
+      const existing: StoredAddress[] = Array.isArray(data.addresses)
+        ? data.addresses
+        : [];
+      if (!existing.some(a => a.id === id)) {
+        throw new HttpsError('not-found', `Address ${id} not found`);
+      }
+      tx.set(
+        ref,
+        { defaultAddressId: id, updatedAt: Date.now() },
+        { merge: true },
+      );
+    });
+
+    const finalSnap = await ref.get();
+    return {
+      profile: publicProfileShape(
+        auth.uid,
+        (finalSnap.data() ?? {}) as StoredProfile,
+      ),
+    };
+  },
+);
+

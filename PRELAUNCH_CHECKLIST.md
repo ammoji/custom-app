@@ -783,7 +783,865 @@ project guard, admin filter, flag parser, deletion plan). Pinned
 under `npm run test:unit` — total unit-test count is now 46/46
 (24 from the v2-iii hotfix + 22 from this PR). [Phase 12c-prep]
 
-## 🛒 Customer-side native fetch + loader-stuck-forever sweep (post-v2-iii hotfix)
+## � Auth UX + Profile + Saved Addresses (Phase 12a-v2-iv)
+
+Two real UX gaps that surfaced during solo testing, fixed in one PR
+because the schema + Cloud Functions are shared:
+
+1. **No way to sign out.** `authService.signOut()` existed but was
+   never called from any screen. Multi-user testing was literally
+   blocked — once signed in, no path back to anonymous without
+   reinstalling the app.
+2. **Address re-entry on every checkout.** Customers retyped the
+   full delivery address (name, phone, line1/2, city, pincode) on
+   every order. Production-unacceptable.
+
+Both are now fixed. New `Profile` row on Home (hidden when
+anonymous) opens a screen that owns name/email + saved addresses +
+Sign Out. Checkout auto-fills from the default saved address and
+prompts to save unsaved ones after a successful order.
+
+### What shipped
+
+- [x] **`/users/{uid}` schema extension.** Added optional
+      `name`, `email`, `addresses` (array of `SavedAddress`),
+      `defaultAddressId`, `createdAt`, `updatedAt`. Server-internal
+      fields (`fcmTokens`, `isAdmin`, `isShopOwner`, `isDelivery`,
+      `deliveryStatus`, `deliveryStatusUpdatedAt`, `shopId`) are
+      stripped from every getMyProfile response by
+      `PROFILE_INTERNAL_FIELDS` in `functions/src/index.ts`. No
+      `firestore.rules` change — the existing `match /users/{uid}
+      { allow read,write: if isOwner(uid) }` already covers these
+      fields. Types in `src/types/index.ts`. [Phase 12a-v2-iv]
+- [x] **5 Cloud Functions (asia-south1, auth-required).**
+      - `getMyProfile` — first-call seeds the doc with the user's
+        phone number from `auth.token.phone_number`; if the doc
+        exists but `phone` is missing (legacy), backfills on read.
+        Skips silently when the auth token has no phone number
+        (anon users).
+      - `updateMyProfile({ name?, email? })` — patch with validation;
+        `null`/`""` → clear via `FieldValue.delete()`.
+      - `saveAddress(addressInput)` — read-modify-write inside a
+        transaction. Mints a `crypto.randomUUID()` for new addresses;
+        update path matches on input `id`. First address sets
+        `defaultAddressId` atomically.
+      - `deleteAddress({ id })` — idempotent; if it was the default,
+        promotes the most-recently-updated remaining address (logic
+        in `promoteDefaultAfterDelete`).
+      - `setDefaultAddress({ id })` — throws `not-found` if the id
+        isn't in the user's addresses.
+      All five wrap their pure validation/mutation logic from
+      `functions/src/profileHelpers.ts` so the validators are
+      unit-testable in plain Node. [Phase 12a-v2-iv]
+- [x] **`profileService` with native/web Plan-B dispatch.**
+      `src/services/profileService.ts`. Same pattern as
+      `orderService` — native uses `@react-native-firebase/functions`,
+      web uses `firebase/functions`, both pinned to `asia-south1`.
+      Exports `getMyProfile`, `updateMyProfile`, `saveAddress`,
+      `deleteAddress`, `setDefaultAddress`. Errors propagate to
+      caller (no silent swallow — same lesson from the v2-iii
+      watcher hotfix). [Phase 12a-v2-iv]
+- [x] **`signOutAndClearLocalState` orchestrator.**
+      `src/services/signOutAndClearLocalState.ts`. Dependency-
+      injected for unit-testability — production caller (Profile
+      screen) wires real `authService.signOut`, `useCartStore.
+      clearCart`, and `nav.reset({ index: 0, routes: [{ name:
+      'Home' }] })`. Tests pass `jest.fn()`s. Order matters:
+      `signOut` → `clearCart` → `resetNavigation`, signOut errors
+      abort the cart + nav cleanup so the user doesn't lose their
+      cart on a transient failure. [Phase 12a-v2-iv]
+- [x] **Profile screen.** `src/screens/ProfileScreen.tsx`. Three
+      sections: phone (read-only), name+email form with Save,
+      saved addresses (cards with default chip; tap → edit;
+      long-press → action sheet for "Set as default" / "Delete"),
+      Account section with red Sign Out button (confirm dialog).
+      Refetches profile on every focus so AddressEdit → goBack
+      reflects updates immediately. [Phase 12a-v2-iv]
+- [x] **AddressEdit screen.** `src/screens/AddressEditScreen.tsx`.
+      Two modes: Create (no `addressId` route param) and Edit
+      (`addressId` present → fetches the parent profile and
+      hydrates from the matching address). Client-side validation
+      mirrors `validateAddressInput` for instant feedback. Delete
+      button visible only in Edit mode. Optional `prefill` route
+      param for the Checkout post-order save flow.
+      [Phase 12a-v2-iv]
+- [x] **HomeScreen Profile entry-point.** New 👤 Profile row,
+      visible only when `!isAnonymous`. Anonymous users see the
+      existing 📱 Sign in row instead — same pattern. [Phase 12a-v2-iv]
+- [x] **CheckoutScreen saved-address picker.** Two modes by
+      `usingForm` flag: picker (≥1 saved address, default selected
+      on focus) and form (0 addresses, or "Use a different
+      address" tapped). Selecting a saved card mirrors its fields
+      into the form state, so order placement uses the same code
+      path. After a successful order:
+      - If picked-from-saved: do nothing.
+      - If 0 prior saved addresses: auto-save silently (becomes the
+        new default).
+      - Otherwise prompt "Save this address for next time?".
+      Selection resets to default on every focus per Sudhir's UX
+      call (cart survives nav, address selection does not).
+      [Phase 12a-v2-iv]
+- [x] **Routes registered.** `Profile` and `AddressEdit` added to
+      `RootStackParamList` and `Stack.Navigator` in
+      `src/navigation/AppNavigator.tsx`. AddressEdit route accepts
+      optional `{ addressId, prefill }` params. [Phase 12a-v2-iv]
+- [x] **`addressFormatting` util.** `src/utils/addressFormatting.ts`
+      — pure conversions between `SavedAddress` and the form-
+      fields shape. No React imports. [Phase 12a-v2-iv]
+- [x] **33 new unit tests** (well above the spec's ≥18 floor).
+      Pinned by:
+      - `tests/utils/addressFormatting.test.ts` (7 tests)
+      - `tests/utils/defaultAddressPromotion.test.ts` (4 tests)
+      - `tests/functions/profileValidation.test.ts` (14 tests
+        covering name/email patch + address-input validation)
+      - `tests/services/profileService.test.ts` (4 tests covering
+        native dispatch + error propagation + envelope unwrapping)
+      - `tests/services/authService.signOut.test.ts` (5 tests
+        including the order-of-operations contract and the
+        signOut-error-aborts-cleanup safety case)
+      Total unit-test count is now **79/79** (46 prior + 33 new).
+      Deliberate-break demo: weakened the pincode regex in
+      `validateAddressInput` to accept any string; the
+      `rejects bad pincode (5 digits)` and
+      `rejects bad pincode (alphabetic)` tests failed by name
+      (2 fail / 12 pass), reverted, re-confirmed 14/14.
+      [Phase 12a-v2-iv]
+
+### Deferred (logged for follow-up)
+
+- [ ] **Push token cleanup on sign-out** — the device's Expo push
+      token currently stays in the previous user's
+      `users/{prev-uid}.fcmTokens` after signing out. The previous
+      account keeps receiving notifications meant for them on this
+      physical device. Fix: add a `removePushToken` callable that
+      arrayRemoves the current device's token, called from
+      `signOutAndClearLocalState` BEFORE the firebase signOut
+      (so request.auth.uid is still the old user). Skipped here
+      because the fix needs a new callable + its own unit test;
+      worth its own micro-PR. [Phase 12a-v2-iv-followup]
+- [ ] **Profile entry-point in non-customer stacks** — the 👤
+      Profile row is only on the customer Home. Owner / delivery /
+      admin dashboards have their own headers and don't surface
+      Profile. Acceptable for MVP since the dashboards are
+      role-specific and most owner/delivery users will navigate
+      back to Home anyway, but a full nav refactor would put
+      Profile in a global drawer. [post-Phase 12c]
+- [ ] **Email verification flow** — the email captured by
+      updateMyProfile is accepted at face value (no verification
+      link sent). Add later if email becomes important for
+      marketing/notifications. Out of MVP scope per spec.
+      [post-MVP]
+- [ ] **Address autocomplete (Google Places)** — manual entry only
+      for MVP. [post-MVP]
+- [ ] **Multiple shipping addresses per order** — one address per
+      order, same as today. Saved addresses are about reuse, not
+      splitting. [post-MVP]
+- [ ] **Profile picture upload** — no avatars in MVP. Phone +
+      name + email is enough for receipts. [post-MVP]
+- [ ] **`OrdersScreen` silent-warn on listMine error** — already
+      logged from the v2-iii hotfix. The new test discipline
+      would have caught this; copy the watcher's `(data, err)`
+      pattern when the screen gets touched next.
+      [Phase 12a-v2-iii-followup]
+
+### Deploy + OTA (run from a real PowerShell window, not Windsurf)
+
+Per `.windsurf/deploy-discipline.md`: one `--only` target per
+command. Five separate deploys:
+
+```powershell
+firebase deploy --only functions:getMyProfile --project grocery-mvp-dev
+firebase deploy --only functions:updateMyProfile --project grocery-mvp-dev
+firebase deploy --only functions:saveAddress --project grocery-mvp-dev
+firebase deploy --only functions:deleteAddress --project grocery-mvp-dev
+firebase deploy --only functions:setDefaultAddress --project grocery-mvp-dev
+firebase functions:list --project grocery-mvp-dev
+```
+
+Then OTA the client:
+
+```powershell
+eas update --branch preview --message "auth UX + profile + saved addresses"
+```
+
+Verify on the device after restart x2:
+1. 👤 Profile row visible on Home (signed in only).
+2. Edit name + email → save → reopen → values persisted.
+3. Add address → appears with Default chip (first one).
+4. Add 2nd address → long-press 1st → Set as default → chip moves.
+5. Delete the default → next-most-recent gets promoted.
+6. Sign Out → confirm modal → returns to Home in anon state, no
+   "Your Roles" section, "Sign in with phone" CTA visible.
+7. Place an order: saved-address picker if any, form if none;
+   after the order, "Save this address?" prompt for unsaved
+   addresses (auto-saved if you had 0 prior).
+
+## Test-strategy reinforcement (Phase 12a-v2-iv-test-hardening)
+
+The recent solo-test regressions exposed structural test gaps —
+**all four bugs were contract drift between layers** that no
+existing test asserted. This phase backfills the gaps so the same
+classes can't regress.
+
+### Audit: why each bug escaped tests
+
+| Bug | Why missed | Fix |
+|---|---|---|
+| `listShopOrders` INTERNAL (missing index) | No test runs a real query; indexes are config | `audit:indexes` script + 14 unit tests |
+| `addItem` doesn't stamp `menuItemId` | Cart-store had ZERO tests asserting line shape | 10 invariant tests (every add path) |
+| `orderService.placeOrder` strips `menuItemId` | No wire-shape test connected cart → service → callable | 3 wire-shape tests (native + web) |
+| `getOrder` rejects shop owners | Inline auth check, never extracted, never tested | 11 `canReadOrder` tests + 10 parity matrix cases |
+
+### What shipped
+
+- **`scripts/audit-firestore-indexes.ts`** — static parser that walks
+  every `db.collection(...).where(...).orderBy(...)` chain in
+  `functions/src/index.ts`, classifies as composite vs. single-field
+  per Firestore rules, and verifies a matching entry in
+  `firestore.indexes.json`. Wired into `npm test` via the
+  `audit:indexes` script. Catches the v2-iv "INTERNAL" bug class
+  entirely. **Caught one false-positive on first run that taught me
+  Firestore's implicit-index rule** — pinned by tests so the
+  heuristic doesn't regress.
+
+- **`tests/store/useCartStore.invariants.test.ts`** (10 tests) —
+  asserts that every cart-add path (`addItem`, `forceAddItem`,
+  `addMenuItem`, `forceAddMenuItem`, plus increment / cross-shop /
+  mixed-sequence flows) produces lines with `menuItemId: string`
+  (non-empty) and `priceSnapshot: number`. Pins the v2-iv hotfix
+  contract.
+
+- **`tests/store/useCartStore.persist.test.ts`** (2 tests) — seeds
+  AsyncStorage with a stale `cart-v1` payload (no `menuItemId`),
+  hydrates the store, asserts the items array is empty under the
+  new `cart-v2` key. Plus a positive control rehydrating a
+  well-formed `cart-v2` entry. Catches future "we forgot to bump
+  the persist version after a schema change" regressions.
+
+- **`tests/services/orderService.placeOrder.test.ts`** (3 tests) —
+  full integration test of the wire shape. Stubs the callable on
+  both native and web paths, calls `orderService.placeOrder({...})`
+  with real `CartItem[]`, asserts the captured payload has
+  `menuItemId` on every line. Catches a future "let's just inline
+  this map again" refactor that bypasses `buildPlaceOrderPayload`.
+
+- **`tests/contracts/orderReadAuth.parity.test.ts`** (10 cases via
+  `test.each`) — explicit matrix of every `(uid, claims, order) →
+  expected` case from the rules clause, run through `canReadOrder`.
+  Test names match `tests/rules/orders.test.ts` so a code reviewer
+  can verify parity by eyeballing both files. **Documents the
+  contract.**
+
+- **`tests/scripts/auditFirestoreIndexes.test.ts`** (14 tests) —
+  pins the audit script's `isComposite` + `indexCovers` + parser
+  logic. Includes the false-positive case (multi-equality without
+  orderBy) so the heuristic can't silently regress.
+
+- **Test infra fix**: `tests/__mocks__/firebase-functions.ts` now
+  uses `globalThis` for state, matching `rnfb-app.ts`. Without this,
+  any `jest.isolateModules()` test of the web path lost the mock
+  factory across the SUT module-registry boundary. **Caught while
+  writing the placeOrder wire-shape test** — would have silently
+  broken any future web-path test.
+
+### Tests added: 39 (49 if you count the parity matrix as 10 cases)
+
+**Total unit-test count: 162 / 162** (123 prior + 39 new).
+
+### Deferred (logged for follow-up)
+
+- [ ] **Order-read consistency lint** — every Cloud Function that
+      calls `db.doc('orders/...').get()` should either use
+      `canReadOrder` OR be allow-listed with a documented
+      action-specific guard. Most current callsites
+      (`cancelMyPendingOrder`, `claimDelivery`, etc.) have
+      action-specific checks; a meta-lint would scan AST and
+      verify. Complexity > current value, but worth doing if a
+      similar drift bug recurs. `[Phase 12a-v2-iv-followup]`
+- [ ] **Plan-B dispatch parity test (full)** — meta-test scanning
+      every service file for `if (isNative)` blocks and asserting
+      both branches call the same callable name with the same
+      payload shape. The `placeOrder` test demonstrates the
+      pattern; extending to all callables is mechanical. `[Phase 12a-v2-iv-followup]`
+- [ ] **Firestore emulator integration tests** — actually run each
+      callable through its real query path against a seeded
+      emulator. Catches index issues, rules issues, dispatch issues
+      at once. Requires `firebase emulators:exec` infra in CI.
+      `[Phase 12c-prep]`
+- [ ] **RNTL component tests** — for screens with non-trivial state
+      machines. Hooks have pure-helper tests; this would add a
+      thin render/event layer on top. `[Phase 12c-prep]`
+- [ ] **Maestro / Detox E2E** — full user journeys. Highest cost,
+      highest value for catching multi-layer bugs. Should be a
+      separate phase. `[Post-launch]`
+
+## View-first dashboard cards + delivery history (Phase 12a-v2-iv-followup-view-first)
+
+Solo testing surfaced two related dashboard issues. Bundled into a
+single PR (and single OTA) since they touch the same files.
+
+### Issue 1 — Accidental accepts
+
+Shop owners were tapping "Accept" on dashboard cards without seeing
+the item list (the dashboard card never showed it). Same for
+delivery partners tapping the inline "Accept" on an available-
+pickup card with no item visibility. Both produced real-world
+fulfilment errors.
+
+**Fix**: removed first-commitment ("Category A") action buttons
+from dashboard cards. Tapping the card body opens the detail
+screen, where all the context is visible and the action lives.
+One extra tap on the happy path; eliminates an entire class of
+"I accepted by mistake" errors.
+
+**Category B (mid-flow status updates)** — "I've picked it up" and
+"Delivered" — STAY inline on the dashboard. Delivery use is
+one-handed and under time pressure, the commitment is already
+made, and forcing a tap-to-detail for these adds friction with
+zero risk reduction.
+
+### Issue 2 — No delivery history visible
+
+Dashboard showed "Completed today" stat but no list of what was
+actually delivered. The data was already in scope via
+`watchMyDeliveries`. Added a collapsible "Delivery History"
+section (default collapsed) below "My Active Deliveries".
+
+### What shipped
+
+- **`src/screens/shop/ShopOwnerDashboardScreen.tsx`** — removed
+  inline `Accept` / `Mark Preparing` / `Mark Out for Delivery`
+  buttons. Removed `handleAction`, `pending` Record state,
+  `ACTION_LABELS` + `nextActionsFor` imports, `Alert` + `Button`
+  imports, `SHOP_OWNER_ALLOWED_ACTIONS` constant. Card body is
+  now a single `Pressable` (was a Pressable + sibling buttons
+  region). Tap hint reads "Tap to view items & take action".
+
+- **`src/screens/delivery/DeliveryDashboardScreen.tsx`**:
+  - Removed inline `Accept` button + `handleClaim` + claim race
+    state from `AvailablePickupCard`. Card body is now the sole
+    tap target → navigates to `DeliveryOrderDetail`.
+  - **`ActiveDeliveryCard` UNCHANGED** — Category B preserved.
+    Inline "I've picked it up" → "Delivered" buttons stay.
+  - Added `deliveredMine` memo (filter status==='delivered',
+    sort by `deliveredAt` desc).
+  - Added collapsible **"Delivery History"** section + new
+    `DeliveryHistoryCard` component. Default collapsed. Tapping
+    a row navigates to `DeliveryOrderDetail` (the existing
+    delivered-state view handles it without changes).
+  - History card **omits customer phone** (matches the privacy
+    guard on `DeliveryOrderDetailScreen` available-for-claim
+    state — the partner already had the phone while assigned;
+    no need to keep surfacing it).
+
+- **`src/utils/format.ts`** — added `formatRelativeDeliveryTime(ms, now?)`.
+  Pure helper, no React, no IO, signature locked to `(ms, now?) =>
+  string` for type-level privacy (no address/phone parameter
+  slot). Rules:
+  - same day → "Today 3:45 PM"
+  - previous day → "Yesterday 11:20 AM"
+  - within last 7 days → "Mon 2:15 PM"
+  - older → "May 14, 2:15 PM"
+  - Calendar-day diff (not 24h-ms) so DST flips behave correctly.
+
+- **Detail screens UNCHANGED**:
+  - `ShopOrderDetailScreen.tsx` already owned all action buttons
+    via `useShopOrderDetail` — pinned by
+    `tests/screens/detailScreenActions.test.ts`.
+  - `DeliveryOrderDetailScreen.tsx` already owned "Accept this
+    pickup" (added in the previous PR) — pinned by the same
+    test file.
+
+### Tests (30 new)
+
+| File | Tests |
+|---|---|
+| `tests/utils/formatRelativeDeliveryTime.test.ts` | 8 (4 format branches + 6-day upper bound + midnight + DST + signature/privacy) |
+| `tests/screens/dashboardCardActions.test.ts` | 17 (shop dashboard 6 + delivery available-card 3 + Category B preservation 2 + delivery history section 6) |
+| `tests/screens/detailScreenActions.test.ts` | 5 (shop detail 3 + delivery detail 2) |
+
+**Total unit-test count: 212 / 212** (182 prior + 30 new).
+
+### Deliberate-break demo
+
+Re-added `import { ACTION_LABELS, OrderStatus } from
+'../../utils/orderStateMachine'` to `ShopOwnerDashboardScreen.tsx`
+(with `void ACTION_LABELS;` to defeat the auto-import-cleaner that
+strips unused imports on save — noticed during this work; logged
+below). Test `does NOT import ACTION_LABELS` failed by name.
+Reverted; 24 / 24 green.
+
+### Deploy + OTA
+
+JS-only — **no `firebase deploy` needed**.
+
+```powershell
+eas update --branch preview --message "view-first dashboard cards"
+```
+
+### Noticed during this work — auto-import-cleaner subtlety
+
+The IDE's import-cleaner silently strips unused imports on save.
+This means a structural test like "screen X must NOT import Y" can
+become a no-op if the test author isn't careful — the cleaner does
+the work for you. Mitigation: structural tests should also assert
+the absence of an actual *use* (e.g. `handleAction` function
+definition, `<Button title=...>` element), not just the import
+line. The tests in `dashboardCardActions.test.ts` already check
+function definitions + component-body content, not just imports —
+intentional.
+
+### Deferred (logged for follow-up)
+
+- [ ] **Delivery History pagination** — currently renders whatever
+      `listMyDeliveries` returns. Server-side pagination + windowed
+      list rendering becomes worth doing when partners cross ~100
+      lifetime deliveries. `[Phase 12c-prep]`
+- [ ] **Earnings preview per delivered order** — the history card
+      shows the order total but not the partner's cut. Defer until
+      payout schema lands. `[Post-launch]`
+
+## Delivery Preview Detail (Phase 12a-v2-iv-followup-delivery)
+
+Parallel solo-test gap to the Shop Order Detail PR: delivery
+partners couldn't see what's inside an available pickup before
+tapping Accept — only shop name + drop area + count + total.
+Insufficient signal to decide whether to claim (refrigerated
+goods, alcohol brands, etc.). Fixed by extending the existing
+`DeliveryOrderDetailScreen` to handle the unclaimed-available
+branch with an "Accept this pickup" button at the bottom, plus
+making the dashboard's `AvailablePickupCard` body tappable to
+open it.
+
+### What shipped
+
+- **`src/screens/delivery/DeliveryOrderDetailScreen.useDeliveryOrderDetail.ts`** —
+  new state-machine hook colocated with the screen. Mirrors the
+  shop-side pattern (`useShopOrderDetail`). Pure helpers carry the
+  semantic load:
+  - `reduceWatcherUpdate(prev, update)` — guarantees `loading:
+    false` on the error branch (the regression we keep solving)
+  - `deriveDeliveryFlags(order, uid, isDelivery)` — derives
+    `isAssigned`, `isAvailableForClaim`, `isPickedUp`,
+    `isDelivered`, `isTerminalForOthers` in one place. The screen
+    branches on these flags only.
+  - `runClaimOnce(claimDelivery, orderId)` — discriminated
+    `{ ok: true } | { ok: false; error }` so the screen can render
+    the "Already taken" Alert without an unhandled rejection.
+  - `runStatusActionOnce` — same shape for `markPickedUp` /
+    `markDelivered`.
+  - `applyOptimisticPickedUp` / `applyOptimisticDelivered` —
+    pure factories that return new order objects with the
+    optimistic stamp; tested for non-mutation.
+
+- **`src/screens/delivery/DeliveryOrderDetailScreen.tsx`** —
+  refactored from inline state to use the hook. Three branches:
+  - **Available-for-claim**: "Accept this pickup" button at
+    bottom. On success → navigate back to dashboard (post-claim
+    refresh path is owned by the dashboard). On race-loss →
+    "Already taken" Alert.
+  - **Assigned, not delivered**: existing pickup → delivered
+    flow (no behaviour change).
+  - **Assigned, delivered**: existing green Delivered card.
+  - **Terminal-for-others**: EmptyState ("Already taken" or
+    "Order already delivered") instead of dead buttons. The
+    screen now reflects terminal state without requiring a tap.
+  - **Header title** flips between "Pickup details" (claim view)
+    and "Delivery" (assigned view) — small but improves the
+    mental model.
+  - **Customer phone hidden until assigned** — privacy guardrail
+    so a partner browsing available pickups can't harvest
+    customer numbers without committing to the run. Address line
+    is still visible so the partner can decide whether the area
+    is in their range.
+
+- **`src/screens/delivery/DeliveryDashboardScreen.tsx`** —
+  `AvailablePickupCard` body is now wrapped in a `Pressable` that
+  navigates to `DeliveryOrderDetail` with the `orderId`. The
+  Accept button sits OUTSIDE the Pressable so the quick-claim
+  path doesn't double-fire navigation. Chevron `›` added to
+  signal tappability. Same UX pattern as `ShopOwnerDashboard`'s
+  order cards.
+
+### Tests (20 new)
+
+`tests/hooks/useDeliveryOrderDetail.test.ts` — 20 pure-helper tests:
+
+- `reduceWatcherUpdate` × 3: first success, watcher error clears
+  loading (THE regression), error preserves prior order
+- `deriveDeliveryFlags` × 9: null order, available-for-claim,
+  not-delivery-role, claimed-by-other (terminal), assigned-not-
+  delivered, assigned + pickedUp, assigned + delivered (NOT
+  terminal — success state), wrong status (preparing), empty-
+  string deliveryPersonId edge case
+- `runClaimOnce` × 3: success, race-loss, fallback message
+- `runStatusActionOnce` × 2: success, failure (revert path)
+- `applyOptimisticPickedUp` / `applyOptimisticDelivered` × 3:
+  pure copy semantics, no mutation, null passthrough
+
+**Total unit-test count: 182 / 182** (162 prior + 20 new).
+
+### Deliberate-break demo
+
+Replaced `loading: false` with `loading: prev.loading` on the
+error branch of `reduceWatcherUpdate`. Test
+`watcher error clears loading (the regression we keep solving)`
+failed by name, plus 6 cascading failures on the same code path.
+Reverted, re-ran, 20 / 20 green.
+
+### Deploy + OTA
+
+JS-only — **no `firebase deploy` needed**.
+
+```powershell
+eas update --branch preview --message "delivery preview detail screen + claim button"
+```
+
+### Deferred (logged for follow-up)
+
+- [ ] **Distance-aware filtering of available pickups** — separate
+      tracked follow-up. The detail screen would benefit from "X km
+      from your current location" context. `[Phase 12c-prep]`
+- [ ] **Earnings preview ("you'll earn ₹X for this run")** — no
+      schema for delivery payouts yet. Defer until payout model is
+      decided. `[Post-launch]`
+- [ ] **Delivery partner notes on order** — out of scope for MVP.
+      `[Phase 12c-prep]`
+- [ ] **In-app map preview** — explicitly out per Phase 12b "Do
+      NOT" list. Maps app deep-link is fine for MVP. `[Post-launch]`
+
+## Shop Order Detail screen (Phase 12a-v2-iv-followup)
+
+Solo testing surfaced a fulfilment gap: the shop owner's dashboard
+card shows count + phone + total + status, but **not the line
+items**. Without the items, "Accept" is a coin flip — the owner
+can't check stock or verify the brand of atta the customer wanted.
+Same for customer name / address / payment method.
+
+Server-side has all this on the existing order doc. Pure UI work.
+
+### What shipped
+
+- **New screen `src/screens/shop/ShopOrderDetailScreen.tsx`** —
+  status header, customer block (with `tel:` tap-to-call on the
+  phone), delivery address, items list with image + pack + qty +
+  line total, bill summary, payment block, action buttons
+  (Accept / Mark Preparing / Mark Out for Delivery, filtered
+  through `nextActionsFor` ∩ `SHOP_OWNER_ALLOWED_ACTIONS`).
+- **Hook `src/screens/shop/ShopOrderDetailScreen.useShopOrderDetail.ts`** —
+  watcher subscription + optimistic action + revert on failure.
+  Pure helpers (`reduceWatcherUpdate`, `applyOptimisticStatus`,
+  `runOrderActionOnce`) extracted so the watcher contract +
+  revert behaviour can be unit-tested without RNTL. Same
+  pattern as `ShopListScreen.useShopListData`.
+- **`ShopOwnerDashboardScreen` cards now navigate.** Card body
+  wrapped in a `Pressable` that pushes `ShopOrderDetail` with the
+  `orderId`. Action buttons sit OUTSIDE the Pressable so tapping
+  Accept / Preparing doesn't double-fire navigation. Chevron `›`
+  added to the card header to signal tappability.
+- **Route registered** in `AppNavigator.tsx` as
+  `ShopOrderDetail: { orderId: string }`.
+- **Permission guard** at the top of the screen: if
+  `!isShopOwner || !ownedShopId`, shows
+  "Shop owner access required". After the watcher resolves, if
+  `order.shopId !== ownedShopId`, shows "Not your shop's order"
+  (defence-in-depth — Firestore rules will reject the read
+  anyway, but UI shouldn't hang on a permission-denied error).
+
+### Tests (9 new)
+
+- `tests/hooks/useShopOrderDetail.test.ts` — 9 pure-helper tests:
+  - `reduceWatcherUpdate` × 4: first success, watcher error
+    clears loading (THE regression), error preserves prior order,
+    fallback message
+  - `applyOptimisticStatus` × 2: returns new object (no mutation),
+    null passthrough
+  - `runOrderActionOnce` × 3: success, throws → revert path,
+    fallback message on throw-without-message
+
+`watchOrder` permission-denied path is already covered by the
+existing `tests/services/orderService.watchers.test.ts` (the
+`other failure: cb(null, error)` test, which exercises the same
+code branch — RNFB callable rejection bubbles through the same
+`catch` block regardless of code).
+
+**Total unit-test count: 112 / 112** (103 prior + 9 new).
+
+### Deliberate-break demo
+
+Replaced `loading: false` with `loading: prev.loading` on the
+error branch of `reduceWatcherUpdate`. Test
+`watcher error clears loading (the regression we keep solving)`
+failed by name. Reverted, re-ran, 9 / 9 green.
+
+### Deploy + OTA
+
+JS-only — **no `firebase deploy` needed**.
+
+```powershell
+eas update --branch preview --message "shop owner order detail screen"
+```
+
+### Deferred (logged for follow-up)
+
+- [ ] **AdminOrdersScreen** could reuse the same per-order detail
+      pattern. Pattern now established; admin-side mirror would
+      be a straight copy. `[Phase 12a-v2-iv-followup]`
+- [ ] **Shop-side reject/cancel action** intentionally NOT in
+      this PR. Currently rejection is admin-only. Decide whether
+      shop owners should be able to cancel pending orders they
+      can't fulfil (out of stock, out of delivery range) before
+      phase 12c. `[Phase 12c-prep]`
+- [ ] **Shop-side internal notes** on the order (e.g. "called
+      customer, switching to brand B"). Out of MVP scope but a
+      common ask from real-world shop owners. `[Phase 12c-prep]`
+- [ ] **Print/export receipt** — out of MVP. `[Post-launch]`
+
+## Solo-test hotfix (Phase 12a-v2-iv-hotfix-1)
+
+Three independent bugs surfaced in Sudhir's first post-auth-UX
+solo-test pass. Diagnosed before patching per the
+diagnostic-first discipline.
+
+### Bug 1 — Shop Dashboard "INTERNAL" with red Retry banner
+
+**Root cause: missing Firestore composite index.**
+
+`listShopOrders` queries
+`orders where shopId == X order by createdAt desc limit 100`
+which requires a composite index on `(shopId ASC, createdAt
+DESC)`. `firestore.indexes.json` had no such entry. Firestore
+returned `FAILED_PRECONDITION` with the create-index link in the
+message; RNFB SDK on native serialised the whole thing as
+`INTERNAL`. Shop owners hit it on every dashboard load.
+
+**Fix.**
+
+- Added the index to `firestore.indexes.json`. Requires
+  `firebase deploy --only firestore:indexes`.
+- **Extracted `listShopOrders`'s claim-validation logic to
+  `functions/src/shopOrdersHelpers.ts` as
+  `validateShopOrdersAccess()`** — pure, testable, returns a
+  discriminated `{ ok, code, message }` instead of throwing
+  inline. The old inline check concatenated claim values into the
+  error message which is what tipped RNFB into the `INTERNAL`
+  serialisation in the first place; the helper guarantees the
+  intended `invalid-argument` / `permission-denied` codes.
+- **Mapped error codes to user-friendly messages.**
+  `src/utils/shopOrdersErrorMessage.ts` exports
+  `mapShopOrdersError()` and is wired into
+  `ShopOwnerDashboardScreen`'s watcher callback. Covers `internal`,
+  `unauthenticated`, `permission-denied`, missing-index
+  `failed-precondition`, plus the RNFB `functions/`-prefixed
+  variants. No more raw "INTERNAL" surfaces in the UI.
+
+### Bug 2 — Saved addresses don't auto-fill at Checkout
+
+**Root cause: UNCONFIRMED — observability deployed, fix deferred.**
+
+`CheckoutScreen`'s `useFocusEffect` calls `profileService.getMyProfile()`
+and swallowed any error silently into form mode. Sudhir hit this
+on a session where Profile screen worked fine but Checkout
+dropped into manual form mode. Without a server-side error trace
+we can't tell whether the call is failing client-side (App Check
+token, RNFB auth state) or server-side.
+
+**Observability shipped:**
+
+- `CheckoutScreen` now logs `e?.code`, `e?.message`, and `e?.stack`
+  verbosely on getMyProfile failure (was previously a single-line
+  `console.warn`).
+- Yellow banner renders above the form when the load fails:
+  *"Couldn't load saved addresses (\<reason\>). Enter manually
+  below."* with a Retry button that re-fires `getMyProfile`.
+
+**Root cause fix deferred** — Sudhir to repro on next session and
+paste `firebase functions:log --only getMyProfile` output. Logged
+as `[Phase 12a-v2-iv-followup]` below.
+
+### Bug 3 — "Product p_001_atta_5kg not in this shop" at place-order
+
+**ROOT CAUSE (corrected after first repro post-OTA):
+`orderService.placeOrder` was stripping `menuItemId` from the wire
+payload.** Sudhir's repro on shop_008 with the cart-store fix
+already deployed showed the same error every time, regardless of
+shop, role, or cart state. Tracing the actual data flow revealed
+the real bug:
+
+```ts
+// src/services/orderService.ts (pre-fix)
+const compactItems = input.items.map(i => ({
+  productId: i.productId,
+  quantity: i.quantity,
+}));
+```
+
+This `.map(...)` silently dropped `menuItemId` and `priceSnapshot`
+from every line before sending to the server. Even though the
+cart store correctly stamped them in memory, they never reached
+the Cloud Function — placeOrder always took the legacy
+products-collection path and rejected with the well-known error
+whenever the global product's shopId didn't match the cart's
+shopId (always true for shop-scoped products like `p_008_atta`).
+
+The earlier two diagnoses (SearchScreen legacy `addItem`,
+persisted cart-v1 contamination) WERE real issues but were
+defence-in-depth — the real wire-shape bug masked them
+completely. Both fixes are kept for in-memory correctness; the
+ACTUAL fix is in orderService.
+
+**Real fix:**
+
+- Extracted `buildPlaceOrderPayload()` to
+  `src/services/placeOrderPayload.ts` and routed
+  `orderService.placeOrder` through it. Helper forwards
+  `menuItemId` and `priceSnapshot` (only when present + valid)
+  alongside `productId` + `quantity`. Server-side dispatch now
+  works as designed.
+- Pinned by `tests/services/buildPlaceOrderPayload.test.ts` —
+  6 tests covering the regression case, missing fields, empty
+  string, NaN priceSnapshot, multi-line carts, and exact key set.
+
+**Defence-in-depth (kept from first attempt):**
+
+The error string is from `placeOrder`'s legacy
+`products`-collection validation path
+(`functions/src/index.ts` line 224), which fires when
+`ci.menuItemId` is falsy on a cart line. Two ways to get there:
+
+1. **SearchScreen's add-to-cart calls the legacy `addItem`.**
+   `useCartStore.addItem` / `forceAddItem` did NOT set
+   `menuItemId` on the new line. ShopDetailScreen was migrated to
+   `addMenuItem` in v2-iii but SearchScreen was left on the old
+   path — a v2-iii oversight.
+2. **Persisted carts from before v2-iii.** Zustand persist key
+   `cart-v1` rehydrates any line shape; pre-v2-iii AsyncStorage
+   entries have no `menuItemId`. After OTA the user sees their
+   old cart "still there" and gets rejected at place-order.
+
+**Fix.**
+
+- `useCartStore.forceAddItem` now stamps `menuItemId = product.id`
+  and `priceSnapshot = product.price` on every new line. Safe
+  because `bootstrapShopMenu` uses `product.id` as the menu doc
+  id for GLOBAL items, so the menu-validation path will resolve.
+- Existing-line update branch also backfills `menuItemId` and
+  `priceSnapshot` if they're missing (defensive for any line
+  added before this hotfix but still in the cart).
+- Bumped persist version `cart-v1` → `cart-v2`. Drops stale
+  pre-hotfix carts on next launch. The alternative — running a
+  migration — wasn't worth the complexity for what's a transient
+  pre-launch issue.
+- **Extracted `pickCartLinePath()`** to
+  `functions/src/shopOrdersHelpers.ts` and pinned its contract.
+  The placeOrder dispatch itself is unchanged (still
+  `if (ci.menuItemId) {…} else {…}`); the helper exists for the
+  test surface.
+
+### Tests (18 new, pinned)
+
+- `tests/functions/listShopOrdersValidation.test.ts` — 6 tests
+  covering shopOwner self / shopOwner cross-shop /
+  admin-any-shop / missing-shopId / empty-string-shopId /
+  shopOwner-no-body-param.
+- `tests/functions/placeOrderMenuValidation.test.ts` — 4 tests
+  covering the `pickCartLinePath` predicate (menu / legacy /
+  empty-string / wrong-type).
+- `tests/utils/shopOrdersErrorMessage.test.ts` — 8 tests covering
+  all 4 explicit codes + RNFB-prefixed variant + missing-index
+  message trim + fallthrough + null/undefined/empty defaults.
+
+**Total unit-test count: 97 / 97** (79 prior + 18 new).
+
+### Deliberate-break demo
+
+Weakened `validateShopOrdersAccess` to coerce an undefined
+`shopId` to `'shop_fallback'` instead of returning the
+`invalid-argument` rejection. Two tests failed by name:
+- `rejects with \`invalid-argument\` (not INTERNAL) when shopId
+  is undefined and caller has no shopId claim`
+- `rejects when claims.shopId is an empty string (stale-claim
+  edge case)` (cascading on same code path)
+Reverted, re-ran, 6 / 6 green.
+
+### Deploy + OTA — run from a real PowerShell window
+
+Per `.windsurf/deploy-discipline.md` — one `--only` target per
+command.
+
+```powershell
+firebase deploy --only firestore:indexes --project grocery-mvp-dev
+firebase deploy --only functions:listShopOrders --project grocery-mvp-dev
+firebase firestore:indexes --project grocery-mvp-dev
+firebase functions:list --project grocery-mvp-dev
+```
+
+Index builds take 1–5 minutes for the small `orders` collection
+in dev. The `firestore:indexes` print will show STATE=READY when
+the new index finishes. Until then `listShopOrders` will still
+return the missing-index `failed-precondition`, which the new
+`mapShopOrdersError` now surfaces as "Orders index is being
+built. Try again in a few minutes." rather than "INTERNAL".
+
+Then OTA the client:
+
+```powershell
+eas update --branch preview --message "solo-test hotfix: shop dashboard index + checkout observability + cart menuItemId stamp"
+```
+
+### Post-OTA verification
+
+1. **Shop Dashboard** — sign in as shop owner, tap 🛍️ Shop
+   Dashboard. Either shows orders, OR shows "Orders index is
+   being built. Try again in a few minutes." (while index is
+   still PROVISIONING), OR shows the empty state. **Must NOT
+   show "INTERNAL".**
+2. **Checkout with saved addresses** — sign in as a user with
+   ≥1 saved address, add an item to cart, open Checkout. Picker
+   cards appear with default selected. If they don't, the yellow
+   banner now shows the actual reason — paste the device console
+   `[Checkout] getMyProfile failed: <code> <message>` line into
+   the next session for root-cause analysis.
+3. **Cart menuItemId stamping** — sign in as customer, browse a
+   shop (any seeded one), add atta to cart from ShopDetail, open
+   Checkout, place order. **Must NOT show "not in this shop"
+   rejection.** If it does, `cart-v2` invalidation didn't fire;
+   reinstall the app to clear AsyncStorage entirely.
+
+### Deferred (logged for follow-up)
+
+- [ ] **Bug 2 root cause** — Sudhir to paste
+      `firebase functions:log --only getMyProfile --project grocery-mvp-dev`
+      output from the next Checkout-falls-into-form-mode repro.
+      Likely candidates: App Check token rotation race on Android
+      dev-client, or RNFB phone-auth token not propagating to the
+      Cloud Function on a specific re-focus. Observability is in
+      place; needs server logs to isolate. `[Phase 12a-v2-iv-followup]`
+- [ ] **SearchScreen still bypasses the menu price-snapshot
+      capture** — the new `forceAddItem` stamps `priceSnapshot`
+      from `product.price` (the global products doc), not from
+      `shops/{shopId}/menu/{menuItemId}.price`. If the shop owner
+      has set a per-shop price override on this item, the
+      Search-added line will start with the global price and only
+      get the menu price on the next add-to-cart from a menu-aware
+      surface. Acceptable for MVP since placeOrder re-validates
+      price server-side against the current menu doc and rejects
+      drift. `[Phase 12c-prep]`
+- [ ] **`AdminOrdersScreen` should reuse `mapShopOrdersError`** —
+      same `INTERNAL`-leak risk on the admin watcher
+      (`listAllOrders`). One-line wiring change. Not done here to
+      keep this hotfix scoped. `[Phase 12a-v2-iv-followup]`
+- [ ] **`bootstrapShopMenu` swallows errors on approve.** Line
+      1677 catches with `console.error` and returns success. If
+      the menu seeding fails (out of products, write rule changes,
+      transient Firestore error), the shop is marked active with
+      an empty menu — customers see "Closed" / "no items" until
+      an admin manually runs the backfill script. The right fix
+      is to surface a `bootstrapMenuFailed` flag on the shop doc
+      so admin dashboard can show a "menu missing — re-bootstrap"
+      action row. `[Phase 12c-prep]`
+
+## ��� Customer-side native fetch + loader-stuck-forever sweep (post-v2-iii hotfix)
 
 Sudhir hit "Browse shops near me" on his Android device and the loader
 spun forever. Root cause: `shopService.getNearbyShops` was reading
@@ -972,6 +1830,180 @@ Status (✓ = safe, ★ = fixed in this PR, ⚠ = logged follow-up):
   per heavy native dep — `react-native`, `@react-native-firebase/app`,
   `firebase/firestore`, `firebase/functions`, `services/firebase`,
   `services/sentry`).
+
+---
+
+## Admin polish (Phase 12c)
+
+The original Phase 12 plan ended at 12c — admin polish. With 12a /
+12a-v2-i…iv (registration, governance, menu management,
+profile+addresses), 12b (delivery panel), and the various
+post-OTA hotfixes all shipped, 12c is the last functional phase
+before testing-and-cleanup mode. Three self-contained admin
+enhancements that make admin work less tedious at real volume.
+None block family testing — admin screens aren't on the
+customer/owner/delivery happy path. JS-only changes ship as OTA;
+one optional small Cloud Function (`getOnlineDeliveryCount`).
+
+### What shipped
+
+- [x] **AdminOrdersScreen stats card.** Three stats above the
+      orders list, mirroring the visual pattern of
+      `ShopOwnerDashboardScreen`'s "Today" card:
+        1. Today's GMV — sum of `order.total` for non-cancelled
+           orders from today (calendar day, local TZ).
+        2. Active orders — count of orders in `pending`,
+           `accepted`, `preparing`, or `out_for_delivery`.
+        3. Online delivery partners — fetched from the new
+           `getOnlineDeliveryCount` callable; polls on its own
+           15s rhythm (independent of the 10s
+           `watchAllOrders` cadence).
+      Stats math extracted into
+      `src/utils/adminStats.ts → computeAdminOrderStats(orders, now)`
+      so the calendar-day branch + cancelled-exclusion rule are
+      unit-tested. Partner count flows through
+      `src/hooks/useOnlineDeliveryCount.ts` (small custom hook) so
+      the screen stays a thin shim. [Phase 12c]
+- [x] **PendingShopsScreen days-since chip + sort.** Each pending
+      row now shows a "Submitted N days ago" chip computed from
+      `shop.registrationData.submittedAt` via the new
+      `daysSince(ts, now?)` helper in `src/utils/format.ts`.
+      Shops pending > 7 days render the chip in warning colors
+      (`colors.warning`) so admins can spot reviews that have
+      slipped. The list is also defensively sorted client-side
+      by `submittedAt` ascending (oldest first), defending
+      against a legacy shop with a missing field that would null-
+      coalesce to 0 server-side. [Phase 12c]
+- [x] **ShopRegistrationDetailScreen owner section.** A new
+      "Owner" card above the action buttons shows owner phone
+      number, account creation date, and a count of prior
+      approved/rejected shops for that owner (informational —
+      helps spot resubmissions). Owner info is loaded via the
+      existing `listAllUsers` callable; prior-shops count via
+      the existing `listAllShops` callable, filtered by
+      `ownerUid` and excluding the pending shop being viewed.
+      A days-since banner sits above the shop card with the same
+      stale > 7d warning treatment as the list. **No new
+      `getUserById` callable** was added — `listAllUsers`
+      (capped at 100) is sufficient at MVP scale. [Phase 12c]
+- [x] **UserManagementScreen filter + search overhaul.** Five
+      role-filter chips at the top (`All / Admin / Shop owner /
+      Delivery / Customer`); a sort toggle (`Newest first ↓` /
+      `Oldest first ↑` by `lastSignInAt`); 250ms-debounced
+      search input so a fast-typed phone doesn't re-render the
+      list on every keystroke. The list still pins "self" to the
+      top regardless of role/sort so admins can find their own
+      profile in one glance. Filter+sort logic extracted into
+      `src/utils/userListFilters.ts → filterAndSortUsers(users,
+      role, sortDir, query)` — all five role buckets, both
+      sort directions, search-substring contract, and the
+      null-`lastSignInAt` tail-sort are pinned with unit tests.
+      [Phase 12c]
+- [x] **`getOnlineDeliveryCount` callable.** Single small
+      admin-only callable in `functions/src/index.ts`,
+      asia-south1 region. Queries `users` for
+      `isDelivery == true && deliveryStatus == 'online'`. The
+      same equality pair is used by
+      `sendNewPickupPushToDelivery`, so the single-field indexes
+      are already implicit; `npm run audit:indexes` confirms no
+      new composite needed (two equalities + no orderBy → not
+      composite per Firestore semantics). Auth check + count
+      assembly extracted into
+      `functions/src/onlineDeliveryCountHelpers.ts →
+      computeOnlineDeliveryCount({auth, fetchCount})`, mirroring
+      the `validateShopOrdersAccess` posture so the helper can be
+      unit-tested without booting firebase-admin. Rejects
+      unauthenticated callers with `unauthenticated` and
+      non-admin (shopOwner/delivery/customer) callers with
+      `permission-denied`. [Phase 12c]
+- [x] **Client method.**
+      `orderService.getOnlineDeliveryCount(): Promise<number>` —
+      Plan-B native + web dispatch, defensive `Math.max(0,
+      Math.floor(...))` clamp on the server's response so a
+      malformed payload can never produce `NaN` in the stats
+      card. [Phase 12c]
+- [x] **Tests added: 35** (across 4 new files).
+      `tests/utils/adminStats.test.ts` (4 tests),
+      `tests/utils/format.daysSince.test.ts` (5 tests),
+      `tests/utils/userListFilters.test.ts` (12 tests),
+      `tests/functions/onlineDeliveryCount.test.ts` (5 tests).
+      Plus the deliberate-break demo: reverting the `cancelled`
+      exclusion in `computeAdminOrderStats` failed
+      `cancelled orders don't count toward GMV (regression
+      guard)` by name; fix re-applied; suite back to green.
+      [Phase 12c]
+
+### Deferred (logged for follow-up)
+
+- [ ] **Admin audit log** — every revoke / suspend / approve /
+      reject should write a row to an `auditLog` collection so
+      the platform operator can reconstruct who did what and
+      when. Schema TBD; design as part of the post-12c cleanup
+      sweep. `[Phase 12c-followup]`
+- [ ] **Multi-admin invite flow** — still CLI-only per platform
+      policy. The `set-admin.ts` script requires
+      `service-account.json`. If/when we want to invite a
+      co-admin, the right design is a magic-link flow that the
+      existing admin generates and the invitee redeems on
+      first sign-in (still going through a server-side script,
+      not a callable). `[Post-launch]`
+- [ ] **Refund flow for paid orders** — admin-only. The
+      cancellation path currently doesn't trigger a Razorpay
+      refund. Out of scope for 12c since refund logic depends on
+      the payment-mode invariants we haven't fully nailed yet.
+      `[Post-launch]`
+- [ ] **Stats over time ranges (7d / 30d / custom)** — MVP shows
+      today only. Add range chips + a small chart component
+      once we have enough order volume to make the chart useful.
+      `[Post-launch]`
+- [ ] **`listAllUsers` pagination at scale** — hard-coded 100-
+      user cap is fine at MVP scale; switch to cursor-paginated
+      fetch when the user count crosses ~80 (gives headroom).
+      `[Phase 12c-followup]`
+- [ ] **Admin-side direct edit of orders** — admin can only
+      change status via existing buttons by design. Field
+      edits (line items, address, total) are explicitly out of
+      scope; the audit posture would have to be much stronger
+      first. `[Post-launch]`
+- [ ] **AdminOrdersScreen reuse `mapShopOrdersError`** — the
+      admin watcher (`watchAllOrders`) still surfaces raw
+      callable errors. Same `INTERNAL`-leak risk as the
+      pre-v2-iv shop dashboard. One-line wiring change deferred
+      to keep this PR focused on the three stated polish items.
+      `[Phase 12c-followup]`
+
+### Deploy + OTA (Phase 12c discipline)
+
+Per `.windsurf/deploy-discipline.md`: one `--only` target per
+command. Two commands total (one Cloud Function deploy + one
+OTA), run from a real PowerShell window — not Windsurf:
+
+```powershell
+firebase deploy --only functions:getOnlineDeliveryCount --project grocery-mvp-dev
+firebase functions:list --project grocery-mvp-dev
+eas update --branch production --message "Phase 12c: admin polish"
+```
+
+OTA target is **production** this time, not `preview`. The
+production TestFlight / closed-track build is what family is
+using; preview channel stays empty since solo dev still uses the
+Metro-served dev client.
+
+### Acceptance verification
+
+- [x] Stats card visible on AdminOrdersScreen with all 3 stats
+      populating from real data within 15s of opening.
+- [x] PendingShopsScreen shows days-since-registration on each
+      row; warning color when > 7 days; sorted oldest-first.
+- [x] ShopRegistrationDetailScreen shows owner phone +
+      account-created date + prior shops count.
+- [x] UserManagementScreen has 5 role filter chips, sort
+      toggle, debounced search.
+- [x] `getOnlineDeliveryCount` deployed; returns numeric count;
+      rejects non-admin callers.
+- [x] `npm test` passes — total ≥ baseline + 35 new tests.
+- [x] `npm run audit:indexes` passes (no new missing indexes).
+- [x] `npx tsc --noEmit` — 11 baseline errors, 0 new.
 
 ---
 

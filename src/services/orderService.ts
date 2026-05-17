@@ -26,6 +26,7 @@ import type {
 } from '../types';
 import type { OrderStatus } from '../utils/orderStateMachine';
 import { db, functions, perf } from './firebase';
+import { buildPlaceOrderPayload } from './placeOrderPayload';
 import { Sentry } from './sentry';
 
 const isNative = Platform.OS !== 'web';
@@ -93,10 +94,19 @@ export const orderService = {
       level: 'info',
     });
     try {
-      const compactItems = input.items.map(i => ({
-        productId: i.productId,
-        quantity: i.quantity,
-      }));
+      // Phase 12a-v2-iv-hotfix-1 ROOT-CAUSE FIX: forward menuItemId
+      // and priceSnapshot to the server via buildPlaceOrderPayload.
+      // The previous inline `.map({ productId, quantity })` silently
+      // stripped the v2-iii fields the server uses to dispatch to
+      // the per-shop menu validation path. Without them, placeOrder
+      // always took the legacy products-collection path and rejected
+      // with "Product X not in this shop" whenever the global
+      // product's shopId didn't match the cart's shopId — which is
+      // always, for shop-scoped products like p_008_atta. The
+      // useCartStore changes shipped earlier in this hotfix are
+      // defence-in-depth but were rendered moot by THIS map.
+      // Pinned by tests/services/buildPlaceOrderPayload.test.ts.
+      const compactItems = buildPlaceOrderPayload(input.items);
       const payload = {
         shopId: input.shopId,
         items: compactItems,
@@ -397,6 +407,24 @@ export const orderService = {
     const fn = httpsCallable(functions, 'listAllUsers');
     const result = await fn();
     return ((result.data as UserInfo[]) ?? []);
+  },
+
+  // Phase 12c: count of delivery partners currently marked online.
+  // Admin-only (server enforces). Used by useOnlineDeliveryCount hook
+  // on the AdminOrdersScreen stats card.
+  async getOnlineDeliveryCount(): Promise<number> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'getOnlineDeliveryCount',
+      );
+      const result = await fn();
+      const data = result.data as { count?: number } | undefined;
+      return Math.max(0, Math.floor(data?.count ?? 0));
+    }
+    const fn = httpsCallable(functions, 'getOnlineDeliveryCount');
+    const result = await fn();
+    const data = result.data as { count?: number } | undefined;
+    return Math.max(0, Math.floor(data?.count ?? 0));
   },
 
   async listAllShops(): Promise<Shop[]> {

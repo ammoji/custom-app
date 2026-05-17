@@ -1,14 +1,14 @@
 import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import React, { useEffect, useState } from 'react';
 import {
-  Alert,
-  Modal,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
+    Alert,
+    Modal,
+    Pressable,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../../components/common/Button';
@@ -19,7 +19,7 @@ import { colors, radii, shadow, spacing, typography } from '../../constants/them
 import type { RootStackParamList } from '../../navigation/AppNavigator';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
-import type { Shop } from '../../types';
+import type { Shop, UserInfo } from '../../types';
 import { formatOrderTime } from '../../utils/format';
 
 /**
@@ -46,6 +46,11 @@ export default function ShopRegistrationDetailScreen() {
   >(null);
   const [showRejectModal, setShowRejectModal] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
+  // Phase 12c: owner info + prior-shops count, fetched alongside the
+  // shop record. Failure to load these is non-fatal — they're
+  // informational, not action-blocking.
+  const [owner, setOwner] = useState<UserInfo | null>(null);
+  const [priorShopsCount, setPriorShopsCount] = useState<number | null>(null);
 
   useEffect(() => {
     if (!isAdmin) {
@@ -59,6 +64,37 @@ export default function ShopRegistrationDetailScreen() {
         if (cancelled) return;
         const match = list.find(s => s.id === shopId) ?? null;
         setShop(match);
+
+        // Look up owner + prior shops in parallel. listAllUsers is
+        // capped at 100 (matches the admin user-management screen);
+        // listAllShops returns up to 100 shops. Both are fine for
+        // MVP scale; pagination is tracked in the prelaunch checklist.
+        if (match?.ownerUid) {
+          const ownerUid = match.ownerUid;
+          try {
+            const [users, shops] = await Promise.all([
+              orderService.listAllUsers(),
+              orderService.listAllShops(),
+            ]);
+            if (cancelled) return;
+            setOwner(users.find(u => u.uid === ownerUid) ?? null);
+            // Prior shops = approved or rejected (i.e. non-pending)
+            // shops belonging to this owner OTHER than the one
+            // currently under review. Helps spot resubmissions.
+            const prior = shops.filter(
+              s =>
+                s.ownerUid === ownerUid &&
+                s.id !== match.id &&
+                s.status !== 'pending',
+            );
+            setPriorShopsCount(prior.length);
+          } catch (e) {
+            console.warn(
+              '[ShopRegistrationDetail] owner/shops fetch failed:',
+              e,
+            );
+          }
+        }
       } catch (e) {
         console.warn('[ShopRegistrationDetail] fetch failed:', e);
       } finally {
@@ -328,6 +364,24 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   detailValue: { ...typography.body, flex: 1, textAlign: 'right' },
+  daysBanner: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    marginBottom: spacing.md,
+  },
+  daysBannerStale: {
+    backgroundColor: '#FEF2E5',
+    borderColor: colors.warning ?? '#E89A3C',
+  },
+  daysBannerText: {
+    ...typography.bodyBold,
+    color: colors.textSecondary,
+  },
+  daysBannerTextStale: { color: colors.warning ?? '#B35400' },
   actions: { marginTop: spacing.md },
   modalBackdrop: {
     flex: 1,

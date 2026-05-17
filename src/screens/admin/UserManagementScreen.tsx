@@ -1,13 +1,13 @@
 import { useNavigation } from '@react-navigation/native';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  FlatList,
-  Pressable,
-  RefreshControl,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
+    FlatList,
+    Pressable,
+    RefreshControl,
+    StyleSheet,
+    Text,
+    TextInput,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import EmptyState from '../../components/common/EmptyState';
@@ -17,8 +17,30 @@ import { colors, radii, shadow, spacing, typography } from '../../constants/them
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
 import type { UserInfo } from '../../types';
+import {
+    filterAndSortUsers,
+    type RoleFilter,
+} from '../../utils/userListFilters';
+
+// Inlined here (instead of imported from userListFilters) because
+// VSCode's "organize imports" on save strips type-only imports
+// whose only usage is inside the function body — even when those
+// usages are valid (useState's generic arg, callback param). The
+// shape matches `SortDir` in src/utils/userListFilters.ts exactly;
+// `filterAndSortUsers` accepts this string union by structural
+// type compatibility.
+type SortDir = 'newest' | 'oldest';
 
 const POLL_MS = 30_000;
+const SEARCH_DEBOUNCE_MS = 250;
+
+const ROLE_CHIPS: { label: string; value: RoleFilter }[] = [
+  { label: 'All', value: 'all' },
+  { label: 'Admin', value: 'admin' },
+  { label: 'Shop owner', value: 'shopOwner' },
+  { label: 'Delivery', value: 'delivery' },
+  { label: 'Customer', value: 'customer' },
+];
 
 /**
  * Admin user list. Polls listAllUsers every 30s. Tap a row to open
@@ -34,18 +56,31 @@ export default function UserManagementScreen() {
   const [users, setUsers] = useState<UserInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // Phase 12c additions:
+  //   - filter: raw input string (re-renders on every keystroke)
+  //   - debouncedFilter: lagged copy that drives the actual list
+  //     filter, so a fast-typed phone doesn't re-render the list
+  //     on every character (250ms debounce per spec).
+  //   - role: chip selection (admin/shopOwner/delivery/customer/all)
+  //   - sortDir: 'newest' | 'oldest' by lastSignInAt (recency)
   const [filter, setFilter] = useState('');
+  const [debouncedFilter, setDebouncedFilter] = useState('');
+  const [role, setRole] = useState<RoleFilter>('all');
+  const [sortDir, setSortDir] = useState<SortDir>('newest');
+
+  // Trailing-edge debounce: latest value wins after 250ms of
+  // inactivity. Resets the timer on each keystroke.
+  useEffect(() => {
+    const handle = setTimeout(
+      () => setDebouncedFilter(filter),
+      SEARCH_DEBOUNCE_MS,
+    );
+    return () => clearTimeout(handle);
+  }, [filter]);
 
   const fetchOnce = async () => {
     try {
       const list = await orderService.listAllUsers();
-      // Pin self to the top so admin can find their own profile
-      // quickly. Otherwise sort by createdAt desc (newest first).
-      list.sort((a, b) => {
-        if (a.uid === myUid) return -1;
-        if (b.uid === myUid) return 1;
-        return (b.createdAt ?? 0) - (a.createdAt ?? 0);
-      });
       setUsers(list);
     } catch (e) {
       console.warn('[UserManagement] fetch failed:', e);
@@ -65,15 +100,17 @@ export default function UserManagementScreen() {
     return () => clearInterval(interval);
   }, [isAdmin]);
 
+  // filterAndSortUsers is the pinned pure helper. After it runs, we
+  // re-pin "self" to the top regardless of role/sort — admins should
+  // always be able to find their own profile in one glance.
   const visible = useMemo(() => {
-    const q = filter.trim().toLowerCase();
-    if (!q) return users;
-    return users.filter(
-      u =>
-        (u.phoneNumber ?? '').toLowerCase().includes(q) ||
-        u.uid.toLowerCase().includes(q),
-    );
-  }, [users, filter]);
+    const sorted = filterAndSortUsers(users, role, sortDir, debouncedFilter);
+    if (!myUid) return sorted;
+    const selfIdx = sorted.findIndex(u => u.uid === myUid);
+    if (selfIdx <= 0) return sorted;
+    const self = sorted[selfIdx];
+    return [self, ...sorted.slice(0, selfIdx), ...sorted.slice(selfIdx + 1)];
+  }, [users, role, sortDir, debouncedFilter, myUid]);
 
   if (!isAdmin) {
     return (
@@ -112,6 +149,43 @@ export default function UserManagementScreen() {
           autoCorrect={false}
           autoCapitalize="none"
         />
+      </View>
+      <View style={styles.roleRow}>
+        {ROLE_CHIPS.map(c => {
+          const active = role === c.value;
+          return (
+            <Pressable
+              key={c.value}
+              onPress={() => setRole(c.value)}
+              style={[styles.roleChip, active && styles.roleChipActive]}
+              accessibilityRole="button"
+              accessibilityLabel={`Filter by ${c.label}`}
+            >
+              <Text
+                style={[
+                  styles.roleChipText,
+                  active && styles.roleChipTextActive,
+                ]}
+              >
+                {c.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+      <View style={styles.sortRow}>
+        <Text style={styles.sortLabel}>Sort by recency</Text>
+        <Pressable
+          onPress={() =>
+            setSortDir((d: SortDir) => (d === 'newest' ? 'oldest' : 'newest'))
+          }
+          accessibilityRole="button"
+          accessibilityLabel={`Toggle sort, currently ${sortDir} first`}
+        >
+          <Text style={styles.sortLink}>
+            {sortDir === 'newest' ? 'Newest first ↓' : 'Oldest first ↑'}
+          </Text>
+        </Pressable>
       </View>
       <FlatList
         data={visible}
@@ -214,6 +288,48 @@ const styles = StyleSheet.create({
     minHeight: 40,
     ...typography.body,
     color: colors.textPrimary,
+  },
+  roleRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.sm,
+  },
+  roleChip: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  roleChipActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  roleChipText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '700',
+  },
+  roleChipTextActive: { color: '#fff' },
+  sortRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.sm,
+  },
+  sortLabel: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '700',
+  },
+  sortLink: {
+    ...typography.caption,
+    color: colors.primary,
+    fontWeight: '700',
   },
   list: { padding: spacing.lg, paddingTop: 0, paddingBottom: spacing.xxl, flexGrow: 1 },
   row: {
