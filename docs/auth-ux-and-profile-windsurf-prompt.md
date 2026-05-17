@@ -262,7 +262,44 @@ validation rejections (e.g. accept any pincode) and confirming the
 corresponding test fails by name. Same ritual as the cleanup script
 PR.
 
-### G. Deploy + OTA + checklist
+### G. Loosen the over-broad self-protection on revokeShopOwner / revokeDelivery
+
+**Context:** The current Cloud Function rule rejects any
+`uid === auth.uid` for `revokeShopOwner` / `revokeDelivery`. The
+original concern was admin lockout — admin shouldn't be able to
+accidentally revoke their own admin claim and lose access. But the
+implementation is over-broad: it blocks ALL self-modifications,
+even revoking shopOwner / delivery (which can't lock anyone out).
+This bit Sudhir during solo testing — he had accumulated extra
+roles on his admin account and couldn't use the UI to clean them
+up. He's currently using `scripts/revoke-extra-roles.ts` as the
+escape hatch.
+
+**Fix:** In `functions/src/index.ts`, change the self-modification
+guard on `revokeShopOwner` and `revokeDelivery` to a no-op (these
+calls don't touch the admin claim, so self-revoke is safe). Keep
+the self-protection on any function that DOES touch the admin
+claim (we don't currently have one — `set-admin` is CLI-only by
+design — but document the policy so future contributors don't
+re-add the over-broad rule).
+
+In `src/screens/admin/UserDetailScreen.tsx`, remove the "self =
+disabled buttons" gate for shopOwner and delivery revokes (keep
+the "you can't modify your own admin role" copy block, since
+`set-admin` is the only path for that and it's intentional). The
+self-banner text should change from "Cannot modify your own
+roles" to "Admin role can only be changed via the set-admin CLI."
+
+**Tests:** Add to `tests/functions/profileValidation.test.ts` (or a
+new sibling file under `tests/functions/`) tests pinning the new
+behaviour:
+- `assertRevokeAllowed` accepts self when revoking shopOwner
+- `assertRevokeAllowed` accepts self when revoking delivery
+- (Hypothetical future) `assertRevokeAllowed` rejects self when
+  revoking admin — leave a `test.skip` placeholder pinning the
+  policy in case a `revokeAdmin` callable is ever added
+
+### H. Deploy + OTA + checklist
 
 Per deploy discipline:
 
@@ -272,8 +309,13 @@ firebase deploy --only functions:updateMyProfile --project grocery-mvp-dev
 firebase deploy --only functions:saveAddress --project grocery-mvp-dev
 firebase deploy --only functions:deleteAddress --project grocery-mvp-dev
 firebase deploy --only functions:setDefaultAddress --project grocery-mvp-dev
+firebase deploy --only functions:revokeShopOwner --project grocery-mvp-dev
+firebase deploy --only functions:revokeDelivery --project grocery-mvp-dev
 firebase functions:list --project grocery-mvp-dev
 ```
+
+(The last two are redeploys — the new self-revoke-allowed logic
+from §G.)
 
 (Five separate deploys, one per function. **Do NOT** chain them with
 `functions:getMyProfile,updateMyProfile,...` — single `--only` target

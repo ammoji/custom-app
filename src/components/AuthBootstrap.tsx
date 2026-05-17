@@ -21,6 +21,23 @@ export default function AuthBootstrap() {
       useAuthStore.getState().setUser(user);
       useAuthStore.getState().setReady(true);
 
+      // If the subscription fires with null AFTER we've already been
+      // signed in (i.e. the user just hit Sign Out from Profile),
+      // kick off a fresh anonymous session so the app doesn't stall
+      // in a no-uid state. Without this, post-signOut the user sees
+      // a Home screen with no Sign-in CTA (the row is gated on
+      // isAnonymous which is false when uid is null) and no path
+      // back to login. The 200ms timer below only fires once at
+      // mount, so it doesn't cover the runtime signOut case.
+      // signInAnonymouslyIfNeeded is idempotent (checks currentUser
+      // first), so this is safe even when the null fires for other
+      // reasons (token expiry, server-side revoke).
+      if (!user) {
+        authService.signInAnonymouslyIfNeeded().catch(err => {
+          console.warn('[auth] post-signOut anon re-auth failed:', err?.code || err);
+        });
+      }
+
       // Once we have a real user, force-refresh the ID token ONCE so any
       // newly-granted admin claim shows up without requiring sign-out.
       if (user && !refreshedOnce) {

@@ -22,36 +22,57 @@
  * @react-native-firebase packages alongside this web SDK.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import Constants from 'expo-constants';
 import { getApps, initializeApp } from 'firebase/app';
 // @ts-ignore - getReactNativePersistence is exported but not in the public types
 import { getFunctions } from '@firebase/functions';
 import { getAuth, getReactNativePersistence, initializeAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
-const REQUIRED_ENV_KEYS = [
-  'EXPO_PUBLIC_FIREBASE_API_KEY',
-  'EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN',
-  'EXPO_PUBLIC_FIREBASE_PROJECT_ID',
-  'EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET',
-  'EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID',
-  'EXPO_PUBLIC_FIREBASE_APP_ID',
+
+// Read Firebase client config from app.json's expo.extra.firebase block via
+// expo-constants. This is the documented Expo pattern for client config and
+// is resilient to Metro's process.env inlining issues (which broke our
+// production builds on Expo SDK 54 — see the TestFlight crash post-mortem
+// in PRELAUNCH_CHECKLIST). The same values are read here in both dev and
+// prod because Constants.expoConfig is hydrated from app.json at app launch.
+type FirebaseExtra = {
+  apiKey?: string;
+  authDomain?: string;
+  projectId?: string;
+  storageBucket?: string;
+  messagingSenderId?: string;
+  appId?: string;
+  recaptchaSiteKey?: string;
+};
+const firebaseExtra: FirebaseExtra =
+  (Constants.expoConfig?.extra as { firebase?: FirebaseExtra } | undefined)
+    ?.firebase ?? {};
+
+const REQUIRED_KEYS = [
+  'apiKey',
+  'authDomain',
+  'projectId',
+  'storageBucket',
+  'messagingSenderId',
+  'appId',
 ] as const;
 
-const missing = REQUIRED_ENV_KEYS.filter(key => !process.env[key]);
+const missing = REQUIRED_KEYS.filter(key => !firebaseExtra[key]);
 if (missing.length > 0) {
   throw new Error(
-    `[firebase] Missing required env vars: ${missing.join(', ')}. ` +
-      `Add them to .env at the project root and restart Expo with 'npx expo start -c'.`
+    `[firebase] Missing required config in app.json expo.extra.firebase: ${missing.join(', ')}. ` +
+      `Edit app.json to add them, then rebuild. (process.env fallback removed — see comment.)`
   );
 }
 
 const firebaseConfig = {
-  apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY as string,
-  authDomain: process.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN as string,
-  projectId: process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID as string,
-  storageBucket: process.env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET as string,
-  messagingSenderId: process.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID as string,
-  appId: process.env.EXPO_PUBLIC_FIREBASE_APP_ID as string,
+  apiKey: firebaseExtra.apiKey as string,
+  authDomain: firebaseExtra.authDomain as string,
+  projectId: firebaseExtra.projectId as string,
+  storageBucket: firebaseExtra.storageBucket as string,
+  messagingSenderId: firebaseExtra.messagingSenderId as string,
+  appId: firebaseExtra.appId as string,
 };
 
 export const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
@@ -69,10 +90,10 @@ if (typeof document !== 'undefined') {
     // Dynamic require avoids bundling app-check into the native bundle.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { initializeAppCheck, ReCaptchaV3Provider } = require('firebase/app-check');
-    const siteKey = process.env.EXPO_PUBLIC_FIREBASE_RECAPTCHA_SITE_KEY;
+    const siteKey = firebaseExtra.recaptchaSiteKey;
     if (!siteKey) {
       console.warn(
-        '[firebase] EXPO_PUBLIC_FIREBASE_RECAPTCHA_SITE_KEY not set; App Check disabled. ' +
+        '[firebase] expo.extra.firebase.recaptchaSiteKey not set; App Check disabled. ' +
           'Cloud Functions with enforceAppCheck will reject requests from this client.'
       );
     } else {

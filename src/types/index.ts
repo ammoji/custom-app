@@ -160,6 +160,53 @@ export type Address = {
   phone: string;
 };
 
+// Phase 12a-v2-iv: saved address book on /users/{uid}.
+//
+// SavedAddress carries the same six fields as a one-off Address used at
+// checkout, plus identity (`id`), an optional human label ("Home" /
+// "Office"), and timestamps. The `id` is a server-generated UUID — we
+// never let the client mint it because saveAddress() needs to detect
+// whether the input is an update (id present + matches a row) vs a
+// brand-new entry. `label` is free text, optional, capped at 32 chars
+// in the validator.
+//
+// Two design notes worth preserving:
+//   - `name` and `phone` are recipient fields, not account holder
+//     fields. They may differ from the profile's name/phone (gift
+//     orders, sending to family). The UI doesn't try to enforce match.
+//   - `createdAt` / `updatedAt` are epoch ms (not Firestore Timestamps)
+//     so the same shape round-trips through callable JSON without
+//     hand-converting. The Cloud Functions stamp `updatedAt = Date.now()`
+//     on every save; createdAt is only set on the first write for a
+//     given id.
+export type SavedAddress = {
+  id: string;
+  label?: string;
+  name: string;
+  phone: string;
+  line1: string;
+  line2?: string;
+  city: string;
+  pincode: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+// User profile doc shape returned by the getMyProfile callable.
+// Deliberately omits server-internal fields (fcmTokens, isAdmin,
+// deliveryStatus) — those are filtered out server-side before the
+// callable returns. The client never needs them on the Profile screen.
+export type UserProfile = {
+  uid: string;
+  phone: string | null;
+  name: string | null;
+  email: string | null;
+  addresses: SavedAddress[];
+  defaultAddressId: string | null;
+  createdAt: number | null;
+  updatedAt: number | null;
+};
+
 export type PaymentMethod = 'cod' | 'online';
 export type PaymentStatus = 'pending' | 'paid' | 'failed' | 'expired' | 'not_required';
 

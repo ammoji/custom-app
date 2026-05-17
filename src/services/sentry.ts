@@ -1,11 +1,20 @@
 import * as Sentry from '@sentry/react-native';
+import Constants from 'expo-constants';
 
-const dsn = process.env.EXPO_PUBLIC_SENTRY_DSN;
+// Read DSN from app.json's expo.extra.sentry.dsn via expo-constants. Same
+// rationale as services/firebase.ts — Metro's process.env inlining was
+// dropping these values in production builds on Expo SDK 54. Constants
+// reads from app.json at runtime and is bundler-agnostic.
+const dsn =
+  (Constants.expoConfig?.extra as { sentry?: { dsn?: string } } | undefined)
+    ?.sentry?.dsn ?? process.env.EXPO_PUBLIC_SENTRY_DSN;
 
 export function initSentry() {
   if (!dsn) {
     // eslint-disable-next-line no-console
-    console.warn('[sentry] EXPO_PUBLIC_SENTRY_DSN not set — error tracking disabled');
+    console.warn(
+      '[sentry] DSN not set in app.json expo.extra.sentry.dsn — error tracking disabled',
+    );
     return;
   }
   Sentry.init({

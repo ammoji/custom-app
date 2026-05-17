@@ -1,5 +1,5 @@
 import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import {
     Alert,
     Linking,
@@ -16,25 +16,27 @@ import Loader from '../../components/common/Loader';
 import ScreenHeader from '../../components/common/ScreenHeader';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
 import type { RootStackParamList } from '../../navigation/AppNavigator';
-import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
-import type { Order } from '../../types';
 import { formatOrderTime, formatRupees } from '../../utils/format';
+import { useDeliveryOrderDetail } from './DeliveryOrderDetailScreen.useDeliveryOrderDetail';
 
 /**
  * Full delivery view of a single order. Reuses watchOrder for live
- * status changes (poll on native, snapshot on web). Two action paths
- * mirror the dashboard cards: I've picked it up → Delivered.
+ * status changes (poll on native, snapshot on web). Three action
+ * paths:
  *
- * Navigation:
- *   - Tap shop address → Google Maps directions to shop (we don't
- *     have shop.address structured here so we use the order's shop
- *     name as the search query — good enough for MVP).
- *   - Tap customer phone → tel: link.
- *   - Tap customer address → Google Maps directions to address.
+ *   1. Available-for-claim   → "Accept this pickup" button (the
+ *                              v2-iv-followup addition — without it
+ *                              partners had to claim from the
+ *                              dashboard with no item visibility).
+ *   2. Assigned, not delivered → "I've picked it up" → "Delivered"
+ *      (existing — same flow as the dashboard's ActiveDeliveryCard).
+ *   3. Delivered             → green "Delivered" card, no actions.
  *
- * No in-app map (per Phase 12b "Do NOT" list — saves time, works
- * everywhere, respects user's preferred maps app).
+ * State machine + derived flags live in
+ * `./DeliveryOrderDetailScreen.useDeliveryOrderDetail.ts`. Screen
+ * stays a thin presenter so the watcher contract + claim race +
+ * action revert can be unit-tested without RNTL.
  */
 export default function DeliveryOrderDetailScreen() {
   const nav = useNavigation<any>();
@@ -44,29 +46,21 @@ export default function DeliveryOrderDetailScreen() {
   const uid = useAuthStore(s => s.uid);
   const isDelivery = useAuthStore(s => s.isDelivery);
 
-  const [order, setOrder] = useState<Order | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [pending, setPending] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!isDelivery) {
-      setLoading(false);
-      return;
-    }
-    const off = orderService.watchOrder(orderId, (o, err) => {
-      if (err) {
-        // Keep whatever was previously rendered; surface the message.
-        setLoadError(err.message || 'Could not load order. Try again.');
-      } else {
-        setLoadError(null);
-        setOrder(o);
-      }
-      // ALWAYS — see watcher contract refactor.
-      setLoading(false);
-    });
-    return off;
-  }, [orderId, isDelivery]);
+  const {
+    order,
+    loading,
+    error,
+    isAssigned,
+    isAvailableForClaim,
+    isPickedUp,
+    isDelivered,
+    isTerminalForOthers,
+    pendingAction,
+    handleClaim,
+    handlePickedUp,
+    handleDelivered,
+    retry,
+  } = useDeliveryOrderDetail(orderId, uid, !!isDelivery);
 
   const openMaps = (query: string) => {
     const url = `https://maps.google.com/?q=${encodeURIComponent(query)}`;
@@ -82,38 +76,28 @@ export default function DeliveryOrderDetailScreen() {
     );
   };
 
-  const handlePickedUp = async () => {
-    if (!order) return;
-    setPending(true);
-    setOrder({ ...order, pickedUpAt: Date.now() });
-    try {
-      await orderService.markPickedUp({ orderId: order.id });
-    } catch (e: any) {
-      setOrder(prev => (prev ? { ...prev, pickedUpAt: null } : prev));
-      Alert.alert('Update failed', e?.message || 'Please try again.');
-    } finally {
-      setPending(false);
+  const onClaim = async () => {
+    const result = await handleClaim();
+    if (!result.ok) {
+      Alert.alert('Already taken', result.error);
+      return;
     }
+    // Navigate back to the dashboard so the new card appears in
+    // "My Active Deliveries" via the post-claim listMyDeliveries
+    // refresh path. (Dashboard owns that refresh; the detail
+    // screen's watcher would also update, but going back is the
+    // expected UX after a successful claim.)
+    nav.goBack();
   };
 
-  const handleDelivered = async () => {
-    if (!order) return;
-    setPending(true);
-    const prevStatus = order.status;
-    const prevDelivered = order.deliveredAt;
-    setOrder({ ...order, status: 'delivered', deliveredAt: Date.now() });
-    try {
-      await orderService.markDelivered({ orderId: order.id });
-    } catch (e: any) {
-      setOrder(prev =>
-        prev
-          ? { ...prev, status: prevStatus, deliveredAt: prevDelivered ?? null }
-          : prev,
-      );
-      Alert.alert('Update failed', e?.message || 'Please try again.');
-    } finally {
-      setPending(false);
-    }
+  const onPickedUp = async () => {
+    const result = await handlePickedUp();
+    if (!result.ok) Alert.alert('Update failed', result.error);
+  };
+
+  const onDelivered = async () => {
+    const result = await handleDelivered();
+    if (!result.ok) Alert.alert('Update failed', result.error);
   };
 
   if (!isDelivery) {
@@ -128,7 +112,7 @@ export default function DeliveryOrderDetailScreen() {
     );
   }
 
-  if (loading) {
+  if (loading && !order) {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
         <ScreenHeader title="Delivery" onBack={() => nav.goBack()} />
@@ -141,29 +125,71 @@ export default function DeliveryOrderDetailScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
         <ScreenHeader title="Delivery" onBack={() => nav.goBack()} />
+        {error ? (
+          <View style={styles.errorBanner}>
+            <Text style={styles.errorText}>{error}</Text>
+            <Pressable
+              onPress={retry}
+              style={styles.retryBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Retry loading order"
+            >
+              <Text style={styles.retryText}>Retry</Text>
+            </Pressable>
+          </View>
+        ) : (
+          <EmptyState
+            title="Order not found"
+            subtitle="It may have been cancelled or completed."
+          />
+        )}
+      </SafeAreaView>
+    );
+  }
+
+  // Terminal state for non-owners: claimed by someone else, OR
+  // already delivered. Render an EmptyState instead of leaving
+  // dead buttons that would error server-side anyway.
+  if (isTerminalForOthers && isDelivered) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <ScreenHeader title="Pickup details" onBack={() => nav.goBack()} />
         <EmptyState
-          title="Order not found"
-          subtitle="It may have been cancelled or completed."
+          title="Order already delivered"
+          subtitle="This pickup is no longer available."
+        />
+      </SafeAreaView>
+    );
+  }
+  if (isTerminalForOthers && !isDelivered) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <ScreenHeader title="Pickup details" onBack={() => nav.goBack()} />
+        <EmptyState
+          title="Already taken"
+          subtitle="Another partner claimed this pickup. Check the dashboard for new ones."
         />
       </SafeAreaView>
     );
   }
 
-  // Defensive: if this user isn't the assigned delivery person, show a
-  // read-only-ish view. The Cloud Function would reject any action
-  // anyway, but hiding the buttons is a clearer UX than letting them
-  // tap and fail.
-  const isAssigned = order.deliveryPersonId === uid;
-  const pickedUp = !!order.pickedUpAt;
-  const delivered = order.status === 'delivered';
   const itemCount = order.items.reduce((n, i) => n + i.quantity, 0);
+  const headerTitle = isAvailableForClaim ? 'Pickup details' : 'Delivery';
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
-      <ScreenHeader title="Delivery" onBack={() => nav.goBack()} />
-      {loadError && (
+      <ScreenHeader title={headerTitle} onBack={() => nav.goBack()} />
+      {error && (
         <View style={styles.errorBanner}>
-          <Text style={styles.errorText}>{loadError}</Text>
+          <Text style={styles.errorText}>{error}</Text>
+          <Pressable
+            onPress={retry}
+            style={styles.retryBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading order"
+          >
+            <Text style={styles.retryText}>Retry</Text>
+          </Pressable>
         </View>
       )}
       <ScrollView contentContainerStyle={styles.content}>
@@ -178,9 +204,16 @@ export default function DeliveryOrderDetailScreen() {
         <View style={styles.card}>
           <Text style={styles.label}>Deliver to</Text>
           <Text style={styles.value}>{order.deliveryAddress.name}</Text>
-          <Pressable onPress={() => callPhone(order.deliveryAddress.phone)}>
-            <Text style={styles.link}>📞 {order.deliveryAddress.phone}</Text>
-          </Pressable>
+          {/* Phone is hidden until the partner has actually claimed
+              the order — protects customer privacy from any
+              delivery person merely browsing available pickups.
+              Address line 1 + city + pincode are still shown so the
+              partner can decide whether the area is in their range. */}
+          {isAssigned && (
+            <Pressable onPress={() => callPhone(order.deliveryAddress.phone)}>
+              <Text style={styles.link}>📞 {order.deliveryAddress.phone}</Text>
+            </Pressable>
+          )}
           <Text style={styles.address}>
             {order.deliveryAddress.line1}
             {order.deliveryAddress.line2
@@ -240,29 +273,43 @@ export default function DeliveryOrderDetailScreen() {
           </View>
         )}
 
-        {isAssigned && !delivered && (
+        {isAvailableForClaim && (
           <View style={{ marginTop: spacing.md }}>
-            {pickedUp ? (
+            <Button
+              title={
+                pendingAction === 'claim' ? 'Claiming…' : 'Accept this pickup'
+              }
+              onPress={onClaim}
+              loading={pendingAction === 'claim'}
+              disabled={pendingAction !== null}
+              size="lg"
+            />
+          </View>
+        )}
+
+        {isAssigned && !isDelivered && (
+          <View style={{ marginTop: spacing.md }}>
+            {isPickedUp ? (
               <Button
                 title="Delivered"
-                onPress={handleDelivered}
-                loading={pending}
-                disabled={pending}
+                onPress={onDelivered}
+                loading={pendingAction === 'delivered'}
+                disabled={pendingAction !== null}
                 size="lg"
               />
             ) : (
               <Button
                 title="I've picked it up"
-                onPress={handlePickedUp}
-                loading={pending}
-                disabled={pending}
+                onPress={onPickedUp}
+                loading={pendingAction === 'pickedUp'}
+                disabled={pendingAction !== null}
                 size="lg"
               />
             )}
           </View>
         )}
 
-        {delivered && (
+        {isAssigned && isDelivered && (
           <View style={[styles.card, styles.doneCard]}>
             <Text style={styles.doneText}>✅ Delivered</Text>
           </View>
@@ -349,6 +396,21 @@ const styles = StyleSheet.create({
     borderColor: colors.danger,
     borderWidth: 1,
     borderRadius: radii.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
-  errorText: { ...typography.body, color: colors.danger },
+  errorText: {
+    ...typography.body,
+    color: colors.danger,
+    flex: 1,
+    marginRight: spacing.md,
+  },
+  retryBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.danger,
+    borderRadius: radii.sm,
+  },
+  retryText: { ...typography.bodyBold, color: '#fff' },
 });

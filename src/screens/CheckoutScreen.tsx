@@ -1,5 +1,5 @@
-import { useNavigation } from '@react-navigation/native';
-import React, { useState } from 'react';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import React, { useCallback, useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../components/common/Button';
@@ -9,10 +9,11 @@ import ScreenHeader from '../components/common/ScreenHeader';
 import { colors, radii, spacing, typography } from '../constants/theme';
 import { Analytics } from '../services/analytics';
 import { orderService } from '../services/orderService';
+import { profileService } from '../services/profileService';
 import { Sentry } from '../services/sentry';
 import { useAuthStore } from '../store/useAuthStore';
 import { useCartStore } from '../store/useCartStore';
-import type { Address, PaymentMethod } from '../types';
+import type { Address, PaymentMethod, SavedAddress, UserProfile } from '../types';
 import { formatRupees } from '../utils/format';
 import { openRazorpayCheckout } from '../utils/razorpay';
 
@@ -40,7 +41,7 @@ export default function CheckoutScreen() {
   const total = useCartStore(s => s.total());
   const clearCart = useCartStore(s => s.clearCart);
 
-  const [name, setName] = useState('Sudhir Davim');
+  const [name, setName] = useState('');
   const [line1, setLine1] = useState('');
   const [line2, setLine2] = useState('');
   const [city, setCity] = useState('New Delhi');
@@ -50,6 +51,117 @@ export default function CheckoutScreen() {
   const [placing, setPlacing] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cod');
 
+  // Phase 12a-v2-iv: saved-address picker. The screen has two modes
+  // distinguished by `usingForm`:
+  //   - Picker mode: profile has ≥1 saved address AND user hasn't
+  //     opted to enter a new one. Render selectable cards; selecting
+  //     one mirrors its fields into the local state so placeOrder
+  //     reads from the same form fields it always has (no special
+  //     branch in the order placement path).
+  //   - Form mode: profile has 0 addresses, OR user tapped "Use a
+  //     different address". Same form as before.
+  // `selectedAddressId !== null` means "this address came from the
+  // saved book" — used after order placement to skip the save prompt.
+  // Reset to default on every focus per Sudhir's UX call (cart
+  // survives nav, address selection does not).
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [profileLoaded, setProfileLoaded] = useState(false);
+  const [selectedAddressId, setSelectedAddressId] = useState<string | null>(
+    null,
+  );
+  const [usingForm, setUsingForm] = useState(false);
+  // Phase 12a-v2-iv-followup: when getMyProfile fails the user used
+  // to silently drop into form mode with no explanation. That made
+  // diagnostic work impossible — we couldn't tell whether the user
+  // genuinely had no saved addresses, or the call was failing. The
+  // banner below renders a yellow notice with the actual error
+  // message + a Retry button when this is non-null. Root cause of
+  // the failure is tracked separately; this is the observability
+  // surface, not a fix.
+  const [profileLoadError, setProfileLoadError] = useState<string | null>(null);
+  const isAnonymous = useAuthStore(s => s.isAnonymous);
+
+  // Hydrate from saved profile every time the screen focuses. Anonymous
+  // users have no profile to hydrate from — they'll get the form. The
+  // call is auth-required so we skip it cleanly.
+  useFocusEffect(
+    useCallback(() => {
+      if (isAnonymous) {
+        setProfileLoaded(true);
+        return;
+      }
+      let cancelled = false;
+      profileService
+        .getMyProfile()
+        .then(p => {
+          if (cancelled) return;
+          setProfile(p);
+          // Reset selection on entry — pick the default if any.
+          const def = p.defaultAddressId
+            ? p.addresses.find(a => a.id === p.defaultAddressId)
+            : p.addresses[0];
+          if (def) {
+            applySavedToForm(def);
+            setSelectedAddressId(def.id);
+            setUsingForm(false);
+          } else {
+            setSelectedAddressId(null);
+            setUsingForm(true);
+          }
+        })
+        .catch(e => {
+          // Phase 12a-v2-iv-followup: keep the user moving (form mode
+          // is a valid fallback) but make the failure VISIBLE — both
+          // in the device console (with stack) AND on screen so the
+          // user knows their saved addresses aren't being ignored on
+          // purpose. The original silent fallthrough hid a real bug
+          // that took a solo-test repro to catch.
+          console.warn(
+            '[Checkout] getMyProfile failed:',
+            e?.code ?? 'no-code',
+            e?.message ?? e,
+            e?.stack ?? '(no stack)',
+          );
+          setProfileLoadError(
+            e?.message
+              ? `Couldn't load saved addresses (${e.message}). Enter manually below.`
+              : "Couldn't load saved addresses. Enter manually below.",
+          );
+          setUsingForm(true);
+        })
+        .finally(() => {
+          if (!cancelled) setProfileLoaded(true);
+        });
+      return () => {
+        cancelled = true;
+      };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isAnonymous]),
+  );
+
+  const applySavedToForm = (addr: SavedAddress) => {
+    setName(addr.name);
+    setLine1(addr.line1);
+    setLine2(addr.line2 ?? '');
+    setCity(addr.city);
+    setPincode(addr.pincode);
+    setPhone(addr.phone);
+    setErrors({});
+  };
+
+  const onPickSaved = (addr: SavedAddress) => {
+    applySavedToForm(addr);
+    setSelectedAddressId(addr.id);
+    setUsingForm(false);
+  };
+
+  const onUseDifferent = () => {
+    setSelectedAddressId(null);
+    setUsingForm(true);
+    // Don't clear fields — let the user edit on top of the
+    // selected address. They can manually clear if they want.
+  };
+
   const validate = (): Errors => {
     const e: Errors = {};
     if (!name.trim()) e.name = 'Required';
@@ -58,6 +170,54 @@ export default function CheckoutScreen() {
     if (!/^\d{6}$/.test(pincode)) e.pincode = '6-digit pincode';
     if (!/^\+?\d{10,13}$/.test(phone.replace(/\s/g, ''))) e.phone = 'Valid phone required';
     return e;
+  };
+
+  /**
+   * After a successful order:
+   *   - If the address came from the saved book, do nothing.
+   *   - If the user has 0 prior saved addresses, auto-save silently
+   *     (becomes their default).
+   *   - Otherwise prompt "Save this address?". Crude window.confirm /
+   *     Alert.alert because we don't want a custom modal in the
+   *     OrderConfirmation flow.
+   */
+  const maybeSaveAddressAfterOrder = async (addr: Address) => {
+    if (selectedAddressId) return;
+    const priorCount = profile?.addresses.length ?? 0;
+    const persist = async () => {
+      try {
+        await profileService.saveAddress({
+          name: addr.name,
+          phone: addr.phone,
+          line1: addr.line1,
+          line2: addr.line2,
+          city: addr.city,
+          pincode: addr.pincode,
+        });
+      } catch (err) {
+        // Silent — order is already placed, missing a saved-address
+        // sync isn't worth surfacing.
+        console.warn('[Checkout] saveAddress post-order failed:', err);
+      }
+    };
+    if (priorCount === 0) {
+      await persist();
+      return;
+    }
+    const ok = await new Promise<boolean>(resolve => {
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        // eslint-disable-next-line no-alert
+        resolve(window.confirm('Save this address for next time?'));
+        return;
+      }
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { Alert } = require('react-native');
+      Alert.alert('Save this address?', 'Use it next time without re-typing.', [
+        { text: 'Not now', style: 'cancel', onPress: () => resolve(false) },
+        { text: 'Save', onPress: () => resolve(true) },
+      ]);
+    });
+    if (ok) await persist();
   };
 
   const placeOrder = async () => {
@@ -100,6 +260,33 @@ export default function CheckoutScreen() {
 
     setPlacing(true);
 
+    // Phase 12a-v2-iv-hotfix-1 OTA verification probe. Logs the
+    // cart-line shape immediately before submission so you can
+    // confirm post-OTA that menuItemId is present on every line.
+    // If you see `menuItemId: undefined` here on your device after
+    // pulling the OTA, the new code is NOT yet running. If you see
+    // a real id like `p_008_atta` here AND placeOrder still rejects
+    // with "not in this shop", the bug is elsewhere (different code
+    // path adding to cart, or the menu doc genuinely missing for
+    // this shop). Dev-only — stripped in release builds.
+    if (__DEV__) {
+      console.log(
+        '[Checkout] cart shape @ placeOrder:',
+        JSON.stringify(
+          items.map(i => ({
+            productId: i.productId,
+            menuItemId: i.menuItemId ?? '<MISSING>',
+            priceSnapshot: i.priceSnapshot ?? '<MISSING>',
+            qty: i.quantity,
+          })),
+          null,
+          2,
+        ),
+        'cart.shopId:',
+        shopId,
+      );
+    }
+
     const address: Address = {
       name: name.trim(),
       line1: line1.trim(),
@@ -123,6 +310,11 @@ export default function CheckoutScreen() {
       });
 
       if (paymentMethod === 'cod') {
+        // Fire-and-forget save prompt before clearing cart, so the
+        // network call gets the user's `address` snapshot intact.
+        // Awaited so the OrderConfirmation nav doesn't race ahead
+        // and unmount the dialog mid-prompt.
+        await maybeSaveAddressAfterOrder(address);
         clearCart();
         nav.replace('OrderConfirmation', { orderId: result.orderId });
         return;
@@ -143,11 +335,12 @@ export default function CheckoutScreen() {
         description: `Order ${result.orderId}`,
         prefill: { name: address.name, contact: address.phone },
         theme: { color: colors.primary },
-        handler: () => {
+        handler: async () => {
           // Payment success — the razorpayWebhook Function flips
           // paymentStatus to 'paid' asynchronously; OrderConfirmation
           // picks it up via watchOrder (web SDK snapshot or native poll).
           Analytics.payment_success({ order_id: result.orderId, value: result.total });
+          await maybeSaveAddressAfterOrder(address);
           clearCart();
           nav.replace('OrderConfirmation', { orderId: result.orderId });
         },
@@ -210,6 +403,111 @@ export default function CheckoutScreen() {
       >
         <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
           <Text style={styles.label}>Delivery address</Text>
+
+          {profileLoadError && (
+            <View style={styles.profileLoadBanner}>
+              <Text style={styles.profileLoadBannerText}>{profileLoadError}</Text>
+              <Pressable
+                onPress={() => {
+                  setProfileLoadError(null);
+                  setProfileLoaded(false);
+                  setUsingForm(false);
+                  // Re-trigger the focus effect by clearing the loaded
+                  // flag. The effect's cancellation guard keeps this
+                  // safe even if the user spam-taps Retry.
+                  profileService
+                    .getMyProfile()
+                    .then(p => {
+                      setProfile(p);
+                      const def = p.defaultAddressId
+                        ? p.addresses.find(a => a.id === p.defaultAddressId)
+                        : p.addresses[0];
+                      if (def) {
+                        applySavedToForm(def);
+                        setSelectedAddressId(def.id);
+                        setUsingForm(false);
+                      } else {
+                        setUsingForm(true);
+                      }
+                    })
+                    .catch(err => {
+                      console.warn('[Checkout] retry getMyProfile failed:', err);
+                      setProfileLoadError(
+                        err?.message
+                          ? `Still failing (${err.message}). Enter manually.`
+                          : 'Still failing. Enter manually.',
+                      );
+                      setUsingForm(true);
+                    })
+                    .finally(() => setProfileLoaded(true));
+                }}
+                accessibilityRole="button"
+                accessibilityLabel="Retry loading saved addresses"
+              >
+                <Text style={styles.profileLoadBannerRetry}>Retry</Text>
+              </Pressable>
+            </View>
+          )}
+
+          {/* Picker mode: profile has saved addresses and user hasn't
+              opted into the form. Cards are radio-selectable; the
+              selected one drives the form fields invisibly so order
+              placement keeps using the same code path. */}
+          {profileLoaded && !usingForm && (profile?.addresses.length ?? 0) > 0 && (
+            <View style={styles.formGroup}>
+              {profile!.addresses.map(addr => {
+                const selected = addr.id === selectedAddressId;
+                return (
+                  <Pressable
+                    key={addr.id}
+                    onPress={() => onPickSaved(addr)}
+                    accessibilityRole="radio"
+                    accessibilityState={{ selected }}
+                    accessibilityLabel={addr.label || 'Saved address'}
+                    style={[
+                      styles.savedCard,
+                      selected && styles.savedCardSelected,
+                    ]}
+                  >
+                    <View
+                      style={[styles.radio, selected && styles.radioSelected]}
+                    >
+                      {selected && <View style={styles.radioDot} />}
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={typography.bodyBold}>
+                        {addr.label || 'Address'}
+                        {addr.id === profile?.defaultAddressId
+                          ? ' · Default'
+                          : ''}
+                      </Text>
+                      <Text
+                        style={[typography.caption, { marginTop: 2 }]}
+                        numberOfLines={2}
+                      >
+                        {[addr.line1, addr.line2, addr.city, addr.pincode]
+                          .filter(Boolean)
+                          .join(', ')}
+                      </Text>
+                    </View>
+                  </Pressable>
+                );
+              })}
+              <Pressable
+                onPress={onUseDifferent}
+                accessibilityRole="button"
+                accessibilityLabel="Use a different address"
+                style={styles.useDifferentRow}
+              >
+                <Text style={styles.useDifferentText}>Use a different address</Text>
+              </Pressable>
+            </View>
+          )}
+
+          {/* Form mode: 0 saved addresses, or user tapped "Use a
+              different address". The form is the long-standing
+              checkout entry surface — unchanged behaviour. */}
+          {(usingForm || (profileLoaded && (profile?.addresses.length ?? 0) === 0)) && (
           <View style={styles.formGroup}>
             <Input value={name} onChangeText={setName} placeholder="Full name" error={errors.name} />
             <Input value={line1} onChangeText={setLine1} placeholder="Address line 1 (house, street)" error={errors.line1} />
@@ -237,6 +535,7 @@ export default function CheckoutScreen() {
               error={errors.phone}
             />
           </View>
+          )}
 
           <Text style={styles.label}>Order summary</Text>
           <View style={styles.summaryCard}>
@@ -388,5 +687,49 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: colors.border,
     backgroundColor: colors.bg,
+  },
+  // Phase 12a-v2-iv: saved-address picker styles.
+  savedCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.lg,
+  },
+  savedCardSelected: {
+    backgroundColor: colors.primaryLight,
+    borderColor: colors.primary,
+  },
+  useDifferentRow: {
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  useDifferentText: {
+    ...typography.bodyBold,
+    color: colors.primary,
+  },
+  // Phase 12a-v2-iv-followup: profile-load error banner.
+  profileLoadBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#FEF3C7',
+    borderRadius: radii.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    marginBottom: spacing.md,
+    gap: spacing.sm,
+  },
+  profileLoadBannerText: {
+    ...typography.caption,
+    color: '#92400E',
+    flex: 1,
+  },
+  profileLoadBannerRetry: {
+    ...typography.bodyBold,
+    color: colors.primary,
   },
 });

@@ -23,6 +23,10 @@ module.exports = {
     '<rootDir>/tests/hooks/**/*.test.ts',
     '<rootDir>/tests/functions/**/*.test.ts',
     '<rootDir>/tests/scripts/**/*.test.ts',
+    '<rootDir>/tests/utils/**/*.test.ts',
+    '<rootDir>/tests/store/**/*.test.ts',
+    '<rootDir>/tests/contracts/**/*.test.ts',
+    '<rootDir>/tests/screens/**/*.test.ts',
   ],
   testTimeout: 10000,
   setupFiles: ['<rootDir>/tests/unit-setup.ts'],
@@ -32,10 +36,14 @@ module.exports = {
       '<rootDir>/tests/__mocks__/rnfb-app.ts',
     '^@react-native-firebase/functions$':
       '<rootDir>/tests/__mocks__/empty.ts',
+    '^@react-native-async-storage/async-storage$':
+      '<rootDir>/tests/__mocks__/async-storage.ts',
     '^firebase/firestore$':
       '<rootDir>/tests/__mocks__/firebase-firestore.ts',
     '^firebase/functions$':
       '<rootDir>/tests/__mocks__/firebase-functions.ts',
+    '^firebase/analytics$':
+      '<rootDir>/tests/__mocks__/empty.ts',
     '^firebase/performance$':
       '<rootDir>/tests/__mocks__/empty.ts',
     '^@firebase/functions$':

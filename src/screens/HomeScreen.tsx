@@ -127,6 +127,29 @@ export default function HomeScreen() {
           <Text style={styles.ordersChevron}>›</Text>
         </Pressable>
 
+        {/* Phase 12a-v2-iv: Profile entry-point. Hidden for anonymous
+            users — they have nothing to manage yet (no profile doc,
+            no saved addresses). The "Sign in with phone" row below
+            covers that case. Once signed in, the Profile row replaces
+            the sign-in row and gives access to name/email/addresses
+            + Sign Out.
+            Also require `uid` to be present — between signOut and
+            the AuthBootstrap-triggered anon re-auth, isAnonymous is
+            false AND uid is null. Without the uid check this row
+            would briefly render in that limbo state and tapping it
+            would hit getMyProfile with no auth. */}
+        {!isAnonymous && uid && (
+          <Pressable
+            style={styles.ordersRow}
+            onPress={() => nav.navigate('Profile')}
+            accessibilityRole="button"
+            accessibilityLabel="Profile"
+          >
+            <Text style={styles.ordersText}>👤  Profile</Text>
+            <Text style={styles.ordersChevron}>›</Text>
+          </Pressable>
+        )}
+
         {isAnonymous && (
           <Pressable
             style={styles.signInRow}

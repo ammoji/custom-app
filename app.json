@@ -13,7 +13,10 @@
       "supportsTablet": false,
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Allow grocery-mvp to use your location to find nearby shops.",
+        "NSLocationWhenInUseUsageDescription": "Kirana Mart uses your location to find nearby grocery shops.",
+        "NSPhotoLibraryUsageDescription": "Kirana Mart may access your photo library when our payment provider needs to attach a receipt or proof of payment.",
+        "NSPhotoLibraryAddUsageDescription": "Kirana Mart may save payment receipts to your photo library when our payment provider provides one.",
+        "NSCameraUsageDescription": "Kirana Mart may use your camera when our payment provider requests it during checkout.",
         "ITSAppUsesNonExemptEncryption": false
       }
     },
@@ -79,6 +82,18 @@
     "extra": {
       "eas": {
         "projectId": "25064a20-cfd6-4a98-ac27-4d435095e50a"
+      },
+      "firebase": {
+        "apiKey": "AIzaSyCM3piNPbjhICyRIYVaWyWrBplslYsVa9I",
+        "authDomain": "grocery-mvp-dev.firebaseapp.com",
+        "projectId": "grocery-mvp-dev",
+        "storageBucket": "grocery-mvp-dev.firebasestorage.app",
+        "messagingSenderId": "333323701016",
+        "appId": "1:333323701016:web:a7f4014755e81b094d2c6d",
+        "recaptchaSiteKey": "6Lf0G-csAAAAAPHe_99TMYVCrKlfl9qo3q1IJRe-"
+      },
+      "sentry": {
+        "dsn": "https://b066d00d989b75e7464212453e487782@o4511383723573248.ingest.us.sentry.io/4511383731503104"
       }
     },
     "owner": "ammoji",

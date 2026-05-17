@@ -79,16 +79,38 @@ export const useCartStore = create<CartState>()(
       const existing = base.find(i => i.productId === product.id);
       const items = existing
         ? base.map(i =>
-            i.productId === product.id ? { ...i, quantity: i.quantity + 1 } : i
+            i.productId === product.id
+              ? {
+                  ...i,
+                  quantity: i.quantity + 1,
+                  // Backfill v2-iii fields on legacy lines that
+                  // happen to share a productId with the menu doc.
+                  // Safe because bootstrapShopMenu mirrors product.id
+                  // as the menu doc id for GLOBAL items.
+                  menuItemId: i.menuItemId ?? product.id,
+                  priceSnapshot: i.priceSnapshot ?? product.price,
+                }
+              : i,
           )
         : [
             ...base,
             {
               productId: product.id,
+              // Phase 12a-v2-iv hotfix: stamp menuItemId on every new
+              // cart line so placeOrder takes the per-shop menu
+              // validation path. Previously only addMenuItem (used by
+              // ShopDetailScreen) set this field; SearchScreen calls
+              // addItem which silently produced cart lines that hit
+              // the legacy products-collection path and rejected with
+              // "Product X not in this shop". Setting menuItemId =
+              // product.id is safe because bootstrapShopMenu uses the
+              // productId as the menu doc id for GLOBAL items.
+              menuItemId: product.id,
               name: product.name,
               imageUrl: product.imageUrl,
               packLabel: formatPackLabel(product.packSize),
               price: product.price,
+              priceSnapshot: product.price,
               quantity: 1,
             },
           ];
@@ -197,7 +219,15 @@ export const useCartStore = create<CartState>()(
       itemCount: () => get().items.reduce((n, i) => n + i.quantity, 0),
     }),
     {
-      name: 'cart-v1',
+      // Phase 12a-v2-iv hotfix: bumped from 'cart-v1' to invalidate
+      // any persisted cart whose lines pre-date the v2-iii menuItemId
+      // contract. Users with a stale cart-v1 entry would otherwise
+      // hydrate lines lacking menuItemId, hit placeOrder's legacy
+      // path, and get rejected with "Product X not in this shop".
+      // Bumping the version transparently empties their cart on next
+      // launch — acceptable because the alternative is a failed
+      // checkout for everyone on the rollout.
+      name: 'cart-v2',
       storage: createJSONStorage(() => AsyncStorage),
       partialize: state => ({
         shopId: state.shopId,

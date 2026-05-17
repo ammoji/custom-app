@@ -1,6 +1,7 @@
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import React from 'react';
 import { CategoryId } from '../constants/categories';
+import AddressEditScreen from '../screens/AddressEditScreen';
 import CartScreen from '../screens/CartScreen';
 import CheckoutScreen from '../screens/CheckoutScreen';
 import HomeScreen from '../screens/HomeScreen';
@@ -8,6 +9,7 @@ import LoginScreen from '../screens/LoginScreen';
 import OrderConfirmationScreen from '../screens/OrderConfirmationScreen';
 import OrderDetailScreen from '../screens/OrderDetailScreen';
 import OrdersScreen from '../screens/OrdersScreen';
+import ProfileScreen from '../screens/ProfileScreen';
 import SearchScreen from '../screens/SearchScreen';
 import ShopDetailScreen from '../screens/ShopDetailScreen';
 import ShopListScreen from '../screens/ShopListScreen';
@@ -26,6 +28,7 @@ import WaitingForApprovalScreen from '../screens/roles/WaitingForApprovalScreen'
 import AddCustomMenuItemScreen from '../screens/shop/AddCustomMenuItemScreen';
 import ShopMenuItemEditScreen from '../screens/shop/ShopMenuItemEditScreen';
 import ShopMenuScreen from '../screens/shop/ShopMenuScreen';
+import ShopOrderDetailScreen from '../screens/shop/ShopOrderDetailScreen';
 import ShopOwnerDashboardScreen from '../screens/shop/ShopOwnerDashboardScreen';
 
 export type RootStackParamList = {
@@ -56,6 +59,8 @@ export type RootStackParamList = {
   ShopDetailManagement: { shopId: string };
   BecomeDeliveryPartner: undefined;
   ShopOwnerDashboard: undefined;
+  // Phase 12a-v2-iv-followup: per-order detail for shop owners.
+  ShopOrderDetail: { orderId: string };
   // Phase 12a-v2-ii: per-shop menu management.
   ShopMenu: undefined;
   ShopMenuItemEdit: { menuItemId: string };
@@ -63,6 +68,21 @@ export type RootStackParamList = {
   DeliveryDashboard: undefined;
   DeliveryOrderDetail: { orderId: string };
   Login: { returnTo?: keyof RootStackParamList } | undefined;
+  // Phase 12a-v2-iv: profile + saved address book.
+  Profile: undefined;
+  AddressEdit:
+    | {
+        addressId?: string;
+        prefill?: {
+          name?: string;
+          phone?: string;
+          line1?: string;
+          line2?: string;
+          city?: string;
+          pincode?: string;
+        };
+      }
+    | undefined;
 };
 
 export type ShopRegistrationPrefill = {
@@ -125,6 +145,10 @@ export default function AppNavigator() {
         name="ShopOwnerDashboard"
         component={ShopOwnerDashboardScreen}
       />
+      <Stack.Screen
+        name="ShopOrderDetail"
+        component={ShopOrderDetailScreen}
+      />
       <Stack.Screen name="ShopMenu" component={ShopMenuScreen} />
       <Stack.Screen
         name="ShopMenuItemEdit"
@@ -143,6 +167,8 @@ export default function AppNavigator() {
         component={DeliveryOrderDetailScreen}
       />
       <Stack.Screen name="Login" component={LoginScreen} />
+      <Stack.Screen name="Profile" component={ProfileScreen} />
+      <Stack.Screen name="AddressEdit" component={AddressEditScreen} />
     </Stack.Navigator>
   );
 }

@@ -33,8 +33,18 @@
       "channel": "preview"
     },
     "production": {
+      "distribution": "store",
+      "autoIncrement": true,
       "env": {
-        "SENTRY_DISABLE_AUTO_UPLOAD": "true"
+        "SENTRY_DISABLE_AUTO_UPLOAD": "true",
+        "EXPO_PUBLIC_FIREBASE_API_KEY": "AIzaSyCM3piNPbjhICyRIYVaWyWrBplslYsVa9I",
+        "EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN": "grocery-mvp-dev.firebaseapp.com",
+        "EXPO_PUBLIC_FIREBASE_PROJECT_ID": "grocery-mvp-dev",
+        "EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET": "grocery-mvp-dev.firebasestorage.app",
+        "EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID": "333323701016",
+        "EXPO_PUBLIC_FIREBASE_APP_ID": "1:333323701016:web:a7f4014755e81b094d2c6d",
+        "EXPO_PUBLIC_FIREBASE_RECAPTCHA_SITE_KEY": "6Lf0G-csAAAAAPHe_99TMYVCrKlfl9qo3q1IJRe-",
+        "EXPO_PUBLIC_SENTRY_DSN": "https://b066d00d989b75e7464212453e487782@o4511383723573248.ingest.us.sentry.io/4511383731503104"
       },
       "android": {
         "buildType": "app-bundle"
@@ -44,6 +54,12 @@
     }
   },
   "submit": {
-    "production": {}
+    "production": {
+      "ios": {
+        "appleId": "sudhir.davim@gmail.com",
+        "ascAppId": "6770058310",
+        "appleTeamId": "YZ9245VU5Q"
+      }
+    }
   }
 }

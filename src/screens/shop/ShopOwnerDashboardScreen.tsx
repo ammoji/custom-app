@@ -1,8 +1,7 @@
 import { useNavigation } from '@react-navigation/native';
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import Button from '../../components/common/Button';
 import EmptyState from '../../components/common/EmptyState';
 import Loader from '../../components/common/Loader';
 import ScreenHeader from '../../components/common/ScreenHeader';
@@ -12,11 +11,8 @@ import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
 import type { Order } from '../../types';
 import { formatOrderTime, formatRupees } from '../../utils/format';
-import {
-    ACTION_LABELS,
-    nextActionsFor,
-    OrderStatus,
-} from '../../utils/orderStateMachine';
+import { OrderStatus } from '../../utils/orderStateMachine';
+import { mapShopOrdersError } from '../../utils/shopOrdersErrorMessage';
 
 /**
  * Per-shop order dashboard for users with the shopOwner claim.
@@ -33,14 +29,18 @@ import {
  */
 
 const TERMINAL_STATUSES: OrderStatus[] = ['delivered', 'cancelled'];
-// Status transitions a shop owner is allowed to perform from the UI.
-// `cancelled` and `delivered` are filtered out: cancellation is a
-// customer/admin action; `delivered` is delivery-partner-only.
-const SHOP_OWNER_ALLOWED_ACTIONS: OrderStatus[] = [
-  'accepted',
-  'preparing',
-  'out_for_delivery',
-];
+
+// Action buttons were removed from this dashboard in the
+// view-first-cards pass (Phase 12a-v2-iv-followup-view-first).
+// Tapping a card opens ShopOrderDetail; all status transitions
+// (Accept / Preparing / Out for Delivery) live exclusively on the
+// detail screen. Rationale: solo testing surfaced accidental
+// Accepts from shop owners who hadn't yet seen the items. One
+// extra tap on the happy path eliminates an entire class of
+// fulfilment errors.
+//
+// The SHOP_OWNER_ALLOWED_ACTIONS allow-list still lives on the
+// detail screen's hook — kept there as the single source of truth.
 
 function isToday(ms: number): boolean {
   if (!ms) return false;
@@ -61,7 +61,6 @@ export default function ShopOwnerDashboardScreen() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [pending, setPending] = useState<Record<string, OrderStatus | null>>({});
   const [showAll, setShowAll] = useState(false);
   // Manual remount lever for the watcher: bumping this re-runs the
   // effect and re-subscribes after a Retry tap. Re-creating the
@@ -76,7 +75,10 @@ export default function ShopOwnerDashboardScreen() {
     }
     const unsubscribe = orderService.watchShopOrders(shopId, (list, err) => {
       if (err) {
-        setError(err.message || 'Could not load orders. Pull to refresh.');
+        // Map the raw callable error (e.g. RNFB's `INTERNAL` from a
+        // missing-index FAILED_PRECONDITION) into something a shop
+        // owner can actually act on. See utils/shopOrdersErrorMessage.
+        setError(mapShopOrdersError(err));
         setOrders([]);
       } else {
         setOrders(list);
@@ -110,25 +112,6 @@ export default function ShopOwnerDashboardScreen() {
     if (showAll) return orders;
     return orders.filter(o => !TERMINAL_STATUSES.includes(o.status));
   }, [orders, showAll]);
-
-  const handleAction = async (orderId: string, newStatus: OrderStatus) => {
-    // Optimistic flip — same pattern as AdminOrdersScreen so the chip
-    // updates immediately without waiting for the next 10s poll.
-    const previousOrders = orders;
-    setOrders(prev =>
-      prev.map(o => (o.id === orderId ? { ...o, status: newStatus } : o)),
-    );
-    setPending(prev => ({ ...prev, [orderId]: newStatus }));
-    try {
-      await orderService.updateOrderStatus({ orderId, newStatus });
-    } catch (err: any) {
-      setOrders(previousOrders);
-      const message = err?.message || 'Failed to update order status.';
-      Alert.alert('Update failed', message);
-    } finally {
-      setPending(prev => ({ ...prev, [orderId]: null }));
-    }
-  };
 
   if (!isShopOwner || !shopId) {
     return (
@@ -224,21 +207,29 @@ export default function ShopOwnerDashboardScreen() {
         }
         renderItem={({ item }) => {
           const itemCount = item.items.reduce((n, i) => n + i.quantity, 0);
-          // Only surface transitions a shop owner is allowed to perform.
-          const actions = nextActionsFor(item.status).filter(s =>
-            SHOP_OWNER_ALLOWED_ACTIONS.includes(s),
-          );
-          const pendingStatus = pending[item.id];
           return (
-            <View style={styles.card}>
+            <Pressable
+              style={({ pressed }) => [
+                styles.card,
+                pressed && styles.cardBodyPressed,
+              ]}
+              onPress={() =>
+                nav.navigate('ShopOrderDetail', { orderId: item.id })
+              }
+              accessibilityRole="button"
+              accessibilityLabel={`Open details for order ${item.id}`}
+            >
               <View style={styles.cardHeader}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.orderId} numberOfLines={1}>
                     #{item.id}
                   </Text>
-                  <Text style={styles.time}>{formatOrderTime(item.createdAt)}</Text>
+                  <Text style={styles.time}>
+                    {formatOrderTime(item.createdAt)}
+                  </Text>
                 </View>
                 <OrderStatusChip status={item.status} />
+                <Text style={styles.cardChevron}>›</Text>
               </View>
               <Text style={styles.meta}>
                 {itemCount} item{itemCount > 1 ? 's' : ''} ·{' '}
@@ -247,25 +238,8 @@ export default function ShopOwnerDashboardScreen() {
               <Text style={styles.phone}>
                 📞 {item.deliveryAddress?.phone || '—'}
               </Text>
-              {actions.length > 0 && (
-                <View style={styles.actions}>
-                  {actions.map(next => {
-                    const isLoading = pendingStatus === next;
-                    const anyPending = !!pendingStatus;
-                    return (
-                      <View key={next} style={styles.actionBtn}>
-                        <Button
-                          title={ACTION_LABELS[next]}
-                          onPress={() => handleAction(item.id, next)}
-                          loading={isLoading}
-                          disabled={anyPending && !isLoading}
-                        />
-                      </View>
-                    );
-                  })}
-                </View>
-              )}
-            </View>
+              <Text style={styles.tapHint}>Tap to view items & take action</Text>
+            </Pressable>
           );
         }}
       />
@@ -343,6 +317,12 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     gap: spacing.md,
   },
+  cardBodyPressed: { opacity: 0.7 },
+  cardChevron: {
+    ...typography.h2,
+    color: colors.textSecondary,
+    marginLeft: spacing.xs,
+  },
   orderId: { ...typography.bodyBold },
   time: {
     ...typography.caption,
@@ -355,13 +335,12 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     marginTop: spacing.xs,
   },
-  actions: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-    marginTop: spacing.md,
+  tapHint: {
+    ...typography.caption,
+    color: colors.primary,
+    fontWeight: '600',
+    marginTop: spacing.sm,
   },
-  actionBtn: { flexGrow: 1, minWidth: 140 },
   manageMenuTile: {
     flexDirection: 'row',
     alignItems: 'center',

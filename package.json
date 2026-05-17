@@ -13,18 +13,20 @@
     "set-admin": "tsx scripts/set-admin.ts",
     "set-shop-owner": "tsx scripts/set-shop-owner.ts",
     "set-delivery": "tsx scripts/set-delivery.ts",
+    "revoke-extra-roles": "tsx scripts/revoke-extra-roles.ts",
     "backfill-menus": "tsx scripts/backfill-shop-menus.ts",
     "reset:test-data": "tsx scripts/reset-test-data.ts",
     "update-order": "tsx scripts/update-order.ts",
     "import-images": "tsx scripts/import-from-openfoodfacts.ts",
     "generate-branding": "tsx scripts/generate-branding.ts",
     "audit": "node scripts/audit-integrity.js",
+    "audit:indexes": "tsx scripts/audit-firestore-indexes.ts",
     "test:rules": "firebase emulators:exec --only firestore,auth --project grocery-mvp-test \"jest --config tests/jest.config.js\"",
     "test:rules:watch": "firebase emulators:exec --only firestore,auth --project grocery-mvp-test \"jest --config tests/jest.config.js --watch\"",
     "test:unit": "jest --config tests/jest.unit.config.js",
     "test:unit:watch": "jest --config tests/jest.unit.config.js --watch",
-    "test": "npm run audit && npm run test:unit",
-    "test:full": "npm run audit && npm run test:unit && npm run test:rules"
+    "test": "npm run audit && npm run audit:indexes && npm run test:unit",
+    "test:full": "npm run audit && npm run audit:indexes && npm run test:unit && npm run test:rules"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",

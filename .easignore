@@ -1,0 +1,78 @@
+# EAS Build ignore file — mirrors .gitignore EXCEPT for the two
+# Firebase config files (GoogleService-Info.plist + google-services.json).
+#
+# Those two are gitignored (we don't want them in source control) BUT
+# they're required for @react-native-firebase native init at runtime.
+# Without them in the EAS Build context, the iOS / Android app crashes
+# on launch before any JS loads.
+#
+# When this file exists, EAS Build uses it INSTEAD of .gitignore for
+# upload decisions. So any rule that's in .gitignore but not here means
+# EAS will include those files in the build.
+#
+# IMPORTANT: keep this in sync with .gitignore. If you add a new entry
+# to .gitignore, add it here too unless it's needed for the build.
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files — env vars come from EAS Secrets in production builds,
+# .env is for local dev only
+.env*.local
+.env
+service-account.json
+
+# DELIBERATELY NOT IGNORED (vs .gitignore):
+#   GoogleService-Info.plist  ← needed for iOS Firebase native init
+#   google-services.json      ← needed for Android Firebase native init
+
+
+# typescript
+*.tsbuildinfo
+
+app-example
+
+# generated native folders
+/ios
+/android
+
+# Firebase emulator + test artifacts
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+auth-debug.log
+firebase-export-*/
+coverage/
+
+# Audit logs from scripts/reset-test-data.ts — keep the directory
+# tracked (via .gitkeep) but never commit individual run logs.
+scripts/.cleanup-logs/*
+!scripts/.cleanup-logs/.gitkeep

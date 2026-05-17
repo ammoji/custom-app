@@ -18,7 +18,12 @@ import { colors, radii, shadow, spacing, typography } from '../../constants/them
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
 import type { Order } from '../../types';
-import { formatOrderTime, formatRupees, isToday } from '../../utils/format';
+import {
+    formatOrderTime,
+    formatRelativeDeliveryTime,
+    formatRupees,
+    isToday,
+} from '../../utils/format';
 
 /**
  * DeliveryDashboardScreen — Phase 12b.
@@ -47,10 +52,13 @@ export default function DeliveryDashboardScreen() {
   const [error, setError] = useState<string | null>(null);
   const [online, setOnline] = useState(false);
   const [togglingOnline, setTogglingOnline] = useState(false);
-  const [pendingClaim, setPendingClaim] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [showAvailable, setShowAvailable] = useState(true);
   const [showMine, setShowMine] = useState(true);
+  // Delivery History defaults collapsed — it's reference data, not
+  // action data. The partner shouldn't have to scroll past it to
+  // reach the live action lists above.
+  const [showHistory, setShowHistory] = useState(false);
   const [retryNonce, setRetryNonce] = useState(0);
 
   // Subscribe to the two pollers. Both fire immediately on mount and
@@ -133,6 +141,17 @@ export default function DeliveryDashboardScreen() {
     [mine],
   );
 
+  // Delivery History = orders this partner has delivered, newest
+  // first. Data is already in scope via watchMyDeliveries (same
+  // source the "Completed today" stat reads from).
+  const deliveredMine = useMemo(
+    () =>
+      mine
+        .filter(o => o.status === 'delivered')
+        .sort((a, b) => (b.deliveredAt ?? 0) - (a.deliveredAt ?? 0)),
+    [mine],
+  );
+
   const toggleOnline = async (next: boolean) => {
     setTogglingOnline(true);
     // Optimistic flip — rollback on failure so the switch reflects
@@ -153,32 +172,11 @@ export default function DeliveryDashboardScreen() {
     }
   };
 
-  const handleClaim = async (orderId: string) => {
-    // Optimistic remove from available list. On failure (e.g. someone
-    // else won the race), restore via the next 15s poll — no need to
-    // cache the previous list.
-    setPendingClaim(orderId);
-    setAvailable(prev => prev.filter(o => o.id !== orderId));
-    try {
-      await orderService.claimDelivery({ orderId });
-      // Force-refresh "my deliveries" so the new card appears
-      // immediately rather than waiting up to 10s for the next poll.
-      const refreshed = await orderService.listMyDeliveries();
-      setMine(refreshed);
-    } catch (e: any) {
-      const msg = e?.message || 'Could not claim this pickup.';
-      Alert.alert('Already taken', msg);
-      // Force-refresh available so the user sees current reality.
-      try {
-        const refreshed = await orderService.listAvailableDeliveries();
-        setAvailable(refreshed);
-      } catch {
-        // Swallow — next poll will resync.
-      }
-    } finally {
-      setPendingClaim(null);
-    }
-  };
+  // The inline Accept on AvailablePickupCard was removed in the
+  // view-first-cards pass (Phase 12a-v2-iv-followup-view-first).
+  // Claim now happens on DeliveryOrderDetailScreen, which owns the
+  // claim race + revert via the useDeliveryOrderDetail hook. The
+  // previous in-flight-claim state moved with it.
 
   const handlePickedUp = async (order: Order) => {
     setPendingAction(order.id);
@@ -351,6 +349,36 @@ export default function DeliveryDashboardScreen() {
                 </View>
               ))}
 
+            {/* Delivery History section — collapsed by default. The
+                partner can expand to see today's / past completed
+                runs. Data is already loaded via watchMyDeliveries. */}
+            <SectionHeader
+              title="Delivery History"
+              expanded={showHistory}
+              onToggle={() => setShowHistory(s => !s)}
+              count={deliveredMine.length}
+            />
+            {showHistory && deliveredMine.length === 0 && (
+              <EmptyState
+                title="No completed deliveries yet"
+                subtitle="Your delivered orders will appear here."
+              />
+            )}
+            {showHistory &&
+              deliveredMine.map(o => (
+                <View
+                  key={`hist-${o.id}`}
+                  style={{ marginBottom: spacing.md }}
+                >
+                  <DeliveryHistoryCard
+                    order={o}
+                    onPress={() =>
+                      nav.navigate('DeliveryOrderDetail', { orderId: o.id })
+                    }
+                  />
+                </View>
+              ))}
+
             <SectionHeader
               title="Available Pickups"
               expanded={showAvailable}
@@ -372,9 +400,9 @@ export default function DeliveryDashboardScreen() {
         renderItem={({ item }) => (
           <AvailablePickupCard
             order={item}
-            pending={pendingClaim === item.id}
-            anyPending={!!pendingClaim}
-            onAccept={() => handleClaim(item.id)}
+            onPress={() =>
+              nav.navigate('DeliveryOrderDetail', { orderId: item.id })
+            }
           />
         )}
       />
@@ -430,41 +458,84 @@ function Stat({
 
 function AvailablePickupCard({
   order,
-  pending,
-  anyPending,
-  onAccept,
+  onPress,
 }: {
   order: Order;
-  pending: boolean;
-  anyPending: boolean;
-  onAccept: () => void;
+  onPress: () => void;
 }) {
+  // View-first card: body is the only tap target. Accept lives
+  // inside DeliveryOrderDetail so the partner has seen items +
+  // exact drop address before committing. The previous inline
+  // Accept button caused accidental commits in solo testing.
   const itemCount = order.items.reduce((n, i) => n + i.quantity, 0);
   return (
-    <View style={styles.card}>
-      <Text style={styles.shopName} numberOfLines={1}>
-        {order.shopName}
-      </Text>
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`Open pickup details for ${order.shopName}`}
+      style={({ pressed }) => [styles.card, pressed && styles.cardBodyPressed]}
+    >
+      <View style={styles.cardHeader}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.shopName} numberOfLines={1}>
+            {order.shopName}
+          </Text>
+        </View>
+        <Text style={styles.cardChevron}>›</Text>
+      </View>
       <Text style={styles.address} numberOfLines={2}>
         Drop: {order.deliveryAddress.line1}
-        {order.deliveryAddress.line2 ? `, ${order.deliveryAddress.line2}` : ''},{' '}
-        {order.deliveryAddress.pincode}
+        {order.deliveryAddress.line2
+          ? `, ${order.deliveryAddress.line2}`
+          : ''}
+        , {order.deliveryAddress.pincode}
       </Text>
       <Text style={styles.meta}>
         {itemCount} item{itemCount > 1 ? 's' : ''} ·{' '}
         {formatRupees(order.total)} · {formatOrderTime(order.createdAt)}
       </Text>
-      <View style={{ marginTop: spacing.md }}>
-        <Button
-          title={pending ? 'Claiming…' : 'Accept'}
-          onPress={onAccept}
-          loading={pending}
-          // Disable other Accept buttons while one claim is in flight
-          // — racing your own clicks adds zero value.
-          disabled={anyPending && !pending}
-        />
+      <Text style={styles.tapHint}>Tap to view items & accept</Text>
+    </Pressable>
+  );
+}
+
+/**
+ * Delivery History row — read-only summary of a delivered order.
+ *
+ * Customer phone is NOT shown (matches the privacy guard on
+ * DeliveryOrderDetailScreen's available-for-claim state). The
+ * partner already had the phone while assigned; once the order is
+ * delivered we don't keep surfacing it on the dashboard.
+ */
+function DeliveryHistoryCard({
+  order,
+  onPress,
+}: {
+  order: Order;
+  onPress: () => void;
+}) {
+  const when = formatRelativeDeliveryTime(order.deliveredAt ?? 0);
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`Open delivered order for ${order.shopName}`}
+      style={({ pressed }) => [styles.card, pressed && styles.cardBodyPressed]}
+    >
+      <View style={styles.cardHeader}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.shopName} numberOfLines={1}>
+            {order.shopName}
+          </Text>
+          <Text style={styles.subStatus}>✅ Delivered · {when}</Text>
+        </View>
+        <Text style={styles.cardChevron}>›</Text>
       </View>
-    </View>
+      <Text style={styles.address} numberOfLines={1}>
+        {order.deliveryAddress.line1} · {order.deliveryAddress.pincode}
+      </Text>
+      <Text style={styles.meta}>{formatRupees(order.total)}</Text>
+    </Pressable>
   );
 }
 
@@ -613,6 +684,12 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     marginBottom: spacing.xs,
   },
+  cardBodyPressed: { opacity: 0.7 },
+  cardChevron: {
+    ...typography.h2,
+    color: colors.textSecondary,
+    marginLeft: spacing.xs,
+  },
   shopName: { ...typography.h3 },
   subStatus: {
     ...typography.caption,
@@ -626,6 +703,12 @@ const styles = StyleSheet.create({
     marginTop: spacing.xs,
   },
   meta: { ...typography.body, marginTop: spacing.sm },
+  tapHint: {
+    ...typography.caption,
+    color: colors.primary,
+    fontWeight: '600',
+    marginTop: spacing.sm,
+  },
   errorBanner: {
     marginHorizontal: spacing.lg,
     marginTop: spacing.md,
