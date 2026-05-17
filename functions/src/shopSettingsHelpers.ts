@@ -27,8 +27,13 @@
 export type ShopSettingsInput = {
   auth: {
     uid: string;
-    token?: { shopOwner?: unknown; shopId?: unknown };
+    token?: { admin?: unknown; shopOwner?: unknown; shopId?: unknown };
   } | null;
+  // Optional target shop id. REQUIRED when the caller is admin (they
+  // don't own a shop, so the claim doesn't tell us which shop to
+  // target). IGNORED when the caller is a shop owner (we always use
+  // their claim's shopId — clients can't target someone else's shop).
+  shopId?: unknown;
   deliveryFee?: unknown;
   minOrder?: unknown;
 };
@@ -67,22 +72,45 @@ export function validateShopSettings(
       message: 'Sign in required',
     };
   }
-  // 2. Role gate — strict equality on shopOwner claim (truthy checks
-  //    have bitten us; see Design notes in the PR 5 prompt).
-  if (auth.token?.shopOwner !== true) {
+  // 2. Role gate — admin OR shopOwner. Strict equality on both claims
+  //    (truthy checks have bitten us; see Design notes in the PR 5
+  //    prompt).
+  const isAdmin = auth.token?.admin === true;
+  const isShopOwner = auth.token?.shopOwner === true;
+  if (!isAdmin && !isShopOwner) {
     return {
       ok: false,
       code: 'permission-denied',
-      message: 'Shop owner role required',
+      message: 'Shop owner or admin role required',
     };
   }
-  const shopId = auth.token.shopId;
-  if (typeof shopId !== 'string' || shopId.length === 0) {
-    return {
-      ok: false,
-      code: 'permission-denied',
-      message: 'No shopId on your account',
-    };
+
+  // Resolve target shopId:
+  //   - Admin: read from input.shopId (REQUIRED — claim doesn't carry one).
+  //   - ShopOwner: read from auth.token.shopId (claim is the source of
+  //     truth; any input.shopId is ignored so a malicious owner client
+  //     can't target someone else's shop).
+  let shopId: string;
+  if (isAdmin) {
+    if (typeof input.shopId !== 'string' || input.shopId.length === 0) {
+      return {
+        ok: false,
+        code: 'invalid-argument',
+        message: 'Admin callers must pass shopId',
+      };
+    }
+    shopId = input.shopId;
+  } else {
+    // shopOwner branch
+    const ownerShopId = auth.token?.shopId;
+    if (typeof ownerShopId !== 'string' || ownerShopId.length === 0) {
+      return {
+        ok: false,
+        code: 'permission-denied',
+        message: 'No shopId on your account',
+      };
+    }
+    shopId = ownerShopId;
   }
 
   // 3. At least one field must be present. We accept partial updates

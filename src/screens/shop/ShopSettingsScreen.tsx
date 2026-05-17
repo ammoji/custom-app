@@ -1,4 +1,4 @@
-import { useNavigation } from '@react-navigation/native';
+import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
@@ -16,6 +16,7 @@ import EmptyState from '../../components/common/EmptyState';
 import Loader from '../../components/common/Loader';
 import ScreenHeader from '../../components/common/ScreenHeader';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
+import type { RootStackParamList } from '../../navigation/AppNavigator';
 import { orderService } from '../../services/orderService';
 import type { Shop } from '../../types';
 
@@ -39,6 +40,12 @@ import type { Shop } from '../../types';
  */
 export default function ShopSettingsScreen() {
   const nav = useNavigation<any>();
+  const route = useRoute<RouteProp<RootStackParamList, 'ShopSettings'>>();
+  // Admin path: route.params.shopId targets a specific shop.
+  // Shop owner path: no params → falls back to getShopForOwner (their
+  // own shop, scoped by their claim).
+  const targetShopId = route.params?.shopId;
+  const isAdminPath = typeof targetShopId === 'string' && targetShopId.length > 0;
 
   const [shop, setShop] = useState<Shop | null>(null);
   const [loading, setLoading] = useState(true);
@@ -59,16 +66,29 @@ export default function ShopSettingsScreen() {
     let cancelled = false;
     (async () => {
       try {
-        const owned = await orderService.getShopForOwner();
+        // Two fetch paths:
+        //   - Admin path: route param shopId is set → fetch all shops
+        //     (admin-only callable) and find by id. No per-id getter
+        //     yet; matches the posture of UserDetailScreen and
+        //     ShopDetailManagementScreen which also do list+find.
+        //   - Shop owner path: no param → use getShopForOwner which
+        //     reads the caller's claim's shopId server-side.
+        let resolved: Shop | null = null;
+        if (isAdminPath) {
+          const allShops = await orderService.listAllShops();
+          resolved = allShops.find(s => s.id === targetShopId) ?? null;
+        } else {
+          resolved = await orderService.getShopForOwner();
+        }
         if (cancelled) return;
-        setShop(owned);
-        if (owned) {
-          setDeliveryFeeStr(String(owned.deliveryFee ?? 0));
-          setMinOrderStr(String(owned.minOrder ?? 0));
+        setShop(resolved);
+        if (resolved) {
+          setDeliveryFeeStr(String(resolved.deliveryFee ?? 0));
+          setMinOrderStr(String(resolved.minOrder ?? 0));
         }
       } catch (e: any) {
         if (cancelled) return;
-        console.warn('[ShopSettings] getShopForOwner failed:', e);
+        console.warn('[ShopSettings] load failed:', e);
         setLoadError(e?.message ?? 'Could not load shop settings');
       } finally {
         if (!cancelled) setLoading(false);
@@ -77,7 +97,7 @@ export default function ShopSettingsScreen() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isAdminPath, targetShopId]);
 
   // Build the changed-fields payload. Numbers parse with Number()
   // (rejects empty strings via NaN check below). Integer-only enforced
@@ -129,10 +149,22 @@ export default function ShopSettingsScreen() {
     }
     setSaving(true);
     try {
-      await orderService.updateShopSettings(payload);
+      // Admin path passes shopId (required by helper). Shop owner
+      // path omits it (helper ignores; uses claim's shopId).
+      await orderService.updateShopSettings({
+        ...payload,
+        ...(isAdminPath ? { shopId: targetShopId } : {}),
+      });
       // Refetch to confirm the write took (and to display the
-      // canonical server value if any normalization happened).
-      const fresh = await orderService.getShopForOwner();
+      // canonical server value if any normalization happened). Use
+      // the same path as the initial load.
+      let fresh: Shop | null = null;
+      if (isAdminPath) {
+        const allShops = await orderService.listAllShops();
+        fresh = allShops.find(s => s.id === targetShopId) ?? null;
+      } else {
+        fresh = await orderService.getShopForOwner();
+      }
       if (fresh) {
         setShop(fresh);
         setDeliveryFeeStr(String(fresh.deliveryFee ?? 0));
@@ -156,7 +188,7 @@ export default function ShopSettingsScreen() {
   if (loading) {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
-        <ScreenHeader title="Shop Settings" />
+        <ScreenHeader title="Shop Settings" onBack={() => nav.goBack()} />
         <Loader fullScreen />
       </SafeAreaView>
     );
@@ -165,12 +197,14 @@ export default function ShopSettingsScreen() {
   if (loadError || !shop) {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
-        <ScreenHeader title="Shop Settings" />
+        <ScreenHeader title="Shop Settings" onBack={() => nav.goBack()} />
         <EmptyState
           title="Could not load shop"
           subtitle={
             loadError ??
-            "You don't seem to own a shop. Contact support if this is wrong."
+            (isAdminPath
+              ? "Shop not found. It may have been deleted or is outside the 100-shop listAllShops cap."
+              : "You don't seem to own a shop. Contact support if this is wrong.")
           }
         />
       </SafeAreaView>
@@ -179,7 +213,7 @@ export default function ShopSettingsScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
-      <ScreenHeader title="Shop Settings" />
+      <ScreenHeader title="Shop Settings" onBack={() => nav.goBack()} />
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={styles.kavRoot}

@@ -233,6 +233,26 @@ export default function ShopDetailManagementScreen() {
         ) : null}
 
         <View style={styles.actions}>
+          {/*
+            PR 5 hotfix: admin path into ShopSettings for ANY shop.
+            ShopSettingsScreen reads the optional shopId route param
+            and dispatches to listAllShops+find (admin) instead of
+            getShopForOwner (shopOwner self-serve). Server's
+            validateShopSettings allows admin callers when shopId is
+            present in the request body.
+          */}
+          {(status === 'active' || status === 'suspended') && (
+            <>
+              <Button
+                title="⚙️ Edit settings (delivery fee, minimum order)"
+                variant="secondary"
+                onPress={() => nav.navigate('ShopSettings', { shopId: shop.id })}
+                disabled={pending !== null}
+                size="lg"
+              />
+              <View style={{ height: spacing.md }} />
+            </>
+          )}
           {status === 'active' && (
             <Button
               title="Suspend shop"

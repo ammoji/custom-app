@@ -3411,26 +3411,34 @@ export const updateMenuItem = onCall<{
 // surface. See PR 5 prompt "Scope (out)".
 // ────────────────────────────────────────────────────────────────────
 export const updateShopSettings = onCall<{
+  // Optional. REQUIRED for admin callers (their claim has no shopId);
+  // IGNORED for shopOwner callers (their claim is the source of truth).
+  // The helper enforces this branching so a malicious shop owner
+  // client can't target another shop's settings even if they pass a
+  // shopId.
+  shopId?: string;
   deliveryFee?: number;
   minOrder?: number;
 }>(
   { cors: true, enforceAppCheck: false },
   async request => {
     // Cast: firebase-functions' AuthData has a `DecodedIdToken` shape
-    // for `token`; the helper only inspects shopOwner/shopId/admin and
-    // declares `token?: { shopOwner?: unknown; shopId?: unknown }`
-    // for testability without pulling firebase-functions into the
-    // unit-test surface. The runtime shape matches.
+    // for `token`; the helper only inspects admin/shopOwner/shopId and
+    // declares the narrow shape for testability without pulling
+    // firebase-functions into the unit-test surface. The runtime
+    // shape matches.
     const validated = validateShopSettings({
       auth: request.auth
         ? ({
             uid: request.auth.uid,
             token: request.auth.token as unknown as {
+              admin?: unknown;
               shopOwner?: unknown;
               shopId?: unknown;
             },
           })
         : null,
+      shopId: request.data?.shopId,
       deliveryFee: request.data?.deliveryFee,
       minOrder: request.data?.minOrder,
     });
@@ -3438,10 +3446,10 @@ export const updateShopSettings = onCall<{
       throw new HttpsError(validated.code, validated.message);
     }
     const { shopId, updates } = validated;
-    // shopId from the validated token, NOT the request body — a
-    // malicious client cannot target another owner's shop even if
-    // they figure out the shopId of a different shop. This is the
-    // same pattern as updateMenuItem above.
+    // shopId comes from validated.shopId — for shopOwner callers this
+    // is the claim's shopId (request body shopId is ignored), for
+    // admin callers it's the validated request body shopId. The helper
+    // enforces both branches; this wrapper trusts the validated result.
     await db.doc(`shops/${shopId}`).update({
       ...updates,
       updatedAt: Date.now(),

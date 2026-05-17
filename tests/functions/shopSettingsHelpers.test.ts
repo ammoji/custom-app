@@ -66,6 +66,85 @@ describe('validateShopSettings — auth + role', () => {
   });
 });
 
+// PR 5 hotfix — admin can target ANY shop's settings via input.shopId
+// (their claim has no shopId, so they MUST pass it). shopOwner callers
+// still use their claim's shopId; any passed shopId is ignored so a
+// malicious shop owner client can't target someone else's shop.
+describe('validateShopSettings — admin path', () => {
+  const adminAuth = { uid: 'admin_001', token: { admin: true } };
+
+  test('admin with valid shopId is accepted', () => {
+    const r = validateShopSettings({
+      auth: adminAuth,
+      shopId: 'shop_X',
+      deliveryFee: 30,
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.shopId).toBe('shop_X');
+      expect(r.updates.deliveryFee).toBe(30);
+    }
+  });
+
+  test('admin without shopId is rejected (invalid-argument)', () => {
+    const r = validateShopSettings({
+      auth: adminAuth,
+      deliveryFee: 30,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe('invalid-argument');
+      expect(r.message).toMatch(/shopId/i);
+    }
+  });
+
+  test('admin with empty-string shopId is rejected (invalid-argument)', () => {
+    const r = validateShopSettings({
+      auth: adminAuth,
+      shopId: '',
+      deliveryFee: 30,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('invalid-argument');
+  });
+
+  test('admin with non-string shopId is rejected (invalid-argument)', () => {
+    const r = validateShopSettings({
+      auth: adminAuth,
+      shopId: 42 as unknown as string,
+      deliveryFee: 30,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('invalid-argument');
+  });
+
+  test('shopOwner ignores any passed shopId — uses claim shopId', () => {
+    // Defense-in-depth: even if a shop owner client tries to target
+    // shop_OTHER via input.shopId, the server uses the claim's
+    // shopId (shop_A). This prevents lateral targeting attacks.
+    const r = validateShopSettings({
+      auth: ownerAuth('shop_A'),
+      shopId: 'shop_OTHER',
+      deliveryFee: 30,
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.shopId).toBe('shop_A');
+  });
+
+  test('admin claim that is not literal true is rejected (strict equality)', () => {
+    // Same posture as the shopOwner-strict-equality guard above. A
+    // malformed token carrying `admin: 'yes'` or `admin: 1` must be
+    // rejected, not treated as truthy.
+    const r = validateShopSettings({
+      auth: { uid: 'u1', token: { admin: 1 as unknown as boolean } },
+      shopId: 'shop_X',
+      deliveryFee: 30,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('permission-denied');
+  });
+});
+
 describe('validateShopSettings — payload', () => {
   test('rejects payload with neither field', () => {
     const r = validateShopSettings({ auth: ownerAuth() });

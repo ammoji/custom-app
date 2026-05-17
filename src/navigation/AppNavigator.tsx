@@ -80,7 +80,10 @@ export type RootStackParamList = {
   ShopMenuItemEdit: { menuItemId: string };
   AddCustomMenuItem: undefined;
   // PR 5: shop owner self-service for deliveryFee + minOrder.
-  ShopSettings: undefined;
+  // PR 5 hotfix: optional shopId param lets admin target any shop.
+  // Without param (shop owner path): server uses claim's shopId.
+  // With param (admin path): server validates admin claim + uses param.
+  ShopSettings: { shopId?: string } | undefined;
   DeliveryDashboard: undefined;
   DeliveryOrderDetail: { orderId: string };
   Login: { returnTo?: keyof RootStackParamList } | undefined;
