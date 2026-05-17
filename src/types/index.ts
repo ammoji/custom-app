@@ -196,6 +196,29 @@ export type SavedAddress = {
 // Deliberately omits server-internal fields (fcmTokens, isAdmin,
 // deliveryStatus) — those are filtered out server-side before the
 // callable returns. The client never needs them on the Profile screen.
+// PR 1 — security hardening. Mirror of the deliveryRequests/{uid}
+// doc shape on the server. The waiting screen + admin queue both
+// read this; the admin detail screen also reads it. The doc is
+// created with status='pending' by requestDeliveryRole and is the
+// SOLE writer until an admin transitions it to approved/rejected via
+// approveDeliveryRole / rejectDeliveryRole.
+export type DeliveryRequestStatus = 'pending' | 'approved' | 'rejected';
+
+export type DeliveryRequest = {
+  uid: string;
+  phone: string;
+  name?: string;
+  vehicleType?: string;
+  city?: string;
+  submittedAt: number; // epoch ms
+  status: DeliveryRequestStatus;
+  approvedAt?: number;
+  approvedBy?: string; // admin uid
+  rejectedAt?: number;
+  rejectedBy?: string; // admin uid
+  rejectedReason?: string;
+};
+
 export type UserProfile = {
   uid: string;
   phone: string | null;

@@ -151,3 +151,174 @@ describe('canReadOrder ↔ firestore.rules parity matrix', () => {
     expect(canReadOrder({ uid, claims, order })).toBe(expected);
   });
 });
+
+// ────────────────────────────────────────────────────────────
+// PR 1 — Security hardening: auth-boundary matrix for the new
+// delivery-approval callables + cross-reference to the existing
+// callables that PR 1 did NOT extract into helpers.
+// ────────────────────────────────────────────────────────────
+//
+// The auth checks on requestDeliveryRole / approveDeliveryRole /
+// rejectDeliveryRole / listPendingDeliveryRequests live in
+// functions/src/deliveryRequestHelpers.ts and are exercised in
+// detail by tests/functions/deliveryRequestHelpers.test.ts (23
+// tests pinning every code path). This block adds a parity-style
+// matrix that asserts the SAME auth verdicts using the helpers,
+// so reviewers can eyeball role × callable → allow/deny in one
+// place — the existing canReadOrder posture above.
+//
+// Existing-callable auth (NOT refactored in PR 1 to keep diff
+// focused — those check inline in functions/src/index.ts; the
+// inline checks are documented here as ground truth):
+//
+//   listShopOrders        → admin OR (shopOwner AND requested
+//                                     shopId == claims.shopId).
+//                            Helper: validateShopOrdersAccess
+//                            (already pinned by
+//                            listShopOrdersValidation.test.ts).
+//   listMyOrders          → any signed-in caller; scoped by
+//                            customerUid == auth.uid in the
+//                            Firestore query, not in an auth
+//                            check (rules + query together
+//                            enforce isolation).
+//   listAvailableDeliveries → delivery claim required.
+//                            requireDeliveryRole inline.
+//   listShopMenuPublic    → no auth required; server filters
+//                            non-active shops + unavailable
+//                            items. Rules now ALSO enforce
+//                            active-shop gate on direct reads
+//                            (firestore.rules /shops/*/menu).
+//   listAllUsers,
+//   listAllShops          → admin claim required. Inline.
+//   getMyDeliveryRequest  → any signed-in caller; returns the
+//                            caller's own doc only. Scoped by
+//                            db.doc(`deliveryRequests/${uid}`).
+//
+// New callables (extracted helpers, matrix below):
+//   requestDeliveryRole         → validateRequestDeliveryRole
+//   approveDeliveryRole         → canApproveDeliveryRequest
+//   rejectDeliveryRole          → canRejectDeliveryRequest
+//   listPendingDeliveryRequests → requireAdminCaller
+//
+// The matrix below sweeps the four canonical caller roles
+// (anon, customer, delivery, admin) through each new helper
+// and asserts allow/deny. Any drift between this matrix and the
+// callable's actual behaviour means a reviewer should update
+// BOTH this file AND tests/functions/deliveryRequestHelpers.test.ts.
+import {
+    canApproveDeliveryRequest,
+    canRejectDeliveryRequest,
+    requireAdminCaller,
+    validateRequestDeliveryRole,
+} from '../../functions/src/deliveryRequestHelpers';
+
+type Caller =
+  | { kind: 'anon' }
+  | { kind: 'customer'; uid: string }
+  | { kind: 'delivery'; uid: string }
+  | { kind: 'admin'; uid: string };
+
+function authFor(c: Caller) {
+  if (c.kind === 'anon') return null;
+  const token: Record<string, unknown> = {};
+  if (c.kind === 'delivery') token.delivery = true;
+  if (c.kind === 'admin') token.admin = true;
+  return { uid: c.uid, token } as const;
+}
+
+const CALLERS: Caller[] = [
+  { kind: 'anon' },
+  { kind: 'customer', uid: 'cust1' },
+  { kind: 'delivery', uid: 'del1' },
+  { kind: 'admin', uid: 'admin1' },
+];
+
+describe('PR 1 — delivery-approval callables × caller-role matrix', () => {
+  describe('requestDeliveryRole', () => {
+    // Allow iff (signed in) AND (caller does NOT already hold the
+    // delivery claim). hasExistingPendingRequest is the Firestore
+    // dedup; we exercise it === false here so the matrix only
+    // varies on auth + role.
+    test.each(CALLERS)('caller=$kind allow/deny', caller => {
+      const auth = authFor(caller);
+      const r = validateRequestDeliveryRole({
+        auth,
+        hasExistingPendingRequest: false,
+      });
+      if (caller.kind === 'anon') {
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.code).toBe('unauthenticated');
+      } else if (caller.kind === 'delivery') {
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.code).toBe('failed-precondition');
+      } else {
+        // customer + admin can apply (admins applying to themselves
+        // is unusual but not blocked by the helper — the policy is
+        // "no self-revocation" not "no self-apply").
+        expect(r.ok).toBe(true);
+      }
+    });
+  });
+
+  describe('approveDeliveryRole', () => {
+    // Allow iff admin AND target doc is pending. Vary caller; pin
+    // currentRequestStatus='pending' + targetUid='someUser' so the
+    // matrix is purely about role.
+    test.each(CALLERS)('caller=$kind allow/deny', caller => {
+      const auth = authFor(caller);
+      const r = canApproveDeliveryRequest({
+        auth,
+        targetUid: 'someUser',
+        currentRequestStatus: 'pending',
+      });
+      if (caller.kind === 'admin') {
+        expect(r.ok).toBe(true);
+      } else if (caller.kind === 'anon') {
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.code).toBe('unauthenticated');
+      } else {
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.code).toBe('permission-denied');
+      }
+    });
+  });
+
+  describe('rejectDeliveryRole', () => {
+    // Same role contract as approve; reason is required and non-empty.
+    test.each(CALLERS)('caller=$kind allow/deny', caller => {
+      const auth = authFor(caller);
+      const r = canRejectDeliveryRequest({
+        auth,
+        targetUid: 'someUser',
+        currentRequestStatus: 'pending',
+        reason: 'missing ID',
+      });
+      if (caller.kind === 'admin') {
+        expect(r.ok).toBe(true);
+      } else if (caller.kind === 'anon') {
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.code).toBe('unauthenticated');
+      } else {
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.code).toBe('permission-denied');
+      }
+    });
+  });
+
+  describe('listPendingDeliveryRequests', () => {
+    // Admin-only. Pure auth helper; no resource-state dependency.
+    test.each(CALLERS)('caller=$kind allow/deny', caller => {
+      const auth = authFor(caller);
+      const r = requireAdminCaller({ auth });
+      if (caller.kind === 'admin') {
+        expect(r.ok).toBe(true);
+      } else if (caller.kind === 'anon') {
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.code).toBe('unauthenticated');
+      } else {
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.code).toBe('permission-denied');
+      }
+    });
+  });
+});

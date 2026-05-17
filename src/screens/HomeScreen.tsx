@@ -214,6 +214,17 @@ export default function HomeScreen() {
             {isAdmin && (
               <Pressable
                 style={styles.adminRow}
+                onPress={() => nav.navigate('PendingDeliveryRequests')}
+                accessibilityRole="button"
+                accessibilityLabel="Delivery partner requests"
+              >
+                <Text style={styles.adminText}>🛵  Delivery requests</Text>
+                <Text style={styles.adminChevron}>›</Text>
+              </Pressable>
+            )}
+            {isAdmin && (
+              <Pressable
+                style={styles.adminRow}
                 onPress={() => nav.navigate('UserManagement')}
                 accessibilityRole="button"
                 accessibilityLabel="User Management"

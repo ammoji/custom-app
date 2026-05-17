@@ -2007,6 +2007,362 @@ Metro-served dev client.
 
 ---
 
+## 🔍 Code review findings (May 17 2026)
+
+Comprehensive review of the codebase by three parallel reviewers
+(security, payments, concurrency) after Phase 12c shipped. The
+foundation is solid; everything below is gaps to close before public
+launch or shortly after. Items are grouped by the PR that should fix
+them so each diff stays reviewable.
+
+### PR 1 — Security hardening (launch blocker)
+
+- [ ] **`becomeDelivery` is self-service + leaks customer PII.** Any
+      signed-in user can call the callable
+      (`functions/src/index.ts:998`), instantly get the `delivery`
+      claim, then call `listAvailableDeliveries` to read name + phone
+      + full address of every customer with a pending pickup. Code
+      comment acknowledges the gap. **Fix:** require admin approval
+      (mirror the shop-registration flow) or remove the callable and
+      grant via CLI script only.
+- [ ] **`/users/{uid}` write rule allows spoofing role mirrors.**
+      `firestore.rules:30-32` allows arbitrary field writes on a
+      user's own doc, including `isAdmin: true`, `isDelivery: true`,
+      and `fcmTokens`. Not a privilege escalation (auth gates read
+      `auth.token.*` claims, not mirrors) but it leaks admin push
+      notifications and inflates the online-delivery counter the
+      `getOnlineDeliveryCount` callable returns. **Fix:** tighten
+      rule to a whitelisted field set (`name`, `email`, `addresses`,
+      `defaultAddressId`, `updatedAt`) — never role flags or
+      `fcmTokens`.
+- [ ] **Menu reads are not status-gated.** `firestore.rules:52-62`
+      allows public read on `shops/{shopId}/menu/{menuItemId}`
+      regardless of parent shop status. A competitor can scrape
+      pending or suspended shops' pricing via direct Firestore reads
+      using the published REST API + a fresh anon Auth token.
+      **Fix:** rule should require the parent shop's `status ==
+      'active'`, OR move the customer-facing read path entirely
+      through the `listShopMenuPublic` callable (it already filters)
+      and deny direct subcollection reads.
+- [ ] **Rules-vs-functions parity test only covers `getOrder`.**
+      `tests/contracts/orderReadAuth.parity.test.ts` is the gold
+      standard pattern but only one callable is pinned. Extend to
+      cover `listShopOrders`, `listMyOrders`, `listAvailableDeliveries`,
+      `listShopMenuPublic`, and `listAllUsers` / `listAllShops` so
+      auth-rule drift gets caught by CI.
+
+### PR 2 — Payment hardening (launch blocker)
+
+- [ ] **No refund flow exists.** `updateOrderStatus` lets admin /
+      shop-owner cancel a `paid` order with no Razorpay refund call
+      and no audit trail — money stays with the merchant. `Grep` for
+      `razorpay.payments.refund` returns zero hits across the
+      codebase. **Fix:** either wire `razorpay.payments.refund()`
+      into the cancellation path, or block cancellation of paid
+      orders entirely and document a manual-refund SOP + admin
+      alert flag for orders that need refund attention.
+- [ ] **Webhook can flip `paid → failed` on out-of-order events.**
+      `functions/src/index.ts:746-768` has no idempotency guard
+      against status downgrade. If Razorpay delivers `payment.failed`
+      after a successful capture (rare but documented), the customer's
+      bank shows debit but app shows failed. **Fix:** on the failed
+      branch, early-return if `order.paymentStatus === 'paid'`. Add a
+      processed-events dedup log keyed on `payment.id` for full
+      idempotency.
+- [ ] **Amount mismatch flags the order but still marks it `paid`.**
+      `functions/src/index.ts:743-753` — webhook writes
+      `amountMismatch: true` and proceeds to mark paid. Shop will
+      dispatch food for an underpaid order. The flag is never read
+      elsewhere. **Fix:** on mismatch, do NOT mark paid; write
+      `paymentStatus: 'amount_mismatch'`, push admin notification,
+      surface in admin orders view with a banner.
+- [ ] **No server-side payment confirmation — client trusts Razorpay
+      Checkout.** `CheckoutScreen.tsx:338-346` receives
+      `razorpay_signature` from Checkout's success callback and never
+      sends it to the server. If the webhook is delayed or missing,
+      the user sits on "Payment processing..." until
+      `cleanupAbandonedOrders` cancels their paid order 24h later
+      (see next item). **Fix:** add a `confirmPayment` callable that
+      HMAC-verifies the signature server-side and writes
+      `paymentStatus: 'paid'` synchronously. Webhook becomes the
+      backup path, not the primary.
+- [ ] **`cleanupAbandonedOrders` will auto-cancel paid orders if
+      webhook is delayed >24h.** `functions/src/index.ts:799-803`.
+      Compounds the no-refund + no-client-confirm issues above:
+      customer pays at 11:55 PM, Razorpay webhook delayed during an
+      incident, cron fires next day, paid order is cancelled with
+      no refund. **Fix:** before cancelling, call
+      `razorpay.orders.fetchPayments(razorpayOrderId)` and only
+      proceed to cancel if zero captured payments exist; otherwise
+      mark `paymentStatus: 'paid'` and continue normal flow.
+- [ ] **`retryPayment` orphans the previous Razorpay order.** Edge
+      case but enables double-charge if the original payment lands
+      after retry was initiated. **Fix:** before rotating
+      `razorpayOrderId`, call `razorpay.orders.fetch(oldOrderId)`
+      and refuse retry if any payment was captured.
+
+### PR 3 — Concurrency cleanup (high priority, not blocker)
+
+- [ ] **`OrdersScreen` swallows fetch failure → "No orders yet"
+      empty state on real users with orders.** `OrdersScreen.tsx:22-39`
+      — `listMine` failure just `console.warn`s; `loading` flips
+      false; user sees "No orders yet. Place your first order…"
+      even when they have orders the server couldn't fetch. **Fix:**
+      add `error` state and render an error banner with Retry; hide
+      the empty CTA while error is set.
+- [ ] **Optimistic rollback races overwrite concurrent watcher
+      ticks.** Three sites with the same bug class:
+      `AdminOrdersScreen.handleAction:71-95` (replaces entire orders
+      list, throws away orders that arrived from watcher during
+      the await), `useShopOrderDetail.ts:158-179` (rollback with
+      stale captured `previousStatus`), `DeliveryDashboardScreen`
+      `handleDelivered`/`handlePickedUp` (literal-null rollback
+      undoes successful watcher updates). **Fix:** in rollback, only
+      revert if `prev.status === optimisticStatus` — if the watcher
+      installed something else, trust the watcher.
+- [ ] **`ShopMenuScreen` silent fetch error → owner sees empty
+      menu, may re-add duplicates.** `ShopMenuScreen.tsx:57-67`.
+      Same pattern as `OrdersScreen` — wrap with error state +
+      retry banner.
+- [ ] **Role revocation mid-session has no UX.** When admin revokes
+      a user's shopOwner / delivery claim while they have the
+      relevant dashboard open, the next watcher tick returns
+      `permission-denied` but the UI keeps trying and `useAuthStore`
+      still has stale role flags until next app restart. **Fix:**
+      on watcher error with `permission-denied` or `unauthenticated`
+      code, call `authService.refreshClaims()` and update the auth
+      store; the role-guard EmptyState will route them out.
+- [ ] **`useOnlineDeliveryCount` keeps stale value forever on
+      permanent error.** If the admin claim is revoked, the last
+      successful count sticks indefinitely with no UI signal. Low
+      impact (it's a stat). **Fix:** detect persistent failure (3
+      consecutive errors) and clear to `null`.
+
+### Tag-along items (ride with whichever PR fits)
+
+- [ ] **Enable App Check on every callable.** Currently
+      `enforceAppCheck: false` everywhere — enables curl/Postman
+      abuse. Already tracked in Security section above; this is a
+      duplicate flag for cross-reference.
+- [ ] **Handle `payment.authorized` webhook events.** Currently
+      ignored. Required if Razorpay auto-capture toggles off (which
+      can happen during incidents).
+
+### What's solid (do not change)
+
+For the record so future reviewers don't second-guess these:
+admin self-revoke ban enforced server-side; no `grantAdmin`
+callable exists; `mergeCustomClaims` preserves existing claims;
+shopOwner `shopId` scoping never trusts client-passed values;
+`canReadOrder` helper + parity test is exemplary; razorpay webhook
+uses `crypto.timingSafeEqual` (textbook); `claimDelivery` is
+transactional / atomic first-wins; server always charges from
+`menu.price`, never client `priceSnapshot`; watcher contract is
+followed across every screen (the post-loader-spin fix paying off);
+cart invariants + persistence are properly tested.
+
+---
+
+## 🔒 PR 1 — Security hardening (May 17 2026)
+
+First of the three "code review findings" PRs from May 17. Closes the
+three launch-blocker security gaps + the test-coverage gap in the
+"PR 1 — Security hardening" sub-checklist above. Pure server + rules
++ tests + admin UI: no customer/owner/delivery happy-path UX changes,
+so family testing is unaffected by the deploy.
+
+### What shipped
+
+- [x] **Self-service `becomeDelivery` deleted.** The callable that
+      let any signed-in user grant themselves the `delivery` claim
+      (and then read every pending pickup's customer PII via
+      `listAvailableDeliveries`) is gone from
+      `functions/src/index.ts`. The client method
+      `orderService.becomeDelivery` is gone too. Existing users who
+      had the claim from before the deploy KEEP it — the new
+      restriction only gates future requests. Bulk audit/revoke of
+      pre-PR-1 delivery partners is tracked as a follow-up. [PR 1]
+- [x] **Admin-approval flow for delivery partners.** Mirrors the
+      shop registration + approval flow exactly. Five new asia-
+      south1 callables in `functions/src/index.ts`:
+        - `requestDeliveryRole({ name?, vehicleType?, city? })` —
+          writes `deliveryRequests/{uid}` with status pending.
+          Rejects if caller already has the delivery claim or a
+          pending request.
+        - `approveDeliveryRole({ uid })` — admin only. Sets the
+          `delivery` custom claim, mirrors `isDelivery: true` to
+          `users/{uid}`, updates the request doc, pushes a
+          notification to the applicant.
+        - `rejectDeliveryRole({ uid, reason })` — admin only.
+          Writes `rejectedReason` and notifies. Doesn't delete the
+          doc (audit trail).
+        - `listPendingDeliveryRequests()` — admin only. FIFO by
+          `submittedAt`. Pinned by new composite index in
+          `firestore.indexes.json` (status asc + submittedAt asc).
+        - `getMyDeliveryRequest()` — any signed-in caller. Returns
+          the caller's own request doc or null.
+      Validation + auth logic lives in
+      `functions/src/deliveryRequestHelpers.ts` so it's unit-
+      testable without firebase-functions / emulator boot. [PR 1]
+- [x] **Firestore rules tightened (3 changes).**
+        - `/users/{uid}` — split `read/write` into separate
+          `read` + `create` + `update` rules. Create requires
+          `request.resource.data.keys().hasOnly([...])`; update
+          uses `diff.affectedKeys().hasOnly([...])`. Whitelist:
+          `uid, phone, phoneNumber, email, name, addresses,
+          defaultAddressId, updatedAt, createdAt, fcmTokens`.
+          **Excluded** (and therefore deny-by-default for clients):
+          `isAdmin`, `isShopOwner`, `shopId`, `isDelivery`,
+          `deliveryStatus`. Those are written by Cloud Functions
+          via the Admin SDK only. Closes the role-mirror spoof
+          that inflated the `getOnlineDeliveryCount` counter and
+          leaked admin pushes.
+        - `/shops/{shopId}/menu/{menuItemId}` — read now gated on
+          parent `shops/{shopId}.data.status == 'active'` (admins
+          bypass). Closes the public-menu scrape of pending /
+          suspended shop pricing.
+        - `/deliveryRequests/{uid}` — new collection. Read =
+          owner or admin. Create = owner. Update / delete = no one
+          (Cloud Functions only via Admin SDK). [PR 1]
+- [x] **Client wiring.** `src/services/orderService.ts` gains the
+      five new methods (`requestDeliveryRole`, `getMyDeliveryRequest`,
+      `listPendingDeliveryRequests`, `approveDeliveryRole`,
+      `rejectDeliveryRole`) with the same Plan-B native + web
+      dispatch posture as the rest of the file. `src/types/index.ts`
+      gains `DeliveryRequest` + `DeliveryRequestStatus`. [PR 1]
+- [x] **Screens.** Four files:
+        - `src/screens/roles/BecomeDeliveryPartnerScreen.tsx` —
+          rewritten from one-tap opt-in into a form (name +
+          vehicle-type chips + city, all optional). On submit it
+          replaces to the new waiting screen. If the caller
+          already has a pending OR rejected request, the screen
+          short-circuits to the waiting screen so they can't
+          double-submit.
+        - `src/screens/roles/DeliveryApprovalWaitingScreen.tsx` —
+          new. Polls `getMyDeliveryRequest` every 30s. On approval
+          refreshes the ID token (so the new `delivery` claim is
+          visible) and resets the nav stack to Home →
+          DeliveryDashboard. On rejection shows the admin's reason
+          + "Edit & resubmit" button that routes back to the form.
+        - `src/screens/admin/PendingDeliveryRequestsScreen.tsx` —
+          new. Admin queue mirror of `PendingShopsScreen` — days-
+          since chip with > 7d warning treatment, defensive client-
+          sort by `submittedAt` asc, tap row to open detail.
+        - `src/screens/admin/DeliveryRequestDetailScreen.tsx` —
+          new. Mirror of `ShopRegistrationDetailScreen` — same
+          approve / reject modal + reason flow, idempotency guard
+          on the action buttons.
+      Routes registered in `src/navigation/AppNavigator.tsx`.
+      `HomeScreen` admin tile section gains "🛵  Delivery
+      requests" between Pending Shop Approvals and User
+      Management. [PR 1]
+- [x] **Tests added: 39** across 2 files.
+        - `tests/functions/deliveryRequestHelpers.test.ts` — 23
+          tests pinning every code path: validation (auth,
+          existing claim, existing pending, sanitization,
+          truncation, vehicle whitelist), `requireAdminCaller`
+          (admin / unauthenticated / non-admin / non-strict-true
+          claim), `canApproveDeliveryRequest` (admin-only, state
+          machine: pending → approved, idempotency guard,
+          not-found), `canRejectDeliveryRequest` (reason required,
+          truncated at 280 chars, terminal-state guard).
+        - `tests/contracts/orderReadAuth.parity.test.ts` — 16
+          new matrix entries (4 callers × 4 callables) added to
+          the existing parity test file, alongside a doc-block
+          cross-reference to the auth checks of the EXISTING
+          callables (`listShopOrders`, `listMyOrders`,
+          `listAvailableDeliveries`, `listShopMenuPublic`,
+          `listAllUsers`, `listAllShops`, `getMyDeliveryRequest`)
+          that PR 1 intentionally did NOT refactor. [PR 1]
+      Deliberate-break demo: temporarily removed the
+      "already has delivery claim" guard in
+      `validateRequestDeliveryRole`. **2 tests** failed by name —
+      `rejects caller who already has the delivery claim` (helper
+      suite) and `requestDeliveryRole > caller=delivery
+      allow/deny` (parity matrix). Reverted; full suite back to
+      green. [PR 1]
+
+### Acceptance verification (run output)
+
+- [x] `npx tsc --noEmit` — **0 new errors** (4 baseline:
+      `SearchScreen.tsx`, `firebase.ts`, `useOrderStore.ts` ×2,
+      same as before PR 1; the 7 `claude_files/` errors are
+      orthogonal to the app).
+- [x] Functions build (`npm run build` in `functions/`) — clean.
+- [x] `npm run audit:indexes` — `19 query chains, 8 composite,
+      0 missing` (the new `deliveryRequests where status==pending
+      orderBy submittedAt` is covered by the new composite index).
+- [x] `npm test` — **277 / 277 passing**, **30 test suites**.
+      Prior total was 238; PR 1 adds +39 tests (23 helper + 16
+      parity matrix).
+- [x] `firestore.rules` compiles clean (validated by `firebase
+      deploy --only firestore:rules --dry-run` — see deploy plan
+      below).
+
+### Deploy plan (hand to user — not executed by Cascade)
+
+Per `.windsurf/deploy-discipline.md` — one `--only` target per
+command, no pipes, run from a real PowerShell window:
+
+```powershell
+$env:NODE_OPTIONS = "--use-system-ca"
+
+# Rules + index first so the new collection's queries don't
+# trip the missing-index runtime error.
+firebase deploy --only firestore:rules --project grocery-mvp-dev
+firebase deploy --only firestore:indexes --project grocery-mvp-dev
+
+# Five new callables + one deletion (becomeDelivery).
+firebase deploy --only functions:requestDeliveryRole,functions:approveDeliveryRole,functions:rejectDeliveryRole,functions:listPendingDeliveryRequests,functions:getMyDeliveryRequest --project grocery-mvp-dev
+
+# Confirm the new callables are live, then explicitly delete
+# becomeDelivery. Do this AS A SEPARATE DEPLOY so any in-flight
+# old-client calls fail loudly during a known maintenance window
+# rather than silently.
+firebase functions:list --project grocery-mvp-dev
+firebase functions:delete becomeDelivery --region asia-south1 --project grocery-mvp-dev
+
+# OTA the client — preview channel first; promote to production
+# after smoke-testing the family device pair.
+eas update --branch preview --message "PR 1: security hardening — delivery approval flow"
+```
+
+### Deferred (tracked for follow-up PRs)
+
+- [ ] **Rules tests for the new rules** — emulator-based
+      `tests/rules/users.test.ts` extension for the new whitelist
+      enforcement, `tests/rules/shopMenu.test.ts` for the new
+      parent-status gate, and new `tests/rules/deliveryRequests.test.ts`.
+      Pure-helper coverage is in place; emulator-based coverage
+      adds defense in depth. `[PR 1-followup]`
+- [ ] **Extract auth helpers for `listMyOrders`,
+      `listAvailableDeliveries`, `listShopMenuPublic`,
+      `listAllUsers`, `listAllShops`** — the parity matrix
+      currently documents their inline auth checks in a doc
+      block. Extracting them lets the matrix EXECUTE the auth
+      check the same way it does for the PR-1 callables. Each is
+      a 5-10 line refactor; deferred to keep PR 1's diff
+      focused. `[PR 1-followup]`
+- [ ] **`getDeliveryRequest({ uid })` callable** — currently
+      `DeliveryRequestDetailScreen` fetches the full pending list
+      and finds by uid, mirroring `ShopRegistrationDetailScreen`.
+      Fine at 50-request cap; switch to a per-uid getter when the
+      queue regularly exceeds the cap. `[PR 1-followup]`
+- [ ] **Bulk audit + revoke of pre-PR-1 delivery partners** —
+      decide whether legacy self-service-granted delivery claims
+      should be revoked (forcing re-application through the new
+      flow). Affects only people who tapped "I want to be a
+      delivery partner" in v12a-v12b. `[PR 1-followup]`
+- [ ] **Vehicle / ID document verification** — MVP collects
+      `vehicleType` (whitelist of 5) only. License + vehicle reg
+      photo upload + admin review of those docs are deferred to
+      a later PR. `[Post-launch]`
+- [ ] **Admin push when a delivery request lands** — currently
+      best-effort via `pushToAdmins`. Email/SMS fallback for
+      admins not running the app is deferred. `[Post-launch]`
+
+---
+
 **Maintenance rule:** any time we add a temporary dev hack, env-only flag,
 disabled enforcement, or "TODO before launch" in code — add it here
 immediately. The checklist is the only thing that survives memory.

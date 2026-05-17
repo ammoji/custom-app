@@ -11,6 +11,12 @@ import { HttpsError, onCall, onRequest } from 'firebase-functions/v2/https';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import * as crypto from 'node:crypto';
 import Razorpay from 'razorpay';
+import {
+    canApproveDeliveryRequest,
+    canRejectDeliveryRequest,
+    requireAdminCaller,
+    validateRequestDeliveryRole,
+} from './deliveryRequestHelpers';
 import { canReadOrder } from './getOrderAuth';
 import { computeOnlineDeliveryCount } from './onlineDeliveryCountHelpers';
 import {
@@ -991,22 +997,21 @@ async function mergeCustomClaims(
 }
 
 // Phase 12a-v2-i deleted the claim-pre-seeded-shop shortcut. Shop
-// ownership now flows through registerShop → admin approveShop (see
-// below). The mergeCustomClaims helper above is still used by
-// becomeDelivery and approveShop.
-
-export const becomeDelivery = onCall(
-  { cors: true, enforceAppCheck: false },
-  async request => {
-    const auth = request.auth;
-    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
-    // No additional KYC gate yet — production needs admin approval (see
-    // PRELAUNCH_CHECKLIST). For Phase 12a this just sets the claim so
-    // the user is ready when Phase 12b ships the delivery dashboard.
-    await mergeCustomClaims(auth.uid, { delivery: true });
-    return { ok: true };
-  },
-);
+// ownership flows through registerShop → admin approveShop. PR 1
+// (security hardening) deleted the self-service becomeDelivery callable
+// for the same reason: any signed-in user could grant themselves the
+// `delivery` claim and then read every pending pickup's customer
+// PII (name + phone + address) via listAvailableDeliveries. The
+// replacement is requestDeliveryRole → admin approveDeliveryRole,
+// mirroring the shop-registration flow exactly. Helpers are in
+// ./deliveryRequestHelpers.ts; pure-helper tests live in
+// tests/functions/deliveryRequestHelpers.test.ts.
+//
+// IMPORTANT: this deploy does NOT strip the `delivery` claim from
+// users who were granted it by the old becomeDelivery. The new
+// restriction only applies to people requesting the role AFTER this
+// deploy. Bulk audit / revoke is tracked separately if we later
+// decide pre-PR-1 delivery partners need re-verification.
 
 export const listAvailableShops = onCall(
   { cors: true, enforceAppCheck: false },
@@ -1812,6 +1817,241 @@ export const getMyShop = onCall(
       createdAt: data.createdAt?.toMillis?.() ?? data.createdAt ?? null,
       updatedAt: data.updatedAt?.toMillis?.() ?? data.updatedAt ?? null,
     };
+  },
+);
+
+// ────────────────────────────────────────────────────────────
+// Delivery-partner approval flow (PR 1 — security hardening)
+// ────────────────────────────────────────────────────────────
+//
+// Replaces the self-service becomeDelivery callable (deleted, see
+// comment block above mergeCustomClaims). Mirrors the shop-
+// registration approval flow:
+//   user submits form → requestDeliveryRole writes
+//   deliveryRequests/{uid} with status pending → admin reviews via
+//   listPendingDeliveryRequests → admin calls approveDeliveryRole
+//   (sets `delivery` custom claim + mirrors to users/{uid}) or
+//   rejectDeliveryRole (writes reason; user can resubmit).
+//
+// The user-side polling callable is getMyDeliveryRequest, which
+// returns the caller's own request doc or null. Matches the
+// getMyShop / WaitingForApprovalScreen posture.
+
+type DeliveryRequestDoc = {
+  uid: string;
+  phone: string;
+  name?: string;
+  vehicleType?: string;
+  city?: string;
+  submittedAt: number;
+  status: 'pending' | 'approved' | 'rejected';
+  approvedAt?: number;
+  approvedBy?: string;
+  rejectedAt?: number;
+  rejectedBy?: string;
+  rejectedReason?: string;
+};
+
+export const requestDeliveryRole = onCall<{
+  name?: string;
+  vehicleType?: string;
+  city?: string;
+}>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    // First-pass auth + claim check (cheap). Firestore lookup
+    // for an existing pending doc happens AFTER we know the caller
+    // is signed in and isn't already a delivery partner.
+    if (!request.auth) {
+      throw new HttpsError('unauthenticated', 'Sign in required');
+    }
+    if (request.auth.token?.delivery === true) {
+      throw new HttpsError(
+        'failed-precondition',
+        'You are already a delivery partner.',
+      );
+    }
+
+    const uid = request.auth.uid;
+    const reqRef = db.doc(`deliveryRequests/${uid}`);
+    const existing = await reqRef.get();
+    const hasExistingPendingRequest =
+      existing.exists && existing.data()?.status === 'pending';
+
+    const result = validateRequestDeliveryRole({
+      auth: request.auth,
+      name: request.data?.name,
+      vehicleType: request.data?.vehicleType,
+      city: request.data?.city,
+      hasExistingPendingRequest,
+    });
+    if (!result.ok) {
+      throw new HttpsError(result.code, result.message);
+    }
+
+    const now = Date.now();
+    const phone =
+      typeof request.auth.token?.phone_number === 'string'
+        ? request.auth.token.phone_number
+        : '';
+
+    const doc: DeliveryRequestDoc = {
+      uid,
+      phone,
+      submittedAt: now,
+      status: 'pending',
+      ...(result.form.name !== undefined && { name: result.form.name }),
+      ...(result.form.vehicleType !== undefined && {
+        vehicleType: result.form.vehicleType,
+      }),
+      ...(result.form.city !== undefined && { city: result.form.city }),
+    };
+
+    // Overwrite any prior rejected/approved doc — the user is
+    // resubmitting after rejection (legitimate flow) or re-applying
+    // after their claim was revoked admin-side (rare). The
+    // helper's "already approved" guard relies on the claim check
+    // above, not the doc state, so an approved-but-revoked user
+    // CAN resubmit and that's the intended behaviour.
+    await reqRef.set(doc);
+
+    // Best-effort admin notification — non-fatal if push fails.
+    pushToAdmins(
+      '🛵 New delivery partner request',
+      `${result.form.name ?? phone ?? uid} wants to deliver`,
+      { uid, type: 'delivery_request_pending' },
+    ).catch(e =>
+      console.warn('[requestDeliveryRole] pushToAdmins failed:', e),
+    );
+
+    return { ok: true };
+  },
+);
+
+export const approveDeliveryRole = onCall<{ uid: string }>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const targetUid = request.data?.uid;
+    const reqRef =
+      typeof targetUid === 'string' && targetUid.length > 0
+        ? db.doc(`deliveryRequests/${targetUid}`)
+        : null;
+    const snap = reqRef ? await reqRef.get() : null;
+    const currentStatus = (snap?.exists
+      ? (snap.data() as DeliveryRequestDoc).status
+      : null) as 'pending' | 'approved' | 'rejected' | null;
+
+    const result = canApproveDeliveryRequest({
+      auth: request.auth,
+      targetUid,
+      currentRequestStatus: currentStatus,
+    });
+    if (!result.ok) {
+      throw new HttpsError(result.code as any, result.message);
+    }
+
+    const now = Date.now();
+    await reqRef!.update({
+      status: 'approved',
+      approvedAt: now,
+      approvedBy: result.adminUid,
+    });
+
+    // Grant the delivery claim. Mirror onto users/{uid} so future
+    // queries (online-count, push fan-out) can find delivery
+    // partners without scanning Auth.
+    await mergeCustomClaims(result.targetUid, { delivery: true });
+    await db.doc(`users/${result.targetUid}`).set(
+      { isDelivery: true },
+      { merge: true },
+    );
+
+    pushToUser(
+      result.targetUid,
+      '✅ You are approved as a delivery partner',
+      'Open the app and head to the Delivery Dashboard to start picking up orders.',
+      { type: 'delivery_request_approved' },
+    ).catch(e =>
+      console.warn('[approveDeliveryRole] pushToUser failed:', e),
+    );
+
+    return { ok: true };
+  },
+);
+
+export const rejectDeliveryRole = onCall<{ uid: string; reason: string }>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const targetUid = request.data?.uid;
+    const reqRef =
+      typeof targetUid === 'string' && targetUid.length > 0
+        ? db.doc(`deliveryRequests/${targetUid}`)
+        : null;
+    const snap = reqRef ? await reqRef.get() : null;
+    const currentStatus = (snap?.exists
+      ? (snap.data() as DeliveryRequestDoc).status
+      : null) as 'pending' | 'approved' | 'rejected' | null;
+
+    const result = canRejectDeliveryRequest({
+      auth: request.auth,
+      targetUid,
+      currentRequestStatus: currentStatus,
+      reason: request.data?.reason,
+    });
+    if (!result.ok) {
+      throw new HttpsError(result.code as any, result.message);
+    }
+
+    const now = Date.now();
+    await reqRef!.update({
+      status: 'rejected',
+      rejectedAt: now,
+      rejectedBy: result.adminUid,
+      rejectedReason: result.reason,
+    });
+
+    pushToUser(
+      result.targetUid,
+      '❌ Delivery partner request not approved',
+      result.reason,
+      { type: 'delivery_request_rejected' },
+    ).catch(e =>
+      console.warn('[rejectDeliveryRole] pushToUser failed:', e),
+    );
+
+    return { ok: true };
+  },
+);
+
+export const listPendingDeliveryRequests = onCall(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = requireAdminCaller({ auth: request.auth });
+    if (!auth.ok) {
+      throw new HttpsError(auth.code, auth.message);
+    }
+    // Composite index: status asc + submittedAt asc (FIFO). Pinned
+    // in firestore.indexes.json so the deploy fails closed if missing.
+    const snap = await db
+      .collection('deliveryRequests')
+      .where('status', '==', 'pending')
+      .orderBy('submittedAt', 'asc')
+      .limit(50)
+      .get();
+    return snap.docs.map(d => d.data() as DeliveryRequestDoc);
+  },
+);
+
+// Caller's own request doc, or null. No admin check — every signed-in
+// user can read their own. Mirrors getMyShop's contract.
+export const getMyDeliveryRequest = onCall(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+    const snap = await db.doc(`deliveryRequests/${auth.uid}`).get();
+    if (!snap.exists) return null;
+    return snap.data() as DeliveryRequestDoc;
   },
 );
 

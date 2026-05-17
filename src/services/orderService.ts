@@ -17,6 +17,7 @@ import { Platform } from 'react-native';
 import type {
     Address,
     CartItem,
+    DeliveryRequest,
     MenuItem,
     NewMenuItemInput,
     Order,
@@ -522,18 +523,75 @@ export const orderService = {
     return result.data as { shop: Shop; items: MenuItem[] };
   },
 
-  // Sets the delivery custom claim. UI for delivery dashboard ships in
-  // Phase 12b; this exists in 12a so users who self-register now don't
-  // have to re-register later.
-  async becomeDelivery(): Promise<{ ok: boolean }> {
+  // PR 1 — security hardening. Replaces the self-service becomeDelivery
+  // with an admin-approval flow mirroring shop registration. The five
+  // callables: requestDeliveryRole (user submits form),
+  // getMyDeliveryRequest (waiting-room poll), listPendingDeliveryRequests
+  // (admin queue), approveDeliveryRole / rejectDeliveryRole (admin
+  // actions). No direct Firestore reads on deliveryRequests/* from the
+  // client — callables only.
+  async requestDeliveryRole(form: {
+    name?: string;
+    vehicleType?: string;
+    city?: string;
+  }): Promise<{ ok: boolean }> {
     if (isNative) {
-      const fn = getNativeFunctions().httpsCallable('becomeDelivery');
-      const result = await fn();
-      return result.data as any;
+      const fn = getNativeFunctions().httpsCallable('requestDeliveryRole');
+      const result = await fn(form);
+      return result.data as { ok: boolean };
     }
-    const fn = httpsCallable(functions, 'becomeDelivery');
+    const fn = httpsCallable(functions, 'requestDeliveryRole');
+    const result = await fn(form);
+    return result.data as { ok: boolean };
+  },
+
+  async getMyDeliveryRequest(): Promise<DeliveryRequest | null> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('getMyDeliveryRequest');
+      const result = await fn();
+      return (result.data ?? null) as DeliveryRequest | null;
+    }
+    const fn = httpsCallable(functions, 'getMyDeliveryRequest');
     const result = await fn();
-    return result.data as any;
+    return (result.data ?? null) as DeliveryRequest | null;
+  },
+
+  async listPendingDeliveryRequests(): Promise<DeliveryRequest[]> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'listPendingDeliveryRequests',
+      );
+      const result = await fn();
+      return (result.data ?? []) as DeliveryRequest[];
+    }
+    const fn = httpsCallable(functions, 'listPendingDeliveryRequests');
+    const result = await fn();
+    return (result.data ?? []) as DeliveryRequest[];
+  },
+
+  async approveDeliveryRole(uid: string): Promise<{ ok: boolean }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('approveDeliveryRole');
+      const result = await fn({ uid });
+      return result.data as { ok: boolean };
+    }
+    const fn = httpsCallable(functions, 'approveDeliveryRole');
+    const result = await fn({ uid });
+    return result.data as { ok: boolean };
+  },
+
+  async rejectDeliveryRole(args: {
+    uid: string;
+    reason: string;
+  }): Promise<{ ok: boolean }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('rejectDeliveryRole');
+      const result = await fn(args);
+      return result.data as { ok: boolean };
+    }
+    const fn = httpsCallable(functions, 'rejectDeliveryRole');
+    const result = await fn(args);
+    return result.data as { ok: boolean };
   },
 
   // Returns shops with no current owner (ownerUid null/missing).

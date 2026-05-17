@@ -14,6 +14,9 @@ import SearchScreen from '../screens/SearchScreen';
 import ShopDetailScreen from '../screens/ShopDetailScreen';
 import ShopListScreen from '../screens/ShopListScreen';
 import AdminOrdersScreen from '../screens/admin/AdminOrdersScreen';
+// PR 1 — security hardening admin screens.
+import DeliveryRequestDetailScreen from '../screens/admin/DeliveryRequestDetailScreen';
+import PendingDeliveryRequestsScreen from '../screens/admin/PendingDeliveryRequestsScreen';
 import PendingShopsScreen from '../screens/admin/PendingShopsScreen';
 import ShopDetailManagementScreen from '../screens/admin/ShopDetailManagementScreen';
 import ShopManagementScreen from '../screens/admin/ShopManagementScreen';
@@ -23,6 +26,8 @@ import UserManagementScreen from '../screens/admin/UserManagementScreen';
 import DeliveryDashboardScreen from '../screens/delivery/DeliveryDashboardScreen';
 import DeliveryOrderDetailScreen from '../screens/delivery/DeliveryOrderDetailScreen';
 import BecomeDeliveryPartnerScreen from '../screens/roles/BecomeDeliveryPartnerScreen';
+// PR 1 — security hardening delivery waiting screen (mirrors WaitingForApproval).
+import DeliveryApprovalWaitingScreen from '../screens/roles/DeliveryApprovalWaitingScreen';
 import RegisterShopScreen from '../screens/roles/RegisterShopScreen';
 import WaitingForApprovalScreen from '../screens/roles/WaitingForApprovalScreen';
 import AddCustomMenuItemScreen from '../screens/shop/AddCustomMenuItemScreen';
@@ -57,7 +62,15 @@ export type RootStackParamList = {
   UserDetail: { uid: string };
   ShopManagement: undefined;
   ShopDetailManagement: { shopId: string };
+  // PR 1 — security hardening. Delivery applicants land on
+  // BecomeDeliveryPartner (form); on submit they replace to
+  // DeliveryApprovalWaiting (status poll). Admins reach
+  // PendingDeliveryRequests / DeliveryRequestDetail from the
+  // HomeScreen admin tiles.
   BecomeDeliveryPartner: undefined;
+  DeliveryApprovalWaiting: undefined;
+  PendingDeliveryRequests: undefined;
+  DeliveryRequestDetail: { uid: string };
   ShopOwnerDashboard: undefined;
   // Phase 12a-v2-iv-followup: per-order detail for shop owners.
   ShopOrderDetail: { orderId: string };
@@ -140,6 +153,18 @@ export default function AppNavigator() {
       <Stack.Screen
         name="BecomeDeliveryPartner"
         component={BecomeDeliveryPartnerScreen}
+      />
+      <Stack.Screen
+        name="DeliveryApprovalWaiting"
+        component={DeliveryApprovalWaitingScreen}
+      />
+      <Stack.Screen
+        name="PendingDeliveryRequests"
+        component={PendingDeliveryRequestsScreen}
+      />
+      <Stack.Screen
+        name="DeliveryRequestDetail"
+        component={DeliveryRequestDetailScreen}
       />
       <Stack.Screen
         name="ShopOwnerDashboard"

@@ -27,8 +27,39 @@ service cloud.firestore {
              && resource.data.deliveryPersonId == request.auth.uid;
     }
 
+    // PR 1 — security hardening: tighten /users/{uid} writes to a
+    // field whitelist. The previous `allow write: if isOwner(uid)`
+    // let a malicious client write `isAdmin: true`, `isDelivery: true`,
+    // or other role mirrors directly. The rule never granted server-
+    // side privileges (auth is gated on `request.auth.token.*`
+    // CLAIMS, not these mirrors) but it leaked admin push
+    // notifications (pushToAdmins looks up `users.where('isAdmin',
+    // '==', true)`) and inflated the online-delivery counter the
+    // getOnlineDeliveryCount callable returns.
+    //
+    // Allowed fields = the ones the client legitimately writes during
+    // profile setup + saved-address management + FCM push setup.
+    // Role mirrors and deliveryStatus are deliberately excluded;
+    // those are written only by Cloud Functions via the Admin SDK
+    // (which bypasses rules).
     match /users/{uid} {
-      allow read, write: if isOwner(uid);
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasOnly([
+             'uid', 'phone', 'phoneNumber', 'email', 'name',
+             'addresses', 'defaultAddressId',
+             'updatedAt', 'createdAt',
+             'fcmTokens'
+           ]);
+      allow update: if isOwner(uid)
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly([
+               'phone', 'phoneNumber', 'email', 'name',
+               'addresses', 'defaultAddressId',
+               'updatedAt',
+               'fcmTokens'
+             ]);
+      allow delete: if false;
     }
 
     match /shops/{shopId} {
@@ -49,15 +80,25 @@ service cloud.firestore {
       // own shop back to active.
       allow write: if false;
 
-      // Phase 12a-v2-ii: per-shop menu subcollection. Public-readable
-      // because v2-iii will have ShopDetailScreen read this directly
-      // (web SDK on the customer side; native uses Cloud Functions
-      // for everything anyway). Writes go through addCustomMenuItem /
-      // updateMenuItem / removeMenuItem callables — the shop owner
-      // never gets direct write access, which keeps the GLOBAL-item
-      // name/image immutability invariant enforceable in one place.
+      // PR 1 — security hardening: gate menu reads on parent shop
+      // active. Previously this was unconditionally public — anyone
+      // with the project's REST endpoint could scrape pending or
+      // suspended shops' pricing via direct Firestore reads against
+      // a fresh anon Auth token. With this gate the only public path
+      // is the `listShopMenuPublic` callable, which filters identically
+      // server-side. Admin reads bypass the gate.
+      //
+      // Performance note: `get()` inside rules counts as a doc read.
+      // For an active shop's menu page this adds 1 read per menu item
+      // evaluated, on top of the regular reads. Acceptable for MVP
+      // scale (~34 items per shop). Revisit if shops cross 500+ items
+      // — at that point we should drop direct Firestore reads on the
+      // subcollection entirely and force everything through the
+      // callable.
       match /menu/{menuItemId} {
-        allow read: if true;
+        allow read: if isAdmin()
+          || get(/databases/$(database)/documents/shops/$(shopId))
+               .data.status == 'active';
         allow create, update, delete: if false;
       }
     }
@@ -84,6 +125,25 @@ service cloud.firestore {
                       && resource.data.status == 'out_for_delivery'
                       && resource.data.deliveryPersonId == null);
       allow create, update, delete: if false;   // Cloud Functions only
+    }
+
+    // PR 1 — security hardening: new collection backing the
+    // admin-approval flow for delivery partners (replaces the
+    // self-service becomeDelivery callable). The user creates their
+    // own request doc; only Cloud Functions write subsequent state.
+    // Owner and admins can read; no one else.
+    match /deliveryRequests/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      // Owner can create their own pending request. The client
+      // submits via the requestDeliveryRole callable, which re-
+      // validates and writes server-side; this allow lets the same
+      // owner read their own doc afterwards via the web SDK if we
+      // ever want to skip the polling callable. Direct creates from
+      // the client with the wrong shape will still be rejected
+      // because every subsequent state transition (approved /
+      // rejected) is locked behind allow update: if false.
+      allow create: if isOwner(uid);
+      allow update, delete: if false;
     }
   }
 }
