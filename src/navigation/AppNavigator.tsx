@@ -35,6 +35,7 @@ import ShopMenuItemEditScreen from '../screens/shop/ShopMenuItemEditScreen';
 import ShopMenuScreen from '../screens/shop/ShopMenuScreen';
 import ShopOrderDetailScreen from '../screens/shop/ShopOrderDetailScreen';
 import ShopOwnerDashboardScreen from '../screens/shop/ShopOwnerDashboardScreen';
+import ShopSettingsScreen from '../screens/shop/ShopSettingsScreen';
 
 export type RootStackParamList = {
   Home: undefined;
@@ -78,6 +79,8 @@ export type RootStackParamList = {
   ShopMenu: undefined;
   ShopMenuItemEdit: { menuItemId: string };
   AddCustomMenuItem: undefined;
+  // PR 5: shop owner self-service for deliveryFee + minOrder.
+  ShopSettings: undefined;
   DeliveryDashboard: undefined;
   DeliveryOrderDetail: { orderId: string };
   Login: { returnTo?: keyof RootStackParamList } | undefined;
@@ -175,6 +178,7 @@ export default function AppNavigator() {
         component={ShopOrderDetailScreen}
       />
       <Stack.Screen name="ShopMenu" component={ShopMenuScreen} />
+      <Stack.Screen name="ShopSettings" component={ShopSettingsScreen} />
       <Stack.Screen
         name="ShopMenuItemEdit"
         component={ShopMenuItemEditScreen}

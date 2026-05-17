@@ -34,8 +34,14 @@ import {
     type AddressInput,
 } from './profileHelpers';
 import { checkRetryPaymentGuard } from './retryPaymentHelpers';
-// PR 4 — searchMenuPublic helpers. DO NOT REMOVE: auto-formatter has
-// stripped this once already during PR 4. The names are used in
+// PR 5 — DO NOT REMOVE. Auto-formatter has stripped both of these PR 5
+// imports during development. Used by `placeOrder` (minOrder gate)
+// and `updateShopSettings`. If tsc complains about either name,
+// re-add the corresponding line here.
+import { checkMinOrderGate } from './placeOrderGateHelpers';
+import { validateShopSettings } from './shopSettingsHelpers';
+// PR 4 — searchMenuPublic helpers. DO NOT REMOVE: auto-formatter has stripped helper imports in
+// PRs 1, 2, 4. The names are used in
 // the searchMenuPublic callable below; if tsc complains about
 // CandidateShop / RawMenuItem / pickCandidateShopIds /
 // filterAndJoinSearchResults, re-add this block.
@@ -300,8 +306,27 @@ export const placeOrder = onCall<PlaceOrderInput>(
     }
 
     const subtotal = serverItems.reduce((sum, i) => sum + i.price * i.quantity, 0);
-    if (subtotal < shop.minOrder) {
-      throw new HttpsError('failed-precondition', `Minimum order is ₹${shop.minOrder}`);
+    // PR 5 — admin bypass for the minOrder gate. The operator
+    // routinely places small test orders to exercise the customer
+    // flow on real shop data; without a bypass they have to manually
+    // edit `minOrder` in Firestore Console before each test.
+    //
+    // Decision lives in checkMinOrderGate (pure helper) so the
+    // strict-equality `admin === true` rule and the error-message
+    // shape are pinned by unit tests — see
+    // tests/functions/placeOrderGateHelpers.test.ts. Every OTHER
+    // validation (availability, stock, price drift, multi-shop
+    // cart guard from PR 4) still runs for admin callers — this
+    // helper is narrowly the minOrder gate.
+    const gate = checkMinOrderGate({
+      auth: {
+        token: { admin: (auth.token as { admin?: unknown })?.admin },
+      },
+      subtotal,
+      minOrder: shop.minOrder,
+    });
+    if (!gate.ok) {
+      throw new HttpsError('failed-precondition', gate.message);
     }
     const deliveryFee: number = shop.deliveryFee;
     const total = subtotal + deliveryFee;
@@ -3366,6 +3391,62 @@ export const updateMenuItem = onCall<{
     update.updatedAt = Date.now();
     await ref.update(update);
     return { ok: true };
+  },
+);
+
+// ────────────────────────────────────────────────────────────────────
+// PR 5 — Shop owner self-service settings.
+//
+// Two business parameters (deliveryFee, minOrder) can now be edited
+// in-app by shop owners. Previously they were set only via the
+// initial seed or by the platform operator editing Firestore Console
+// docs — didn't scale past ~2 shops.
+//
+// Auth + validation rules live in shopSettingsHelpers.ts so they're
+// unit-testable without firebase-admin. This wrapper is a thin
+// throw-or-write layer over the helper's tagged-union result.
+//
+// Out of scope (deliberately): hours, GST, FSSAI, address — those
+// flow through `registerShop` and need a separate edit-registration
+// surface. See PR 5 prompt "Scope (out)".
+// ────────────────────────────────────────────────────────────────────
+export const updateShopSettings = onCall<{
+  deliveryFee?: number;
+  minOrder?: number;
+}>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    // Cast: firebase-functions' AuthData has a `DecodedIdToken` shape
+    // for `token`; the helper only inspects shopOwner/shopId/admin and
+    // declares `token?: { shopOwner?: unknown; shopId?: unknown }`
+    // for testability without pulling firebase-functions into the
+    // unit-test surface. The runtime shape matches.
+    const validated = validateShopSettings({
+      auth: request.auth
+        ? ({
+            uid: request.auth.uid,
+            token: request.auth.token as unknown as {
+              shopOwner?: unknown;
+              shopId?: unknown;
+            },
+          })
+        : null,
+      deliveryFee: request.data?.deliveryFee,
+      minOrder: request.data?.minOrder,
+    });
+    if (!validated.ok) {
+      throw new HttpsError(validated.code, validated.message);
+    }
+    const { shopId, updates } = validated;
+    // shopId from the validated token, NOT the request body — a
+    // malicious client cannot target another owner's shop even if
+    // they figure out the shopId of a different shop. This is the
+    // same pattern as updateMenuItem above.
+    await db.doc(`shops/${shopId}`).update({
+      ...updates,
+      updatedAt: Date.now(),
+    });
+    return { ok: true, shopId, updates };
   },
 );
 

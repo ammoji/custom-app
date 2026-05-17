@@ -457,6 +457,39 @@ export const orderService = {
     return ((result.data as MenuItem[]) ?? []);
   },
 
+  // PR 5 — shop owner self-service settings. Only updates the fields
+  // present in `input` (mirrors ShopMenuItemEdit's dirty-field
+  // pattern). Server validates ranges + auth via the
+  // shopSettingsHelpers helper; this client method is a thin
+  // dispatch layer. The shopId is implicit (read from the caller's
+  // claims server-side) so the client cannot target someone else's
+  // shop.
+  async updateShopSettings(input: {
+    deliveryFee?: number;
+    minOrder?: number;
+  }): Promise<{
+    ok: boolean;
+    shopId: string;
+    updates: { deliveryFee?: number; minOrder?: number };
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('updateShopSettings');
+      const result = await fn(input);
+      return result.data as {
+        ok: boolean;
+        shopId: string;
+        updates: { deliveryFee?: number; minOrder?: number };
+      };
+    }
+    const fn = httpsCallable(functions, 'updateShopSettings');
+    const result = await fn(input);
+    return result.data as {
+      ok: boolean;
+      shopId: string;
+      updates: { deliveryFee?: number; minOrder?: number };
+    };
+  },
+
   async updateMenuItem(input: {
     menuItemId: string;
     fields: Partial<{

@@ -14,6 +14,9 @@ import { Sentry } from '../services/sentry';
 import { useAuthStore } from '../store/useAuthStore';
 import { useCartStore } from '../store/useCartStore';
 import type { Address, PaymentMethod, SavedAddress, UserProfile } from '../types';
+// PR 5 — DO NOT REMOVE. Auto-formatter stripped this import once during
+// PR 5. Used in the Razorpay `prefill.email` field below.
+import { deriveCheckoutEmail } from '../utils/checkoutEmail';
 import { formatRupees } from '../utils/format';
 import { openRazorpayCheckout } from '../utils/razorpay';
 
@@ -333,7 +336,19 @@ export default function CheckoutScreen() {
         currency: 'INR',
         name: 'grocery-mvp',
         description: `Order ${result.orderId}`,
-        prefill: { name: address.name, contact: address.phone },
+        // PR 5 — prefill email too. Razorpay shows an email field by
+        // default (RBI compliance for receipt delivery); without
+        // prefill the customer hits an extra mandatory input at the
+        // worst moment of the flow. Real receipts go to
+        // profile.email when set; otherwise a sentinel placeholder
+        // on the `noemail.kiranamart.app` domain that satisfies
+        // Razorpay's input validation without creating a fake real
+        // email. See src/utils/checkoutEmail.ts for the rules.
+        prefill: {
+          name: address.name,
+          contact: address.phone,
+          email: deriveCheckoutEmail(profile, address.phone),
+        },
         theme: { color: colors.primary },
         handler: async response => {
           // PR 2 — payment hardening, Phase B (item 4). Razorpay's

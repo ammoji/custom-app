@@ -194,6 +194,18 @@ export default function ShopOwnerDashboardScreen() {
                 />
               </View>
             </View>
+            {/* PR 5 — shop settings (deliveryFee + minOrder). Placed
+                above Manage Menu per the prompt; same visual
+                treatment via the shared `manageMenuTile` style. */}
+            <Pressable
+              style={styles.manageMenuTile}
+              onPress={() => nav.navigate('ShopSettings')}
+              accessibilityRole="button"
+              accessibilityLabel="Shop settings"
+            >
+              <Text style={styles.manageMenuText}>⚙️  Shop Settings</Text>
+              <Text style={styles.manageMenuChevron}>›</Text>
+            </Pressable>
             <Pressable
               style={styles.manageMenuTile}
               onPress={() => nav.navigate('ShopMenu')}

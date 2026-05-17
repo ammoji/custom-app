@@ -2240,6 +2240,67 @@ also stripped the BODY of the helper's `for` loop on a save during
 the deliberate-break revert; restored with a "if tsc complains
 about unused 'item', restore the if-branch" comment inline.
 
+### PR 5 — Shop owner settings + checkout polish — ✅ SHIPPED May 17 2026
+
+Three small items from family-style testing closed together. Shop
+owners can now self-serve `deliveryFee` and `minOrder`, Razorpay
+Checkout no longer prompts for email, and the platform operator
+(admin role) can bypass the `minOrder` gate when testing the
+customer flow. All three are pure-JS OTA after one new callable
+deploy.
+
+- [x] **`updateShopSettings` callable + helper.** Closed: new
+      callable `functions/src/index.ts:3389-3450` is a thin wrapper
+      over the pure helper in
+      `functions/src/shopSettingsHelpers.ts:1-141`. Whitelisted
+      partial updates of `deliveryFee` (0..500, integer) and
+      `minOrder` (0..10000, integer); shopId pulled from caller's
+      claims (not the request body) so a malicious client cannot
+      target another owner's shop. 22 tests in
+      `tests/functions/shopSettingsHelpers.test.ts` covering
+      auth/role/shopId/range/type rules.
+- [x] **`ShopSettingsScreen` + dashboard tile + route.** Closed:
+      `src/screens/shop/ShopSettingsScreen.tsx:1-285` mirrors
+      `ShopMenuItemEdit`'s dirty-field pattern, wrapped in
+      `KeyboardAvoidingView` per the canonical `CancelAndRefundModal`
+      pattern (two sequential numeric inputs would otherwise hit the
+      keyboard-cover bug on shorter Android devices). Registered
+      in `AppNavigator.tsx:81-82,178`. New "⚙️ Shop Settings" tile
+      above "📋 Manage Menu" in
+      `ShopOwnerDashboardScreen.tsx:197-208`. Defensive `Loader` +
+      `EmptyState` for the (rare) case where `getShopForOwner()`
+      returns null.
+- [x] **Razorpay email prefill.** Closed: `src/utils/checkoutEmail.ts:1-33`
+      exports `deriveCheckoutEmail(profile, phone)` — uses
+      `profile.email` if it contains '@', else generates a
+      phone-derived sentinel on `noemail.kiranamart.app` (domain
+      doesn't accept mail; placeholder satisfies Razorpay's input
+      validation without faking a real address). Wired into
+      `src/screens/CheckoutScreen.tsx:344-348`. 8 tests in
+      `tests/utils/checkoutEmail.test.ts` covering profile/email/
+      phone edge cases (whitespace, `+91` prefix, null email,
+      missing @).
+- [x] **Admin bypass for `minOrder`.** Closed: pure helper
+      `functions/src/placeOrderGateHelpers.ts:1-40` —
+      `checkMinOrderGate({ auth, subtotal, minOrder })` returns
+      `{ok: true}` if `token.admin === true` (strict equality —
+      platform policy; truthy claims have bitten us) OR subtotal
+      meets the gate. Wired into `placeOrder`
+      `functions/src/index.ts:306-328`. Every OTHER validation
+      (availability, stock, price drift, multi-shop cart guard from
+      PR 4) still runs for admin callers. 7 tests in
+      `tests/functions/placeOrderGateHelpers.test.ts`.
+
+NOTE: auto-formatter stripped helper imports during PR 5 (same as
+PRs 1, 2, 4):
+- `validateShopSettings` and `checkMinOrderGate` stripped from
+  `functions/src/index.ts` (each once).
+- `deriveCheckoutEmail` stripped from `src/screens/CheckoutScreen.tsx`.
+"DO NOT REMOVE" comment blocks left above each. Also, a single
+`edit` call on `AppNavigator.tsx` was applied to the wrong
+location producing garbled JSX (line 178); fixed by re-running the
+edit with full surrounding context.
+
 ### Tag-along items (ride with whichever PR fits)
 
 - [ ] **Enable App Check on every callable.** Currently
