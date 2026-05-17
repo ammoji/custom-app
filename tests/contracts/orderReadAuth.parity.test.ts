@@ -188,6 +188,17 @@ describe('canReadOrder ↔ firestore.rules parity matrix', () => {
 //                            items. Rules now ALSO enforce
 //                            active-shop gate on direct reads
 //                            (firestore.rules /shops/*/menu).
+//   searchMenuPublic      → PR 4. No auth required. Server picks
+//                            active candidate shops (capped at 30
+//                            for Firestore `in` query limit), runs
+//                            collection-group query on `menu`,
+//                            filters by query/category/stock, joins
+//                            shop info, caps at 50. Same posture as
+//                            listShopMenuPublic — pure browse path.
+//                            Rules: collection-group rule
+//                            `match /{path=**}/menu/{menuItemId}`
+//                            gates direct web-SDK reads with the
+//                            same active-shop predicate.
 //   listAllUsers,
 //   listAllShops          → admin claim required. Inline.
 //   getMyDeliveryRequest  → any signed-in caller; returns the

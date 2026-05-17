@@ -523,6 +523,42 @@ export const orderService = {
     return result.data as { shop: Shop; items: MenuItem[] };
   },
 
+  // PR 4 — customer search rewrite. Replaces the legacy SearchScreen
+  // path (which read from /products and missed every shop registered
+  // post-v2-iii). Server queries the `menu` collection-group across
+  // active candidate shops, filters by query/category/stock, joins
+  // shop info, and caps at 50. No auth required (anon customer
+  // browsing). Same dual-dispatch posture as listShopMenuPublic.
+  async searchMenuPublic(input: {
+    query?: string;
+    category?: string;
+    location?: { lat: number; lng: number };
+  }): Promise<{
+    items: Array<{
+      menuItem: MenuItem;
+      shop: { id: string; name: string; address: string; distanceKm?: number };
+    }>;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('searchMenuPublic');
+      const result = await fn(input);
+      return result.data as {
+        items: Array<{
+          menuItem: MenuItem;
+          shop: { id: string; name: string; address: string; distanceKm?: number };
+        }>;
+      };
+    }
+    const fn = httpsCallable(functions, 'searchMenuPublic');
+    const result = await fn(input);
+    return result.data as {
+      items: Array<{
+        menuItem: MenuItem;
+        shop: { id: string; name: string; address: string; distanceKm?: number };
+      }>;
+    };
+  },
+
   // PR 1 — security hardening. Replaces the self-service becomeDelivery
   // with an admin-approval flow mirroring shop registration. The five
   // callables: requestDeliveryRole (user submits form),

@@ -16,6 +16,7 @@ import Razorpay from 'razorpay';
 // save; keeping the imports adjacent to the file's actual usage and
 // commented makes the strip-and-resave failure mode louder.
 import { validateCancelPaidOrder } from './cancelPaidOrderHelpers';
+import { validateAllItemsInSameShop } from './cartIntegrityHelpers';
 import { reconcileAbandonedOrder } from './cleanupReconciliationHelpers';
 import { verifyRazorpaySignature } from './confirmPaymentHelpers';
 import {
@@ -33,6 +34,17 @@ import {
     type AddressInput,
 } from './profileHelpers';
 import { checkRetryPaymentGuard } from './retryPaymentHelpers';
+// PR 4 — searchMenuPublic helpers. DO NOT REMOVE: auto-formatter has
+// stripped this once already during PR 4. The names are used in
+// the searchMenuPublic callable below; if tsc complains about
+// CandidateShop / RawMenuItem / pickCandidateShopIds /
+// filterAndJoinSearchResults, re-add this block.
+import {
+    filterAndJoinSearchResults,
+    pickCandidateShopIds,
+    type CandidateShop,
+    type RawMenuItem,
+} from './searchMenuPublicHelpers';
 import { validateShopOrdersAccess } from './shopOrdersHelpers';
 import {
     detectAmountMismatch,
@@ -210,12 +222,20 @@ export const placeOrder = onCall<PlaceOrderInput>(
               `${menu.name} price changed. Please refresh and try again.`,
             );
           }
+          // PR 4 — cart integrity. Read shopId off the menu doc itself
+          // (rather than just trusting the path interpolation) so the
+          // collective same-shop check downstream has a concrete field
+          // to validate against. menu.shopId is set by addMenuItem*
+          // and addCustomMenuItem; defensive `?? shopId` covers any
+          // legacy doc that might be missing it.
+          const menuWithShopId = menu as typeof menu & { shopId?: string };
           return {
             // For CUSTOM items menu.productId is null — we use the
             // menuItemId as the order-line productId so the existing
             // Order schema (which requires productId) stays sound.
             productId: menu.productId ?? menu.id,
             menuItemId: menu.id,
+            shopId: menuWithShopId.shopId ?? shopId,
             name: menu.name,
             imageUrl: menu.imageUrl,
             packLabel: menu.packLabel,
@@ -251,6 +271,7 @@ export const placeOrder = onCall<PlaceOrderInput>(
         }
         return {
           productId: product.id,
+          shopId: product.shopId,
           name: product.name,
           imageUrl: product.imageUrl,
           packLabel: `${product.packSize.value} ${product.packSize.unit}`,
@@ -259,6 +280,24 @@ export const placeOrder = onCall<PlaceOrderInput>(
         };
       }),
     );
+
+    // PR 4 — cart integrity (Phase B). Defense-in-depth collective
+    // check that every resolved line belongs to the order's shop.
+    // The per-line lookup above already enforces this implicitly
+    // (Path 1 reads from `shops/${shopId}/menu/...`; Path 2 has its
+    // own `product.shopId !== shopId` guard), but a refactor of either
+    // path could drop the implicit check. The explicit helper makes
+    // the invariant local and greppable for security review.
+    const integrity = validateAllItemsInSameShop(
+      serverItems as Array<{ menuItemId?: string; productId?: string; shopId: string }>,
+      shopId,
+    );
+    if (!integrity.ok) {
+      throw new HttpsError(
+        'failed-precondition',
+        `Cart item ${integrity.offendingMenuItemId} belongs to a different shop. Clear cart and try again.`,
+      );
+    }
 
     const subtotal = serverItems.reduce((sum, i) => sum + i.price * i.quantity, 0);
     if (subtotal < shop.minOrder) {
@@ -3575,6 +3614,84 @@ export const listShopsPublic = onCall<{ userLocation?: LatLng }>(
 );
 
 // ────────────────────────────────────────────────────────────────────
+// PR 4 — Customer search rewrite.
+//
+// The legacy SearchScreen read from the global /products collection,
+// which exists but is no longer the source of truth for any shop
+// registered post-v2-iii (those have only a per-shop /menu
+// subcollection — see listShopMenuPublic). The result: search and
+// category browse found nothing for newly-registered shops, even
+// though their menus had matching items. This callable fixes that
+// by querying menus directly via collection-group + filtering by
+// active candidate shops.
+//
+// Public (no auth) to mirror listShopMenuPublic / listShopsPublic.
+// Filter logic is in searchMenuPublicHelpers.ts so the substring /
+// category / stock rules can be unit-tested without firebase-admin.
+//
+// Returns up to 50 items, each joined with shop info (name, address,
+// distance). Client decides display order; we don't add an orderBy
+// clause to avoid forcing a per-filter-combination composite index.
+// ────────────────────────────────────────────────────────────────────
+export const searchMenuPublic = onCall<{
+  query?: string;
+  category?: string;
+  location?: LatLng;
+}>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const { query, category, location } = request.data ?? {};
+
+    // 1. Candidate shop set. Same status filter as listShopsPublic;
+    //    distance ranking ensures the closest 30 win when location
+    //    is provided. The 30-cap maps directly to Firestore's `in`
+    //    query limit on the menu collection-group query below.
+    const shopSnap = await db
+      .collection('shops')
+      .where('status', '==', 'active')
+      .get();
+    const allCandidateShops = rankShopsByDistance(
+      shopSnap.docs.map(
+        d => ({ id: d.id, ...d.data() }) as Record<string, any>,
+      ),
+      location,
+    ) as CandidateShop[];
+
+    const candidateIds = pickCandidateShopIds(allCandidateShops, 30);
+    if (candidateIds.length === 0) {
+      return { items: [] };
+    }
+
+    // 2. Collection-group query. `in` with `==` requires a composite
+    //    index — see firestore.indexes.json (collectionGroup: menu,
+    //    fields: shopId + available). Query auto-fails with
+    //    FAILED_PRECONDITION if the index isn't deployed.
+    const menuSnap = await db
+      .collectionGroup('menu')
+      .where('shopId', 'in', candidateIds)
+      .where('available', '==', true)
+      .get();
+
+    const rawItems = menuSnap.docs.map(
+      d => ({ id: d.id, ...d.data() }) as RawMenuItem,
+    );
+
+    // 3. Pure filter + join. Keeps the substring/category/stock/cap
+    //    rules testable without firebase-admin.
+    const result = filterAndJoinSearchResults({
+      rawItems,
+      candidateShops: allCandidateShops.filter(s =>
+        candidateIds.includes(s.id),
+      ),
+      query,
+      category,
+    });
+
+    return result;
+  },
+);
+
+// ────────────────────────────────────────────────────────────────────
 // Phase 12a-v2-iv: Profile + saved address book.
 //
 // Five callables (all auth-required, no anon access) that own the
@@ -3919,4 +4036,5 @@ export const setDefaultAddress = onCall<{ id: string }>(
     };
   },
 );
+
 

@@ -2180,6 +2180,66 @@ the new imports (`authService`, `handleRoleAuthError`,
       tested rather than the hook surface — see test file header
       for rationale). `useOnlineDeliveryCount.ts:1-129`.
 
+### PR 4 — Customer search rewrite + cart integrity — ✅ SHIPPED May 17 2026
+
+Two related gaps from family-style testing closed in one PR. Search
+and category browse now query per-shop menus directly via a new
+`searchMenuPublic` callable; `placeOrder` gained a defense-in-depth
+collective same-shop guard. Pure helpers + 19 new tests; pre-
+existing baseline tsc errors dropped from 4 to 3 as the SearchScreen
+rewrite removes the broken `shopService.getNearbyShops()` call.
+Deliberate-break demo on `validateAllItemsInSameShop` (early-return
+ok:true bypassing the loop) flipped 4 tests red (single-mismatch,
+all-mismatch, legacy-fallback, sentinel) before revert.
+
+- [x] **Search and category tabs find nothing in newly-registered
+      shops.** Closed: rewrote `SearchScreen.tsx:1-415` to call
+      `orderService.searchMenuPublic` (debounced 250ms, location-
+      aware, FlatList of menu+shop result rows). New callable in
+      `functions/src/index.ts:3604-3680` does collection-group query
+      on `menu` filtered by candidate active shops, then runs the
+      pure `filterAndJoinSearchResults` helper for query/category/
+      stock/cap. Removed the legacy `productService.getByShop` +
+      `shopService.getNearbyShops()` calls — the no-arg getNearbyShops
+      bug was a baseline tsc error; PR 4 drops it. 12 helper tests
+      in `tests/functions/searchMenuPublic.test.ts`. Tapping a
+      result navigates to ShopDetail (item-level deep-link deferred
+      to V2 per spec). Category chips on HomeScreen were already
+      passing `{ category }` to Search; no client change needed
+      there.
+- [x] **Multi-shop cart guard missing on server.** Closed: pure
+      helper `validateAllItemsInSameShop` in
+      `functions/src/cartIntegrityHelpers.ts:47-68` returns
+      `{ok: false, offendingMenuItemId}` on the first cross-shop
+      line. Wired into `placeOrder` after the per-line lookup —
+      `functions/src/index.ts:272-288` throws
+      `failed-precondition` with a customer-actionable message.
+      Both resolved-item paths (Path 1 menu, Path 2 legacy product)
+      now attach `shopId` explicitly so the helper has a concrete
+      field to validate. 6 helper tests in
+      `tests/functions/cartIntegrityHelpers.test.ts`.
+- [x] **Firestore rules + indexes for collection-group menu reads.**
+      Closed: `firestore.rules:111-132` adds
+      `match /{path=**}/menu/{menuItemId}` mirroring the per-shop
+      active-shop predicate (defense in depth — native goes through
+      the callable, but admin-console + future web SDK
+      collection-group reads need the rule). `firestore.indexes.json:69-76`
+      adds the `(shopId ASC, available ASC)` collection-group
+      composite. `npm run audit:indexes` passes (8 composites
+      tracked).
+- [x] **Parity test extended.** `tests/contracts/orderReadAuth.parity.test.ts`
+      header documents `searchMenuPublic` alongside
+      `listShopMenuPublic` in the no-auth-callable section.
+
+NOTE: auto-formatter stripped the new helper imports
+(`validateAllItemsInSameShop`, `filterAndJoinSearchResults`,
+`pickCandidateShopIds`, `CandidateShop`, `RawMenuItem`) on save in
+`functions/src/index.ts` THREE times during PR 4. Explicit
+"DO NOT REMOVE" comment block left above the imports. Auto-formatter
+also stripped the BODY of the helper's `for` loop on a save during
+the deliberate-break revert; restored with a "if tsc complains
+about unused 'item', restore the if-branch" comment inline.
+
 ### Tag-along items (ride with whichever PR fits)
 
 - [ ] **Enable App Check on every callable.** Currently

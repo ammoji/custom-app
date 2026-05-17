@@ -108,6 +108,29 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // PR 4 — collection-group rule for `menu` reads. The per-shop
+    // `match /shops/{shopId}/menu/{menuItemId}` rule above only
+    // matches reads scoped to a specific shopId path; a
+    // collection-group query (`db.collectionGroup('menu')`) is a
+    // different ruleset target and needs its own match block.
+    //
+    // Native customers route through the `searchMenuPublic` callable
+    // for these reads (Admin SDK bypasses rules), so this rule
+    // mostly governs the web SDK + admin console + future
+    // snapshot-listener migration. Same active-shop predicate as the
+    // per-shop rule — defense in depth, no policy drift.
+    //
+    // Performance note: `get()` in rules costs 1 read per evaluated
+    // doc, same as the per-shop rule. Search returns ≤50 items so
+    // worst case ~50 extra reads; acceptable for MVP.
+    match /{path=**}/menu/{menuItemId} {
+      allow read: if isAdmin()
+        || (resource.data.shopId is string
+            && get(/databases/$(database)/documents/shops/$(resource.data.shopId))
+                 .data.status == 'active');
+      allow create, update, delete: if false;
+    }
+
     match /orders/{orderId} {
       // Three readers:
       //   1. The customer who placed the order

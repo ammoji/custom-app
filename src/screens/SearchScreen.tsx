@@ -2,6 +2,7 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   FlatList,
+  Image,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -12,16 +13,43 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import EmptyState from '../components/common/EmptyState';
 import Loader from '../components/common/Loader';
-import ProductCard from '../components/product/ProductCard';
 import { CATEGORIES } from '../constants/categories';
 import { colors, radii, spacing, typography } from '../constants/theme';
-import { productService } from '../services/productService';
-import { shopService } from '../services/shopService';
+import { orderService } from '../services/orderService';
 import { useCartStore } from '../store/useCartStore';
-import type { Product, Shop } from '../types';
+import { useLocationStore } from '../store/useLocationStore';
+import type { MenuItem } from '../types';
 import { formatRupees } from '../utils/format';
 
-type ShopGroup = { shop: Shop; products: Product[] };
+/**
+ * SearchScreen — PR 4 rewrite.
+ *
+ * Pre-PR-4: read every shop's products from /products (legacy
+ * collection) and filtered client-side. Result: shops registered
+ * after Phase 12a-v2-iii had their per-shop /menu items completely
+ * invisible to search.
+ *
+ * Post-PR-4: single callable `searchMenuPublic` does the work
+ * server-side — collection-group query on `menu`, filter by
+ * candidate active shops + query/category/stock, join shop info,
+ * cap at 50. The screen is now a thin layer over that callable.
+ *
+ * Behaviour:
+ *   - On mount + on query/category change, debounce 250ms then
+ *     re-fetch.
+ *   - Empty query AND `all` category: show the hint, skip the
+ *     fetch (avoid surfacing a 50-item omnibus on first paint).
+ *   - Tapping a result navigates to ShopDetail. Inline add-to-cart
+ *     is deferred (V2) — see prompt rationale.
+ *   - Cart pill at the bottom links to checkout when items exist.
+ */
+type Result = {
+  menuItem: MenuItem;
+  shop: { id: string; name: string; address: string; distanceKm?: number };
+};
+
+const DEBOUNCE_MS = 250;
+const MIN_QUERY_LEN = 2;
 
 export default function SearchScreen() {
   const nav = useNavigation<any>();
@@ -30,62 +58,112 @@ export default function SearchScreen() {
 
   const [query, setQuery] = useState<string>(route.params?.query ?? '');
   const [selectedCategory, setSelectedCategory] = useState<string>(
-    route.params?.category ?? 'all'
+    route.params?.category ?? 'all',
   );
-  const [allData, setAllData] = useState<ShopGroup[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [results, setResults] = useState<Result[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const cart = useCartStore();
   const itemCount = useCartStore(s => s.itemCount());
   const total = useCartStore(s => s.total());
+  const location = useLocationStore(s => s.location);
 
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
 
+  const trimmedQuery = query.trim();
+  const hasFilter =
+    trimmedQuery.length >= MIN_QUERY_LEN || selectedCategory !== 'all';
+
+  // Debounced search. Cancels in-flight fetch if user keeps typing
+  // — the `cancelled` flag prevents stale results from clobbering
+  // newer ones (same race-guard pattern as PR 3 watcher rollback).
   useEffect(() => {
-    (async () => {
+    if (!hasFilter) {
+      setResults([]);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    const timer = setTimeout(async () => {
       try {
-        const shops = await shopService.getNearbyShops();
-        const groups = await Promise.all(
-          shops.map(async (shop: Shop) => ({
-            shop,
-            products: await productService.getByShop(shop.id),
-          }))
+        const r = await orderService.searchMenuPublic({
+          query: trimmedQuery.length >= MIN_QUERY_LEN ? trimmedQuery : undefined,
+          category: selectedCategory !== 'all' ? selectedCategory : undefined,
+          location: location
+            ? { lat: location.lat, lng: location.lng }
+            : undefined,
+        });
+        if (cancelled) return;
+        setResults(r.items as Result[]);
+      } catch (e: any) {
+        if (cancelled) return;
+        // Map the raw callable error to something a customer can act
+        // on. The most common cause in the wild: missing index (we
+        // ship one, but a forgotten deploy after schema change would
+        // surface FAILED_PRECONDITION here).
+        console.warn('[Search] searchMenuPublic failed:', e);
+        setError(
+          'Could not load search results. Please check your connection and try again.',
         );
-        setAllData(groups);
+        setResults([]);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
-    })();
-  }, []);
+    }, DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [trimmedQuery, selectedCategory, hasFilter, location]);
 
-  const results = useMemo(() => {
-    const trimmed = query.trim();
-    if (trimmed.length < 2 && selectedCategory === 'all') return [];
-    return allData
-      .map(({ shop, products }) => ({
-        shop,
-        products: products.filter(p => {
-          const matchesQuery =
-            trimmed.length < 2 ||
-            p.name.toLowerCase().includes(trimmed.toLowerCase()) ||
-            (p.brand ?? '').toLowerCase().includes(trimmed.toLowerCase());
-          const matchesCat =
-            selectedCategory === 'all' || p.category === selectedCategory;
-          return matchesQuery && matchesCat;
-        }),
-      }))
-      .filter(g => g.products.length > 0);
-  }, [query, selectedCategory, allData]);
+  const isEmptyQuery = !hasFilter;
+  const hasNoResults =
+    !loading && !error && hasFilter && results.length === 0;
 
-  const qtyInCart = (productId: string, shopId: string) =>
-    cart.shopId === shopId
-      ? (cart.items.find(i => i.productId === productId)?.quantity ?? 0)
-      : 0;
-
-  const isEmptyQuery = !loading && query.trim().length < 2 && selectedCategory === 'all';
-  const hasNoResults = !loading && !isEmptyQuery && results.length === 0;
+  const renderRow = useMemo(
+    () =>
+      ({ item }: { item: Result }) => (
+        <Pressable
+          style={styles.row}
+          onPress={() =>
+            nav.navigate('ShopDetail', { shopId: item.shop.id })
+          }
+          accessibilityRole="button"
+          accessibilityLabel={`${item.menuItem.name} from ${item.shop.name}, ${formatRupees(item.menuItem.price)}`}
+        >
+          <Image
+            source={{ uri: item.menuItem.imageUrl }}
+            style={styles.thumb}
+          />
+          <View style={styles.rowBody}>
+            <Text style={styles.itemName} numberOfLines={1}>
+              {item.menuItem.name}
+            </Text>
+            <Text style={styles.shopLine} numberOfLines={1}>
+              {item.shop.name}
+              {typeof item.shop.distanceKm === 'number'
+                ? ` · ${item.shop.distanceKm.toFixed(1)} km`
+                : ''}
+            </Text>
+            <Text style={styles.packLine} numberOfLines={1}>
+              {item.menuItem.packLabel}
+            </Text>
+          </View>
+          <View style={styles.rowRight}>
+            <Text style={styles.price}>
+              {formatRupees(item.menuItem.price)}
+            </Text>
+            <Text style={styles.openShop}>Open shop ›</Text>
+          </View>
+        </Pressable>
+      ),
+    [nav],
+  );
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -134,7 +212,10 @@ export default function SearchScreen() {
         {[{ id: 'all', label: 'All' }, ...CATEGORIES].map(item => (
           <Pressable
             key={item.id}
-            style={[styles.chip, selectedCategory === item.id && styles.chipActive]}
+            style={[
+              styles.chip,
+              selectedCategory === item.id && styles.chipActive,
+            ]}
             onPress={() => setSelectedCategory(item.id)}
             accessibilityRole="button"
             accessibilityLabel={`Filter by ${item.label}`}
@@ -142,7 +223,10 @@ export default function SearchScreen() {
           >
             <Text
               numberOfLines={1}
-              style={[styles.chipText, selectedCategory === item.id && styles.chipTextActive]}
+              style={[
+                styles.chipText,
+                selectedCategory === item.id && styles.chipTextActive,
+              ]}
             >
               {item.label}
             </Text>
@@ -151,6 +235,24 @@ export default function SearchScreen() {
       </ScrollView>
 
       {/* Body */}
+      {error ? (
+        <View style={styles.errorBanner}>
+          <Text style={styles.errorText}>{error}</Text>
+          <Pressable
+            // Re-trigger the effect by toggling state through a
+            // no-op trim. Cheaper than a separate retry nonce; the
+            // dependency-tracking setQuery same-value short-circuit
+            // means we have to mutate something — we re-set the
+            // category to its current value, which is harmless.
+            onPress={() => setSelectedCategory(c => c)}
+            accessibilityRole="button"
+            accessibilityLabel="Retry search"
+          >
+            <Text style={styles.retryText}>Retry</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
       {loading ? (
         <Loader fullScreen />
       ) : isEmptyQuery ? (
@@ -159,59 +261,26 @@ export default function SearchScreen() {
         </View>
       ) : hasNoResults ? (
         <EmptyState
-          title={`No matches for ‘${query.trim()}’ near you`}
-          subtitle="Try a different name or clear the category filter."
+          title={
+            trimmedQuery.length >= MIN_QUERY_LEN
+              ? `No matches for ‘${trimmedQuery}’`
+              : 'No items in this category nearby'
+          }
+          subtitle={
+            selectedCategory !== 'all'
+              ? `Try a different category or clear the filter.`
+              : 'Try a different name.'
+          }
         />
       ) : (
-        <ScrollView
-          contentContainerStyle={styles.scrollContent}
+        <FlatList
+          data={results}
+          keyExtractor={r => `${r.shop.id}_${r.menuItem.id}`}
+          renderItem={renderRow}
+          ItemSeparatorComponent={() => <View style={styles.separator} />}
+          contentContainerStyle={styles.listContent}
           keyboardShouldPersistTaps="handled"
-        >
-          {results.map(({ shop, products }) => (
-            <View key={shop.id} style={styles.group}>
-              {/* Group header */}
-              <View style={styles.groupHeader}>
-                <View>
-                  <Text style={styles.shopName}>{shop.name}</Text>
-                  <Text style={styles.shopMeta}>
-                    {shop.distanceKm != null
-                      ? `${shop.distanceKm.toFixed(1)} km`
-                      : shop.address}
-                  </Text>
-                </View>
-                <Pressable
-                  onPress={() => nav.navigate('ShopDetail', { shopId: shop.id })}
-                  accessibilityRole="button"
-                  accessibilityLabel={`See all products from ${shop.name}`}
-                >
-                  <Text style={styles.seeAll}>See all ›</Text>
-                </Pressable>
-              </View>
-
-              {/* Horizontal product scroll */}
-              <FlatList
-                data={products}
-                keyExtractor={p => p.id}
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.productRow}
-                ItemSeparatorComponent={() => <View style={{ width: spacing.md }} />}
-                renderItem={({ item }) => (
-                  <View style={styles.productCardWrap}>
-                    <ProductCard
-                      product={item}
-                      quantityInCart={qtyInCart(item.id, shop.id)}
-                      onAdd={() => cart.addItem(item, shop)}
-                      onIncrement={() => cart.increment(item.id)}
-                      onDecrement={() => cart.decrement(item.id)}
-                      disabled={!shop.isOpen}
-                    />
-                  </View>
-                )}
-              />
-            </View>
-          ))}
-        </ScrollView>
+        />
       )}
 
       {/* Sticky cart bar */}
@@ -278,24 +347,71 @@ const styles = StyleSheet.create({
   chipText: { ...typography.caption, color: colors.textSecondary },
   chipTextActive: { color: '#fff', fontWeight: '600' },
 
-  hint: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing.xl },
+  hint: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: spacing.xl,
+  },
   hintText: { ...typography.body, color: colors.textMuted },
 
-  scrollContent: { paddingBottom: 120 },
-  group: { marginTop: spacing.xl },
-  groupHeader: {
+  errorBanner: {
+    margin: spacing.lg,
+    padding: spacing.md,
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.danger,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: spacing.lg,
-    marginBottom: spacing.sm,
+    gap: spacing.md,
   },
-  shopName: { ...typography.h3, color: colors.textPrimary },
-  shopMeta: { ...typography.caption, color: colors.textSecondary, marginTop: 2 },
-  seeAll: { ...typography.bodyBold, color: colors.primary },
+  errorText: {
+    ...typography.body,
+    color: colors.textPrimary,
+    flex: 1,
+  },
+  retryText: { ...typography.bodyBold, color: colors.primary },
 
-  productRow: { paddingHorizontal: spacing.lg },
-  productCardWrap: { width: 200 },
+  listContent: { paddingBottom: 120 },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    gap: spacing.md,
+  },
+  thumb: {
+    width: 56,
+    height: 56,
+    borderRadius: radii.sm,
+    backgroundColor: colors.surface,
+  },
+  rowBody: { flex: 1 },
+  itemName: { ...typography.bodyBold, color: colors.textPrimary },
+  shopLine: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  packLine: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  rowRight: { alignItems: 'flex-end' },
+  price: { ...typography.bodyBold, color: colors.textPrimary },
+  openShop: {
+    ...typography.caption,
+    color: colors.primary,
+    marginTop: 2,
+  },
+  separator: {
+    height: 1,
+    backgroundColor: colors.border,
+    marginLeft: spacing.lg + 56 + spacing.md,
+  },
 
   cartBar: {
     position: 'absolute',
