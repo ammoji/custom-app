@@ -1,14 +1,17 @@
 import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  Alert,
-  Modal,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
+    Alert,
+    Keyboard,
+    KeyboardAvoidingView,
+    Modal,
+    Platform,
+    Pressable,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../../components/common/Button';
@@ -282,13 +285,23 @@ export default function UserDetailScreen() {
           if (pending === null) setConfirmKind(null);
         }}
       >
-        <Pressable
-          style={styles.modalBackdrop}
-          onPress={() => {
-            if (pending === null) setConfirmKind(null);
-          }}
+        {/*
+          Keyboard handling pattern — mirrors CancelAndRefundModal.
+          Backdrop tap dismisses the keyboard ONLY (does NOT close
+          the modal) so a half-typed reason isn't wiped by an
+          accidental tap. Modal closes only via the explicit Cancel
+          button.
+        */}
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.kavRoot}
         >
-          <Pressable style={styles.modalCard} onPress={() => {}}>
+          <Pressable
+            style={styles.backdropTapZone}
+            onPress={() => Keyboard.dismiss()}
+            accessibilityLabel="Dismiss keyboard"
+          />
+          <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>
               {confirmKind === 'shopOwner' && 'Revoke shop owner role?'}
               {confirmKind === 'delivery' && 'Revoke delivery role?'}
@@ -330,8 +343,8 @@ export default function UserDetailScreen() {
               onPress={() => setConfirmKind(null)}
               disabled={pending !== null}
             />
-          </Pressable>
-        </Pressable>
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
     </SafeAreaView>
   );
@@ -429,11 +442,13 @@ const styles = StyleSheet.create({
   roleText: { ...typography.caption, fontWeight: '700' },
   roleTextOn: { color: colors.primaryDark },
   roleTextOff: { color: colors.textSecondary },
-  modalBackdrop: {
+  // Keyboard handling pattern — see CancelAndRefundModal.
+  kavRoot: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
     justifyContent: 'flex-end',
   },
+  backdropTapZone: { flex: 1 },
   modalCard: {
     backgroundColor: colors.bg,
     borderTopLeftRadius: radii.lg,

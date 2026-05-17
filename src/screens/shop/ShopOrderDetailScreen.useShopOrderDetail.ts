@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { orderService } from '../../services/orderService';
 import type { Order } from '../../types';
+// PR 3 — concurrency cleanup (item 3a). Race-guard rollbacks so a
+// watcher tick mid-flight isn't clobbered by stale captured state.
+// NOTE: auto-formatter has stripped this import; if tsc complains
+// about Cannot find name 'shouldRollbackOptimistic' after a save,
+// re-add it.
+import { shouldRollbackOptimistic } from '../../utils/optimisticRollback';
 import type { OrderStatus } from '../../utils/orderStateMachine';
 
 /**
@@ -167,10 +173,29 @@ export function useShopOrderDetail(
       setPendingStatus(newStatus);
       const result = await runOrderActionOnce(update, orderId, newStatus);
       if (!result.ok && previousStatus) {
-        setState(prev => ({
-          ...prev,
-          order: applyOptimisticStatus(prev.order, previousStatus),
-        }));
+        // PR 3 — concurrency cleanup. Only roll back to
+        // previousStatus if the current order's status is STILL the
+        // optimistic value we wrote. If a watcher tick arrived in
+        // the gap and installed something different, that's the
+        // server's view and clobbering it would undo a successful
+        // concurrent transition (worst case: another role just
+        // delivered the order, our rollback flips it back to
+        // 'preparing'). Trust the watcher.
+        setState(prev => {
+          if (
+            !shouldRollbackOptimistic(prev.order?.status, newStatus)
+          ) {
+            console.warn(
+              '[useShopOrderDetail] rollback suppressed — watcher already updated to',
+              prev.order?.status,
+            );
+            return prev;
+          }
+          return {
+            ...prev,
+            order: applyOptimisticStatus(prev.order, previousStatus),
+          };
+        });
       }
       setPendingStatus(null);
       return result;

@@ -1,14 +1,17 @@
 import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  Alert,
-  Modal,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
+    Alert,
+    Keyboard,
+    KeyboardAvoidingView,
+    Modal,
+    Platform,
+    Pressable,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../../components/common/Button';
@@ -269,13 +272,23 @@ export default function ShopDetailManagementScreen() {
           if (pending === null) setShowSuspendModal(false);
         }}
       >
-        <Pressable
-          style={styles.modalBackdrop}
-          onPress={() => {
-            if (pending === null) setShowSuspendModal(false);
-          }}
+        {/*
+          Keyboard handling pattern — mirrors CancelAndRefundModal.
+          Backdrop tap dismisses the keyboard ONLY (does NOT close
+          the modal) so a half-typed suspend reason isn't wiped by
+          an accidental tap. Modal closes only via the explicit
+          Cancel button.
+        */}
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.kavRoot}
         >
-          <Pressable style={styles.modalCard} onPress={() => {}}>
+          <Pressable
+            style={styles.backdropTapZone}
+            onPress={() => Keyboard.dismiss()}
+            accessibilityLabel="Dismiss keyboard"
+          />
+          <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Suspend shop</Text>
             <Text style={styles.modalSubtitle}>
               The owner will be notified with this reason. Existing
@@ -305,8 +318,8 @@ export default function ShopDetailManagementScreen() {
               onPress={() => setShowSuspendModal(false)}
               disabled={pending !== null}
             />
-          </Pressable>
-        </Pressable>
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
     </SafeAreaView>
   );
@@ -384,11 +397,13 @@ const styles = StyleSheet.create({
   },
   detailValue: { ...typography.body, flex: 1, textAlign: 'right' },
   actions: { marginTop: spacing.md },
-  modalBackdrop: {
+  // Keyboard handling pattern — see CancelAndRefundModal.
+  kavRoot: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
     justifyContent: 'flex-end',
   },
+  backdropTapZone: { flex: 1 },
   modalCard: {
     backgroundColor: colors.bg,
     borderTopLeftRadius: radii.lg,

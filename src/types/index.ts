@@ -231,7 +231,26 @@ export type UserProfile = {
 };
 
 export type PaymentMethod = 'cod' | 'online';
-export type PaymentStatus = 'pending' | 'paid' | 'failed' | 'expired' | 'not_required';
+// PR 2 — payment hardening. Expanded union:
+//   - 'authorized' — Razorpay reports a payment.authorized event but
+//     no payment.captured (rare; happens if auto-capture is off in
+//     dashboard config). Shop should NOT dispatch; admin reviews.
+//   - 'amount_mismatch' — webhook saw a captured payment with a
+//     mismatched amount vs order.total. Order intentionally NOT
+//     marked paid; admin reconciles via the Razorpay dashboard.
+//   - 'refund_pending' / 'refunded' / 'refund_failed' — drive the
+//     Cancel & Refund flow in AdminOrdersScreen.
+export type PaymentStatus =
+  | 'pending'
+  | 'paid'
+  | 'failed'
+  | 'expired'
+  | 'not_required'
+  | 'authorized'
+  | 'amount_mismatch'
+  | 'refunded'
+  | 'refund_pending'
+  | 'refund_failed';
 
 export type Order = {
   id: string;
@@ -248,6 +267,21 @@ export type Order = {
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
   paidAt?: number;
+  // PR 2 — payment hardening. Set by the webhook when a captured
+  // payment's amount disagrees with order.total (in rupees). Admin
+  // uses both fields to reconcile manually.
+  amountReceived?: number;
+  amountExpected?: number;
+  // PR 2 — payment hardening. Set by the payment.authorized handler
+  // when Razorpay authorizes but doesn't auto-capture. paidAt is
+  // NOT set on this branch.
+  authorizedAt?: number;
+  // PR 2 — payment hardening. Refund flow. refundId points at
+  // refunds/{refundId} once cancelPaidOrder fires Razorpay's API.
+  refundId?: string;
+  refundedAt?: number;
+  // Free-form admin reason captured at the time of paid-cancel.
+  cancellationReason?: string;
   status: 'pending' | 'accepted' | 'preparing' | 'out_for_delivery' | 'delivered' | 'cancelled';
   createdAt: number;
   estimatedDeliveryAt: number;

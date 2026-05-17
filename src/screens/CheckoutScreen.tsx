@@ -335,11 +335,39 @@ export default function CheckoutScreen() {
         description: `Order ${result.orderId}`,
         prefill: { name: address.name, contact: address.phone },
         theme: { color: colors.primary },
-        handler: async () => {
-          // Payment success — the razorpayWebhook Function flips
-          // paymentStatus to 'paid' asynchronously; OrderConfirmation
-          // picks it up via watchOrder (web SDK snapshot or native poll).
-          Analytics.payment_success({ order_id: result.orderId, value: result.total });
+        handler: async response => {
+          // PR 2 — payment hardening, Phase B (item 4). Razorpay's
+          // success callback gives us order id + payment id +
+          // signature. Verify them server-side via confirmPayment so
+          // the order shows paid SYNCHRONOUSLY rather than waiting
+          // up to ~30s for the asynchronous webhook. The webhook is
+          // still the source of truth — confirmPayment is idempotent
+          // and the webhook's "already paid" branch no-ops on the
+          // late arrival. If confirmPayment fails (network blip,
+          // signature edge case) we navigate anyway and let the
+          // webhook backstop us; OrderConfirmation polls the order
+          // status so the customer sees the paid flip when it
+          // arrives.
+          Analytics.payment_success({
+            order_id: result.orderId,
+            value: result.total,
+          });
+          try {
+            await orderService.confirmPayment({
+              orderId: result.orderId,
+              razorpayPaymentId: response.razorpay_payment_id,
+              razorpaySignature: response.razorpay_signature,
+            });
+          } catch (e: any) {
+            console.warn(
+              '[CheckoutScreen] confirmPayment failed; relying on webhook:',
+              e?.message ?? e,
+            );
+            Sentry.captureMessage(
+              `confirmPayment failed for order ${result.orderId}: ${e?.message ?? 'unknown'}`,
+              'warning',
+            );
+          }
           await maybeSaveAddressAfterOrder(address);
           clearCart();
           nav.replace('OrderConfirmation', { orderId: result.orderId });

@@ -2,7 +2,10 @@ import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import React, { useEffect, useState } from 'react';
 import {
     Alert,
+    Keyboard,
+    KeyboardAvoidingView,
     Modal,
+    Platform,
     Pressable,
     ScrollView,
     StyleSheet,
@@ -233,15 +236,27 @@ export default function DeliveryRequestDetailScreen() {
         visible={showRejectModal}
         animationType="slide"
         transparent
-        onRequestClose={() => setShowRejectModal(false)}
+        onRequestClose={() => {
+          if (actionPending !== 'reject') setShowRejectModal(false);
+        }}
       >
-        <Pressable
-          style={styles.modalBackdrop}
-          onPress={() => {
-            if (actionPending !== 'reject') setShowRejectModal(false);
-          }}
+        {/*
+          Keyboard handling pattern — mirrors CancelAndRefundModal.
+          Backdrop tap dismisses the keyboard ONLY (does NOT close
+          the modal) so a half-typed reject reason isn't wiped by an
+          accidental tap. Modal closes only via the explicit Cancel
+          button.
+        */}
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.kavRoot}
         >
-          <Pressable style={styles.modalCard} onPress={() => {}}>
+          <Pressable
+            style={styles.backdropTapZone}
+            onPress={() => Keyboard.dismiss()}
+            accessibilityLabel="Dismiss keyboard"
+          />
+          <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Reject application</Text>
             <Text style={styles.modalSubtitle}>
               Applicant will see this reason and can edit + resubmit.
@@ -272,8 +287,8 @@ export default function DeliveryRequestDetailScreen() {
               onPress={() => setShowRejectModal(false)}
               disabled={actionPending !== null}
             />
-          </Pressable>
-        </Pressable>
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
     </SafeAreaView>
   );
@@ -337,11 +352,13 @@ const styles = StyleSheet.create({
   daysBannerText: { ...typography.bodyBold, color: colors.textSecondary },
   daysBannerTextStale: { color: colors.warning ?? '#B35400' },
   actions: { marginTop: spacing.md },
-  modalBackdrop: {
+  // Keyboard handling pattern — see CancelAndRefundModal.
+  kavRoot: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
     justifyContent: 'flex-end',
   },
+  backdropTapZone: { flex: 1 },
   modalCard: {
     backgroundColor: colors.bg,
     borderTopLeftRadius: radii.lg,

@@ -11,6 +11,13 @@ import { HttpsError, onCall, onRequest } from 'firebase-functions/v2/https';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import * as crypto from 'node:crypto';
 import Razorpay from 'razorpay';
+// PR 2 — payment hardening helpers. Listed individually because the
+// auto-formatter has a habit of stripping seemingly-unused names on
+// save; keeping the imports adjacent to the file's actual usage and
+// commented makes the strip-and-resave failure mode louder.
+import { validateCancelPaidOrder } from './cancelPaidOrderHelpers';
+import { reconcileAbandonedOrder } from './cleanupReconciliationHelpers';
+import { verifyRazorpaySignature } from './confirmPaymentHelpers';
 import {
     canApproveDeliveryRequest,
     canRejectDeliveryRequest,
@@ -25,7 +32,13 @@ import {
     validateProfilePatch,
     type AddressInput,
 } from './profileHelpers';
+import { checkRetryPaymentGuard } from './retryPaymentHelpers';
 import { validateShopOrdersAccess } from './shopOrdersHelpers';
+import {
+    detectAmountMismatch,
+    extractDedupKey,
+    shouldIgnoreLatePaymentFailed,
+} from './webhookDedupHelpers';
 
 /**
  * PLATFORM POLICY — DO NOT VIOLATE
@@ -393,6 +406,23 @@ export const updateOrderStatus = onCall<UpdateOrderStatusInput>(
       );
     }
 
+    // PR 2 — payment hardening (item 1 part 2). Cancelling a PAID
+    // order via this callable would mark the order cancelled while
+    // money stays with the merchant — no Razorpay refund call, no
+    // audit trail. Force the caller through the dedicated
+    // cancelPaidOrder flow which initiates a Razorpay refund and
+    // writes a refunds/{refundId} doc.
+    const orderForRefundCheck = order as { paymentStatus?: string };
+    if (
+      newStatus === 'cancelled' &&
+      orderForRefundCheck.paymentStatus === 'paid'
+    ) {
+      throw new HttpsError(
+        'failed-precondition',
+        'Paid orders must be cancelled via the Cancel & Refund flow (cancelPaidOrder).',
+      );
+    }
+
     const now = Date.now();
     const actorRole = isAdmin ? 'admin' : 'shopOwner';
     await ref.update({
@@ -460,13 +490,44 @@ export const retryPayment = onCall<{ orderId: string }>(
       throw new HttpsError('failed-precondition', 'Order is cancelled');
     }
 
+    const keyId = RAZORPAY_KEY_ID.value();
+    const keySecret = RAZORPAY_KEY_SECRET.value();
+    const razorpay = new Razorpay({ key_id: keyId, key_secret: keySecret });
+
+    // PR 2 — payment hardening (item 6). Before minting a fresh
+    // Razorpay order, verify the OLD razorpayOrderId has no
+    // captured/authorized payment that hasn't reached us via the
+    // webhook yet. Without this guard a customer who sees their
+    // order as 'pending' (because the webhook is delayed) and taps
+    // "Retry payment" would pay twice — once on the old order
+    // (when the webhook eventually arrives) and once on the new.
+    if (order.razorpayOrderId) {
+      let oldPayments: any[] | null = null;
+      try {
+        const fetched = await razorpay.orders.fetchPayments(
+          order.razorpayOrderId,
+        );
+        oldPayments = fetched.items ?? [];
+      } catch (e) {
+        console.warn(
+          '[retryPayment] fetchPayments failed for',
+          order.razorpayOrderId,
+          e,
+        );
+      }
+      const guard = checkRetryPaymentGuard({ payments: oldPayments });
+      if (!guard.ok) {
+        if (guard.code === 'unverifiable') {
+          throw new HttpsError('internal', guard.message);
+        }
+        throw new HttpsError('failed-precondition', guard.message);
+      }
+    }
+
     // Always create a fresh Razorpay order. The old razorpayOrderId
     // is left orphaned (cheap — Razorpay only charges on capture). The
     // webhook resolves the right Firestore doc via notes.orderId so
     // either old-or-new payment lands correctly.
-    const keyId = RAZORPAY_KEY_ID.value();
-    const keySecret = RAZORPAY_KEY_SECRET.value();
-    const razorpay = new Razorpay({ key_id: keyId, key_secret: keySecret });
     let rzpOrder;
     try {
       rzpOrder = await razorpay.orders.create({
@@ -551,6 +612,295 @@ export const cancelMyPendingOrder = onCall<{ orderId: string }>(
     });
 
     return { orderId, status: 'cancelled' as const };
+  },
+);
+
+// ---------------------------------------------------------------------
+// PR 2 — payment hardening, Phase B
+// ---------------------------------------------------------------------
+// confirmPayment: client-driven verification of a Razorpay Checkout
+// success. CheckoutScreen calls this BEFORE navigating to
+// OrderConfirmation so the order shows paid immediately, instead of
+// waiting up to ~30s for the asynchronous payment.captured webhook.
+// HMAC verification means a malicious client can't fabricate a
+// payment id and mark a free order paid — only Razorpay knows the
+// key secret needed to mint a valid signature.
+//
+// The webhook is still the source of truth and runs idempotently
+// (see razorpayWebhook → payment.captured → "already paid" branch).
+// confirmPayment is purely a UX accelerator + audit trail.
+
+export const confirmPayment = onCall<{
+  orderId: string;
+  razorpayPaymentId: string;
+  razorpaySignature: string;
+}>(
+  {
+    cors: true,
+    enforceAppCheck: false,
+    secrets: [RAZORPAY_KEY_SECRET],
+  },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+
+    const { orderId, razorpayPaymentId, razorpaySignature } = request.data;
+    if (!orderId || !razorpayPaymentId || !razorpaySignature) {
+      throw new HttpsError(
+        'invalid-argument',
+        'orderId, razorpayPaymentId, razorpaySignature required',
+      );
+    }
+
+    const ref = db.doc(`orders/${orderId}`);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      throw new HttpsError('not-found', `Order ${orderId} not found`);
+    }
+    const order = snap.data() as any;
+
+    if (order.customerUid !== auth.uid) {
+      throw new HttpsError('permission-denied', 'Not your order');
+    }
+    if (!order.razorpayOrderId) {
+      throw new HttpsError(
+        'failed-precondition',
+        'Order has no Razorpay session',
+      );
+    }
+    // Idempotent. Webhook may have already flipped this.
+    if (order.paymentStatus === 'paid') {
+      return { ok: true, alreadyPaid: true };
+    }
+
+    const verify = verifyRazorpaySignature({
+      razorpayOrderId: order.razorpayOrderId,
+      razorpayPaymentId,
+      razorpaySignature,
+      keySecret: RAZORPAY_KEY_SECRET.value(),
+    });
+    if (!verify.ok) {
+      console.warn(
+        '[confirmPayment] signature verification failed for order',
+        orderId,
+        'reason=',
+        verify.reason,
+      );
+      throw new HttpsError(
+        'permission-denied',
+        `Signature verification failed: ${verify.reason}`,
+      );
+    }
+
+    // Idempotent paid write. Webhook may arrive later and find
+    // already-paid → skip (per the payment.captured idempotency
+    // branch above).
+    await ref.update({
+      paymentStatus: 'paid',
+      razorpayPaymentId,
+      paidAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+      statusHistory: FieldValue.arrayUnion({
+        status: 'paid',
+        at: Date.now(),
+        by: `client-confirm:${auth.uid}`,
+        reason: 'Confirmed via confirmPayment callable',
+      }),
+    });
+    return { ok: true, alreadyPaid: false };
+  },
+);
+
+// cancelPaidOrder: admin or shop-owner-of-this-shop initiates a full
+// refund of a paid online order. Two-step:
+//   1. Transactionally flip paymentStatus to 'refund_pending' and
+//      create the refunds/{refundId} doc with status='pending'.
+//   2. Call Razorpay's refund API. On success → flip order to
+//      'refunded' + 'cancelled' and refund doc to 'processed'. On
+//      failure → flip order to 'refund_failed' (NOT cancelled) so
+//      retry is possible.
+//
+// We deliberately do NOT mark the order cancelled until the Razorpay
+// API call succeeds, because cancelling-but-not-refunding is the
+// failure mode this whole PR exists to close.
+
+export const cancelPaidOrder = onCall<{
+  orderId: string;
+  reason: string;
+}>(
+  {
+    cors: true,
+    enforceAppCheck: false,
+    secrets: [RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET],
+  },
+  async request => {
+    const auth = request.auth;
+    const { orderId, reason } = request.data ?? ({} as any);
+    if (!orderId) throw new HttpsError('invalid-argument', 'orderId required');
+
+    const orderRef = db.doc(`orders/${orderId}`);
+    const orderSnap = await orderRef.get();
+    const orderData = orderSnap.exists ? (orderSnap.data() as any) : null;
+
+    const v = validateCancelPaidOrder({
+      // The helper takes a plain shape; coerce the firebase-admin
+      // AuthData (which carries DecodedIdToken) into it. Same posture
+      // as the deliveryRequestHelpers callsites.
+      auth: auth
+        ? {
+            uid: auth.uid,
+            token: auth.token as unknown as {
+              admin?: unknown;
+              shopOwner?: unknown;
+              shopId?: unknown;
+            },
+          }
+        : null,
+      order: orderData,
+      reason,
+    });
+    if (!v.ok) {
+      throw new HttpsError(v.code, v.message);
+    }
+
+    const refundDocId = db.collection('refunds').doc().id;
+    const refundRef = db.collection('refunds').doc(refundDocId);
+    const now = Date.now();
+
+    // Step 1 — atomic state transition to refund_pending + refund doc.
+    await db.runTransaction(async tx => {
+      tx.update(orderRef, {
+        paymentStatus: 'refund_pending',
+        cancellationReason: v.reason,
+        updatedAt: FieldValue.serverTimestamp(),
+        statusHistory: FieldValue.arrayUnion({
+          status: 'refund_pending',
+          at: now,
+          by: `${v.role}:${v.uid}`,
+          reason: v.reason,
+        }),
+      });
+      tx.set(refundRef, {
+        id: refundDocId,
+        orderId,
+        paymentId: orderData.razorpayPaymentId,
+        amount: orderData.total,
+        reason: v.reason,
+        status: 'pending',
+        initiatedBy: v.uid,
+        initiatedRole: v.role,
+        initiatedAt: now,
+      });
+    });
+
+    // Step 2 — fire the Razorpay refund. On any failure flip to
+    // refund_failed so an admin can retry.
+    const razorpay = new Razorpay({
+      key_id: RAZORPAY_KEY_ID.value(),
+      key_secret: RAZORPAY_KEY_SECRET.value(),
+    });
+    try {
+      const refund = await razorpay.payments.refund(
+        orderData.razorpayPaymentId,
+        {
+          // Razorpay's "normal" speed = 5-7 business days, no extra
+          // fee. "optimum" is instant but charges. MVP is normal.
+          speed: 'normal',
+          notes: { orderId, reason: v.reason },
+        } as any,
+      );
+
+      const processedAt =
+        refund?.status === 'processed' ? Date.now() : null;
+
+      await db.runTransaction(async tx => {
+        tx.update(orderRef, {
+          paymentStatus: 'refunded',
+          status: 'cancelled',
+          refundId: refund?.id ?? refundDocId,
+          refundedAt: processedAt ?? Date.now(),
+          updatedAt: FieldValue.serverTimestamp(),
+          statusHistory: FieldValue.arrayUnion({
+            status: 'cancelled',
+            at: Date.now(),
+            by: `${v.role}:${v.uid}`,
+            reason: `Cancelled with refund — ${v.reason}`,
+          }),
+        });
+        tx.update(refundRef, {
+          status: refund?.status === 'processed' ? 'processed' : 'pending',
+          razorpayRefundId: refund?.id ?? null,
+          processedAt: processedAt ?? null,
+          razorpayStatus: refund?.status ?? null,
+        });
+      });
+
+      // Best-effort customer notification. The push trigger on
+      // orders/{id} status='cancelled' will also fire — we send an
+      // explicit one here too because the refund language matters
+      // and the generic order-status push doesn't carry the amount.
+      try {
+        const customerSnap = await db
+          .doc(`users/${orderData.customerUid}`)
+          .get();
+        const tokens: string[] =
+          (customerSnap.data() as any)?.fcmTokens ?? [];
+        if (tokens.length > 0) {
+          await fetch('https://exp.host/--/api/v2/push/send', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+            },
+            body: JSON.stringify(
+              tokens.map(token => ({
+                to: token,
+                title: 'Order cancelled & refunded',
+                body: `₹${orderData.total} will be refunded to your original payment method in 5-7 business days.`,
+                data: { orderId, kind: 'refund_initiated' },
+              })),
+            ),
+          });
+        }
+      } catch (e) {
+        console.warn('[cancelPaidOrder] customer push failed:', e);
+      }
+
+      return { ok: true, refundId: refund?.id ?? refundDocId };
+    } catch (err: any) {
+      const failureReason: string =
+        err?.error?.description ?? err?.message ?? 'Razorpay refund failed';
+      console.error(
+        '[cancelPaidOrder] razorpay.payments.refund failed for',
+        orderId,
+        err,
+      );
+      await db.runTransaction(async tx => {
+        tx.update(orderRef, {
+          paymentStatus: 'refund_failed',
+          updatedAt: FieldValue.serverTimestamp(),
+          statusHistory: FieldValue.arrayUnion({
+            status: 'refund_failed',
+            at: Date.now(),
+            by: `${v.role}:${v.uid}`,
+            reason: failureReason,
+          }),
+        });
+        tx.update(refundRef, {
+          status: 'failed',
+          failedAt: Date.now(),
+          failureReason,
+        });
+      });
+      await pushToAdmins(
+        '🚨 Refund failed',
+        `Order #${orderId}: ${failureReason}. Manual intervention required.`,
+        { orderId, kind: 'refund_failed' },
+      ).catch(e =>
+        console.warn('[cancelPaidOrder] pushToAdmins failed:', e),
+      );
+      throw new HttpsError('internal', `Refund failed: ${failureReason}`);
+    }
   },
 );
 
@@ -717,6 +1067,59 @@ export const razorpayWebhook = onRequest(
       return;
     }
 
+    // PR 2 — payment hardening (item 2). Idempotency dedup. Razorpay
+    // retries on non-2xx and sometimes duplicates events under network
+    // partition; without dedup a `payment.captured` followed minutes
+    // later by a delayed `payment.failed` could downgrade a paid
+    // order. We persist a doc per processed event and short-circuit
+    // on retry. shouldIgnoreLatePaymentFailed below is the belt; this
+    // is the suspenders.
+    const dedupKey = extractDedupKey({
+      headers: req.headers as any,
+      body: event,
+    });
+    if (dedupKey) {
+      const dedupRef = db.doc(`razorpayWebhookEvents/${dedupKey}`);
+      const dedupSnap = await dedupRef.get();
+      if (dedupSnap.exists) {
+        console.log(
+          '[razorpayWebhook] already processed event',
+          dedupKey,
+          '— acking 200',
+        );
+        res.status(200).send('OK (already processed)');
+        return;
+      }
+      // Note: we WRITE the dedup doc at the end of each branch (after
+      // the order update succeeds) to keep the dedup-write + order-
+      // write semantically paired. A failure mid-handler will retry
+      // and reprocess, which is safe because every order write below
+      // is itself idempotent.
+    } else {
+      console.warn(
+        '[razorpayWebhook] could not derive dedup key from event — proceeding without dedup',
+        eventType,
+      );
+    }
+
+    // Helper to write the dedup doc once a branch succeeds. No-op if
+    // dedupKey is null (we already logged that above).
+    const persistDedup = async (orderId?: string) => {
+      if (!dedupKey) return;
+      try {
+        await db.doc(`razorpayWebhookEvents/${dedupKey}`).set({
+          id: dedupKey,
+          type: eventType,
+          paymentId: payment.id ?? null,
+          orderId: orderId ?? null,
+          razorpayOrderId: payment.order_id ?? null,
+          processedAt: Date.now(),
+        });
+      } catch (e) {
+        console.error('[razorpayWebhook] failed to persist dedup doc', e);
+      }
+    };
+
     // Razorpay order receipt was set to our orderId in placeOrder.
     const receipt: string | undefined = payment.notes?.orderId ?? undefined;
     const razorpayOrderId: string = payment.order_id;
@@ -744,24 +1147,147 @@ export const razorpayWebhook = onRequest(
     }
 
     const orderSnap = await orderRef.get();
-    const order = orderSnap.data() as { total?: number } | undefined;
-    const expectedPaise = order?.total != null ? Math.round(order.total * 100) : null;
-    const amountMismatch =
-      expectedPaise != null && typeof payment.amount === 'number' && expectedPaise !== payment.amount;
+    const orderId = orderRef.id;
+    const order = orderSnap.data() as
+      | { total?: number; paymentStatus?: string }
+      | undefined;
+    const amountMismatch = detectAmountMismatch({
+      expectedRupees: order?.total,
+      receivedPaise: payment.amount,
+    });
+
+    if (eventType === 'payment.authorized') {
+      // PR 2 — payment hardening (item 7). Razorpay can authorize
+      // without auto-capturing if the merchant has manual-capture on
+      // OR if a 3DS/2FA edge case prevents auto-capture. Without a
+      // handler the order would sit pending forever (until cleanup
+      // sees the authorization and skips it). We surface the state
+      // and alert admin.
+      if (order?.paymentStatus === 'paid') {
+        // Already captured by a later event we processed first.
+        await persistDedup(orderId);
+        res.status(200).send('OK (already paid)');
+        return;
+      }
+      await orderRef.update({
+        paymentStatus: 'authorized',
+        razorpayPaymentId: payment.id,
+        authorizedAt:
+          typeof payment.created_at === 'number'
+            ? payment.created_at * 1000
+            : Date.now(),
+        updatedAt: FieldValue.serverTimestamp(),
+        statusHistory: FieldValue.arrayUnion({
+          status: 'authorized',
+          at: Date.now(),
+          by: 'razorpay-webhook',
+          reason: 'Payment authorized but not yet captured',
+        }),
+      });
+      await pushToAdmins(
+        '⚠️ Payment authorized, not captured',
+        `Order #${orderId} payment authorized. Manual capture or refund required (Razorpay dashboard).`,
+        { orderId, kind: 'payment_authorized_uncaptured' },
+      ).catch(e =>
+        console.warn('[razorpayWebhook] pushToAdmins failed:', e),
+      );
+      await persistDedup(orderId);
+      res.status(200).send('OK (authorized, pending capture)');
+      return;
+    }
 
     if (eventType === 'payment.captured') {
+      // PR 2 — payment hardening (item 3). Amount mismatch must NOT
+      // mark the order paid. Previously the code wrote paid=true with
+      // an `amountMismatch: true` flag; the shop dashboard happily
+      // dispatched and the discrepancy was only visible in raw
+      // Firestore. Now we write a separate status the UI banners and
+      // alert admin for manual reconciliation.
+      if (amountMismatch) {
+        const expectedRupees = order?.total ?? 0;
+        const receivedRupees = (payment.amount ?? 0) / 100;
+        await orderRef.update({
+          paymentStatus: 'amount_mismatch',
+          razorpayPaymentId: payment.id,
+          paidAt:
+            typeof payment.created_at === 'number'
+              ? payment.created_at * 1000
+              : FieldValue.serverTimestamp(),
+          amountReceived: receivedRupees,
+          amountExpected: expectedRupees,
+          updatedAt: FieldValue.serverTimestamp(),
+          statusHistory: FieldValue.arrayUnion({
+            status: 'amount_mismatch',
+            at: Date.now(),
+            by: 'razorpay-webhook',
+            reason: `Received ₹${receivedRupees}, expected ₹${expectedRupees}`,
+          }),
+        });
+        await pushToAdmins(
+          '🚨 Payment amount mismatch',
+          `Order #${orderId}: received ₹${receivedRupees}, expected ₹${expectedRupees}. Review required.`,
+          { orderId, kind: 'payment_amount_mismatch' },
+        ).catch(e =>
+          console.warn('[razorpayWebhook] pushToAdmins failed:', e),
+        );
+        await persistDedup(orderId);
+        res.status(200).send('OK (amount mismatch flagged)');
+        return;
+      }
+
+      // Idempotent: if a confirmPayment call already marked this
+      // paid we don't need to re-write anything. The dedup doc still
+      // gets persisted so a retry of the same event short-circuits
+      // up top.
+      if (order?.paymentStatus === 'paid') {
+        await persistDedup(orderId);
+        res.status(200).send('OK (already paid)');
+        return;
+      }
       await orderRef.update({
         paymentStatus: 'paid',
         razorpayPaymentId: payment.id,
-        paidAt: FieldValue.serverTimestamp(),
+        paidAt:
+          typeof payment.created_at === 'number'
+            ? payment.created_at * 1000
+            : FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
-        ...(amountMismatch ? { amountMismatch: true } : {}),
+        statusHistory: FieldValue.arrayUnion({
+          status: 'paid',
+          at: Date.now(),
+          by: 'razorpay-webhook',
+          reason: 'payment.captured event',
+        }),
       });
+      await persistDedup(orderId);
       res.status(200).send('ok');
       return;
     }
 
     if (eventType === 'payment.failed') {
+      // PR 2 — payment hardening (item 2 part 2). NEVER downgrade a
+      // paid (or otherwise terminal) order to failed on a late
+      // failed event. The dedup at the top of the handler closes
+      // the duplicate-event path; this guard closes the
+      // out-of-order path (rare, but Razorpay's event ordering is
+      // best-effort under network partition).
+      if (
+        shouldIgnoreLatePaymentFailed({
+          currentPaymentStatus: order?.paymentStatus,
+        })
+      ) {
+        console.warn(
+          '[razorpayWebhook] ignoring payment.failed for order',
+          orderId,
+          'paymentStatus=',
+          order?.paymentStatus,
+        );
+        await persistDedup(orderId);
+        res
+          .status(200)
+          .send('OK (already terminal, ignoring late failed event)');
+        return;
+      }
       await orderRef.update({
         paymentStatus: 'failed',
         razorpayPaymentId: payment.id,
@@ -769,11 +1295,14 @@ export const razorpayWebhook = onRequest(
           payment?.error_description ?? payment?.error_reason ?? 'Payment failed',
         updatedAt: FieldValue.serverTimestamp(),
       });
+      await persistDedup(orderId);
       res.status(200).send('ok');
       return;
     }
 
-    // Other event types (authorized, pending, etc.) — ack without mutating.
+    // Other event types — ack without mutating but still record so
+    // a Razorpay retry of the same event short-circuits.
+    await persistDedup(orderId);
     res.status(200).send('ignored');
   },
 );
@@ -793,6 +1322,10 @@ export const cleanupAbandonedOrders = onSchedule(
     schedule: 'every 60 minutes',
     region: 'asia-south1',
     timeZone: 'Asia/Kolkata',
+    // PR 2 — payment hardening (item 5): the per-order
+    // reconciliation step calls razorpay.orders.fetchPayments,
+    // which needs the same secrets retryPayment / placeOrder use.
+    secrets: [RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET],
   },
   async () => {
     const cutoffMs = Date.now() - ABANDONED_THRESHOLD_HOURS * 60 * 60 * 1000;
@@ -814,13 +1347,104 @@ export const cleanupAbandonedOrders = onSchedule(
       return;
     }
 
-    console.log(`[cleanupAbandonedOrders] cancelling ${snap.size} abandoned orders`);
+    console.log(
+      `[cleanupAbandonedOrders] inspecting ${snap.size} abandoned orders`,
+    );
 
-    const batch = db.batch();
+    // PR 2 — payment hardening (item 5). Each order is reconciled
+    // against Razorpay BEFORE we cancel. Without this, a paid order
+    // whose webhook was delayed >24h would be silently cancelled and
+    // money would stay with the merchant.
+    //
+    // We deliberately do NOT batch the writes anymore — different
+    // verdicts produce different writes (mark_paid vs cancel vs
+    // skip) and the per-order Razorpay round-trip serializes
+    // naturally. At CLEANUP_BATCH_LIMIT=100 and ~150ms per
+    // fetchPayments call this is ~15s worst case which is fine for
+    // a 60-minute scheduled run.
+    const razorpay = new Razorpay({
+      key_id: RAZORPAY_KEY_ID.value(),
+      key_secret: RAZORPAY_KEY_SECRET.value(),
+    });
     const now = Date.now();
+    let cancelled = 0;
+    let reconciledPaid = 0;
+    let deferredAuthorized = 0;
+    let deferredUnverifiable = 0;
+
     for (const doc of snap.docs) {
       const order = doc.data();
-      batch.update(doc.ref, {
+      const createdMs =
+        order.createdAt?.toMillis?.() ?? order.createdAt ?? Date.now();
+
+      if (order.paymentMethod === 'online' && order.razorpayOrderId) {
+        let payments: any[] | null = null;
+        try {
+          const fetched = await razorpay.orders.fetchPayments(
+            order.razorpayOrderId,
+          );
+          payments = fetched.items ?? [];
+        } catch (e) {
+          console.error(
+            '[cleanupAbandonedOrders] fetchPayments failed for',
+            doc.id,
+            e,
+          );
+        }
+        const verdict = reconcileAbandonedOrder({ payments });
+
+        if (verdict.kind === 'mark_paid') {
+          await doc.ref.update({
+            paymentStatus: 'paid',
+            razorpayPaymentId: verdict.paymentId,
+            paidAt:
+              verdict.createdAt != null
+                ? verdict.createdAt * 1000
+                : FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+            statusHistory: FieldValue.arrayUnion({
+              status: 'paid',
+              at: now,
+              by: 'system:cleanup-reconciliation',
+              reason:
+                'Captured payment found during abandonment sweep — webhook was delayed',
+            }),
+          });
+          reconciledPaid += 1;
+          console.log(
+            `  ↻ reconciled ${doc.id} — captured payment ${verdict.paymentId}; skipping cancel`,
+          );
+          continue;
+        }
+
+        if (verdict.kind === 'authorized_review') {
+          // Don't cancel; flag for admin manual review.
+          deferredAuthorized += 1;
+          await pushToAdmins(
+            '⚠️ Order with stuck authorization',
+            `Order #${doc.id} has an authorized but uncaptured Razorpay payment. Manual review required.`,
+            { orderId: doc.id, kind: 'stuck_authorization' },
+          ).catch(e =>
+            console.warn('[cleanupAbandonedOrders] pushToAdmins failed:', e),
+          );
+          console.warn(
+            `  ⚠ ${doc.id} has authorized payment ${verdict.paymentId}; skipping cancel for admin review`,
+          );
+          continue;
+        }
+
+        if (verdict.kind === 'defer_unverifiable') {
+          deferredUnverifiable += 1;
+          console.warn(
+            `  ⚠ ${doc.id} could not verify Razorpay state; deferring to next sweep`,
+          );
+          continue;
+        }
+        // verdict.kind === 'cancel_ok' falls through to the cancel
+        // branch below — no captured/authorized payments exist.
+      }
+
+      await doc.ref.update({
         paymentStatus: 'expired',
         status: 'cancelled',
         updatedAt: FieldValue.serverTimestamp(),
@@ -831,14 +1455,15 @@ export const cleanupAbandonedOrders = onSchedule(
           reason: `Payment not completed within ${ABANDONED_THRESHOLD_HOURS}h`,
         }),
       });
-      const createdMs =
-        order.createdAt?.toMillis?.() ?? order.createdAt ?? Date.now();
+      cancelled += 1;
       console.log(
         `  → cancelling ${doc.id} (created ${new Date(createdMs).toISOString()})`,
       );
     }
-    await batch.commit();
-    console.log(`[cleanupAbandonedOrders] done — cancelled ${snap.size} orders`);
+
+    console.log(
+      `[cleanupAbandonedOrders] done — cancelled=${cancelled} reconciledPaid=${reconciledPaid} deferredAuthorized=${deferredAuthorized} deferredUnverifiable=${deferredUnverifiable}`,
+    );
   },
 );
 

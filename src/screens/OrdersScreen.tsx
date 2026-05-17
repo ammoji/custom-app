@@ -18,25 +18,41 @@ export default function OrdersScreen() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // PR 3 — concurrency cleanup (item 1). Without an error state the
+  // catch block silently swallowed listMine failures and the empty
+  // FlatList rendered "No orders yet" — confidence-destroying for
+  // any customer who knew they had a real order. Mirror
+  // AdminOrdersScreen's error-banner + retryNonce posture so the
+  // UX is consistent across roles.
+  const [error, setError] = useState<string | null>(null);
+  const [retryNonce, setRetryNonce] = useState(0);
 
   const load = useCallback(async () => {
     if (!uid) {
       setOrders([]);
+      setError(null);
       setLoading(false);
       return;
     }
     try {
       const data = await orderService.listMine(uid);
       setOrders(data);
-    } catch (err) {
+      setError(null);
+    } catch (err: any) {
       console.warn('[orders] listMine failed:', err);
+      // Preserve whatever orders we had (don't flip to []) — a
+      // transient network blip shouldn't wipe stale-but-correct
+      // data the user was looking at.
+      setError(err?.message || "Couldn't load orders. Tap Retry.");
     }
   }, [uid]);
 
   useEffect(() => {
     setLoading(true);
     load().finally(() => setLoading(false));
-  }, [load]);
+    // retryNonce is intentional in deps: bumping it from the Retry
+    // button re-runs this effect.
+  }, [load, retryNonce]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -53,7 +69,7 @@ export default function OrdersScreen() {
     );
   }
 
-  if (orders.length === 0) {
+  if (orders.length === 0 && !error) {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
         <ScreenHeader title="My Orders" onBack={() => nav.goBack()} />
@@ -70,6 +86,19 @@ export default function OrdersScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <ScreenHeader title="My Orders" onBack={() => nav.goBack()} />
+      {error && (
+        <View style={styles.errorBanner}>
+          <Text style={styles.errorText}>{error}</Text>
+          <Pressable
+            onPress={() => setRetryNonce(n => n + 1)}
+            style={styles.retryBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading orders"
+          >
+            <Text style={styles.retryText}>Retry</Text>
+          </Pressable>
+        </View>
+      )}
       <FlatList
         data={orders}
         keyExtractor={o => o.id}
@@ -98,6 +127,19 @@ export default function OrdersScreen() {
             </Pressable>
           );
         }}
+        ListEmptyComponent={
+          // Only reached when error is set and orders is still []
+          // (the no-error empty state above short-circuits earlier).
+          // Suppress the "Place your first order" CTA — we don't
+          // know whether the user has orders; the banner already
+          // tells them what's wrong + offers Retry.
+          error ? (
+            <EmptyState
+              title="Couldn't load orders"
+              subtitle="Tap Retry above when your connection is back."
+            />
+          ) : null
+        }
       />
     </SafeAreaView>
   );
@@ -118,4 +160,32 @@ const styles = StyleSheet.create({
   shopName: { ...typography.h3 },
   meta: { ...typography.caption, marginTop: 2 },
   time: { ...typography.caption, color: colors.textMuted, marginTop: 2 },
+  // PR 3 — error banner styles mirror AdminOrdersScreen / Shop /
+  // Delivery dashboards so the recovery affordance looks the same
+  // everywhere.
+  errorBanner: {
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.md,
+    padding: spacing.md,
+    backgroundColor: '#FEF2F2',
+    borderColor: colors.danger,
+    borderWidth: 1,
+    borderRadius: radii.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  errorText: {
+    ...typography.body,
+    color: colors.danger,
+    flex: 1,
+    marginRight: spacing.md,
+  },
+  retryBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.danger,
+    borderRadius: radii.sm,
+  },
+  retryText: { ...typography.bodyBold, color: '#fff' },
 });

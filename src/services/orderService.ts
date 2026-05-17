@@ -594,6 +594,49 @@ export const orderService = {
     return result.data as { ok: boolean };
   },
 
+  // PR 2 — payment hardening, Phase B. confirmPayment closes the gap
+  // between Razorpay Checkout's success callback and the asynchronous
+  // payment.captured webhook. The client posts the three fields
+  // Razorpay returns; the server HMAC-verifies them with the key
+  // secret and flips the order to paid synchronously.
+  //
+  // The callable is idempotent: a webhook arriving later finds
+  // already-paid and skips. Failure path: the client should still
+  // navigate to OrderConfirmation; the webhook is the backup and
+  // will mark the order paid when it eventually arrives (~30s).
+  async confirmPayment(args: {
+    orderId: string;
+    razorpayPaymentId: string;
+    razorpaySignature: string;
+  }): Promise<{ ok: boolean; alreadyPaid?: boolean }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('confirmPayment');
+      const result = await fn(args);
+      return result.data as { ok: boolean; alreadyPaid?: boolean };
+    }
+    const fn = httpsCallable(functions, 'confirmPayment');
+    const result = await fn(args);
+    return result.data as { ok: boolean; alreadyPaid?: boolean };
+  },
+
+  // PR 2 — payment hardening, Phase B. Admin or shop-owner-of-this-shop
+  // initiates a full Razorpay refund of a paid online order. Server
+  // transactionally writes refund_pending, calls Razorpay's API, then
+  // flips to refunded + cancelled (or refund_failed for retry).
+  async cancelPaidOrder(args: {
+    orderId: string;
+    reason: string;
+  }): Promise<{ ok: boolean; refundId?: string }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('cancelPaidOrder');
+      const result = await fn(args);
+      return result.data as { ok: boolean; refundId?: string };
+    }
+    const fn = httpsCallable(functions, 'cancelPaidOrder');
+    const result = await fn(args);
+    return result.data as { ok: boolean; refundId?: string };
+  },
+
   // Returns shops with no current owner (ownerUid null/missing).
   // Powers the BecomeShopOwner picker.
   async listAvailableShops(): Promise<

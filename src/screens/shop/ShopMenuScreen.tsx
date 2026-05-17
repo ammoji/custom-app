@@ -1,15 +1,15 @@
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Alert,
-  FlatList,
-  Image,
-  Pressable,
-  RefreshControl,
-  StyleSheet,
-  Switch,
-  Text,
-  View,
+    Alert,
+    FlatList,
+    Image,
+    Pressable,
+    RefreshControl,
+    StyleSheet,
+    Switch,
+    Text,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../../components/common/Button';
@@ -18,10 +18,14 @@ import Loader from '../../components/common/Loader';
 import ScreenHeader from '../../components/common/ScreenHeader';
 import { CATEGORIES, CategoryId } from '../../constants/categories';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
+// PR 3 — concurrency cleanup. authService used to refresh claims
+// when the server says permission-denied (role was revoked).
+import { authService } from '../../services/authService';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
 import type { MenuItem } from '../../types';
 import { formatRupees } from '../../utils/format';
+import { handleRoleAuthError } from '../../utils/handleRoleAuthError';
 
 type Filter = 'all' | 'available' | 'unavailable' | 'custom';
 
@@ -48,23 +52,44 @@ export default function ShopMenuScreen() {
   const isShopOwner = useAuthStore(s => s.isShopOwner);
   const shopId = useAuthStore(s => s.shopId);
 
+  // PR 3 — concurrency cleanup (item 2). Surface fetch errors so a
+  // shop owner doesn't see an empty menu list and start re-adding
+  // duplicates of items they think disappeared. Banner mirrors the
+  // AdminOrders / Customer Orders shape.
+  const setUser = useAuthStore(s => s.setUser);
   const [items, setItems] = useState<MenuItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<Filter>('all');
   const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const fetchOnce = useCallback(async () => {
     try {
       const list = await orderService.listMyShopMenu();
       setItems(list);
-    } catch (e) {
+      setError(null);
+    } catch (e: any) {
       console.warn('[ShopMenu] fetch failed:', e);
+      // PR 3 — if the failure looks like a revoked claim, refresh
+      // auth so the role-guard EmptyState above takes over on the
+      // next render. Otherwise surface a banner + Retry.
+      const wasRevocation = await handleRoleAuthError(
+        e,
+        authService.refreshClaims,
+        setUser,
+      );
+      if (!wasRevocation) {
+        // Don't collapse `items` to [] — keep stale-but-correct
+        // data on screen so a transient blip doesn't make the
+        // owner think their menu is empty.
+        setError(e?.message || "Couldn't load menu. Tap Retry.");
+      }
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [setUser]);
 
   // Refetch on every focus so edits made elsewhere show up.
   useFocusEffect(
@@ -176,6 +201,22 @@ export default function ShopMenuScreen() {
         title={`Menu (${items.length})`}
         onBack={() => nav.goBack()}
       />
+      {error && (
+        <View style={styles.errorBanner}>
+          <Text style={styles.errorText}>{error}</Text>
+          <Pressable
+            onPress={() => {
+              setLoading(true);
+              fetchOnce();
+            }}
+            style={styles.retryBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading menu"
+          >
+            <Text style={styles.retryText}>Retry</Text>
+          </Pressable>
+        </View>
+      )}
       <View style={styles.toolbar}>
         <View style={styles.filterRow}>
           {(['all', 'available', 'unavailable', 'custom'] as Filter[]).map(f => (
@@ -220,18 +261,28 @@ export default function ShopMenuScreen() {
           />
         }
         ListEmptyComponent={
-          <EmptyState
-            title={
-              filter === 'all'
-                ? 'No menu items yet'
-                : `No ${filter} items`
-            }
-            subtitle={
-              filter === 'all'
-                ? "Tap 'Add custom item' to add your first product."
-                : 'Try a different filter.'
-            }
-          />
+          // Suppress the "Add your first item" CTA when an error is
+          // visible — the banner already tells the owner what's
+          // wrong; we don't want to push them to add duplicates.
+          error ? (
+            <EmptyState
+              title="Couldn't load menu"
+              subtitle="Tap Retry above when your connection is back."
+            />
+          ) : (
+            <EmptyState
+              title={
+                filter === 'all'
+                  ? 'No menu items yet'
+                  : `No ${filter} items`
+              }
+              subtitle={
+                filter === 'all'
+                  ? "Tap 'Add custom item' to add your first product."
+                  : 'Try a different filter.'
+              }
+            />
+          )
         }
         renderItem={({ item: row }) => {
           if (row.kind === 'header') {
@@ -388,4 +439,30 @@ const styles = StyleSheet.create({
   stock: { ...typography.caption, color: colors.textSecondary, marginTop: 2 },
   toggleColumn: { alignItems: 'center', justifyContent: 'center', gap: spacing.xs },
   toggleLabel: { ...typography.caption, color: colors.textSecondary },
+  // PR 3 — error banner. Same shape across all dashboards.
+  errorBanner: {
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.md,
+    padding: spacing.md,
+    backgroundColor: '#FEF2F2',
+    borderColor: colors.danger,
+    borderWidth: 1,
+    borderRadius: radii.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  errorText: {
+    ...typography.body,
+    color: colors.danger,
+    flex: 1,
+    marginRight: spacing.md,
+  },
+  retryBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.danger,
+    borderRadius: radii.sm,
+  },
+  retryText: { ...typography.bodyBold, color: '#fff' },
 });

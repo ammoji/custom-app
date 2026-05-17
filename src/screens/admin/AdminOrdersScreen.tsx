@@ -6,7 +6,14 @@ import Button from '../../components/common/Button';
 import EmptyState from '../../components/common/EmptyState';
 import Loader from '../../components/common/Loader';
 import ScreenHeader from '../../components/common/ScreenHeader';
+// PR 2 — payment hardening (Phase B): Cancel & Refund modal +
+// payment-status banner for the new statuses (amount_mismatch,
+// authorized, refund_pending, refunded, refund_failed). Imports
+// kept verbose because the auto-formatter strips these on save and
+// the resulting JSX-vs-import drift takes a tsc run to surface.
+import CancelAndRefundModal from '../../components/order/CancelAndRefundModal';
 import OrderStatusChip from '../../components/order/OrderStatusChip';
+import PaymentStatusBanner from '../../components/order/PaymentStatusBanner';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
 import { useOnlineDeliveryCount } from '../../hooks/useOnlineDeliveryCount';
 import { orderService } from '../../services/orderService';
@@ -28,6 +35,10 @@ export default function AdminOrdersScreen() {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<Record<string, OrderStatus | null>>({});
   const [retryNonce, setRetryNonce] = useState(0);
+  // PR 2 — payment hardening (Phase B). Refund modal target. We track
+  // the entire order rather than just the id so the modal can show
+  // the amount in its title without an extra lookup.
+  const [refundTarget, setRefundTarget] = useState<Order | null>(null);
   // Phase 12c: stats card. Orders-derived stats refresh whenever the
   // 10s watcher ticks; the partner count polls on its own 15s rhythm.
   const { count: onlinePartners } = useOnlineDeliveryCount(isAdmin);
@@ -69,6 +80,23 @@ export default function AdminOrdersScreen() {
   }
 
   const handleAction = async (orderId: string, newStatus: OrderStatus) => {
+    // PR 2 — payment hardening (Phase B). Cancelling a paid online
+    // order is NOT a status update — it requires a Razorpay refund.
+    // Intercept before the optimistic write and route to the
+    // Cancel & Refund modal instead. updateOrderStatus on the server
+    // also rejects this combination as a belt-and-suspenders guard.
+    if (newStatus === 'cancelled') {
+      const order = orders.find(o => o.id === orderId);
+      if (
+        order &&
+        order.paymentMethod === 'online' &&
+        order.paymentStatus === 'paid'
+      ) {
+        setRefundTarget(order);
+        return;
+      }
+    }
+
     // Optimistic update: flip the chip immediately so the UI doesn't
     // wait up to 10s for the next watchAllOrders poll cycle. Capture the
     // previous list BEFORE the setOrders call so a rollback restores the
@@ -85,9 +113,30 @@ export default function AdminOrdersScreen() {
       // No success toast — optimistic UX implies confirmation by absence
       // of an error.
     } catch (err: any) {
-      // Rollback the optimistic write and surface the failure.
+      // Rollback the optimistic write first.
       setOrders(previousOrders);
-      const message = err?.message || 'Failed to update order status.';
+      // Self-healing intercept: if the server rejects this cancellation
+      // because the order is paid (and our client state was stale at
+      // the moment of click — there's a race window between
+      // confirmPayment landing on the customer side and the next 10s
+      // admin-watcher poll picking up the new paymentStatus), route
+      // the admin to the Cancel & Refund modal instead of surfacing
+      // the raw failed-precondition message. Server is the source of
+      // truth: if it says paid, we trust it.
+      const code = err?.code as string | undefined;
+      const msg = (err?.message ?? '') as string;
+      const looksLikePaidCancelGuard =
+        (code === 'functions/failed-precondition' ||
+          code === 'failed-precondition') &&
+        msg.toLowerCase().includes('cancelpaidorder');
+      if (newStatus === 'cancelled' && looksLikePaidCancelGuard) {
+        const fresh = previousOrders.find(o => o.id === orderId);
+        if (fresh) {
+          setRefundTarget(fresh);
+          return; // suppress the alert; modal handles the next step.
+        }
+      }
+      const message = msg || 'Failed to update order status.';
       Alert.alert('Update failed', message);
     } finally {
       setPending(prev => ({ ...prev, [orderId]: null }));
@@ -167,6 +216,14 @@ export default function AdminOrdersScreen() {
               <Text style={styles.phone}>
                 📞 {item.deliveryAddress?.phone || '—'}
               </Text>
+              <PaymentStatusBanner
+                paymentStatus={item.paymentStatus}
+                onRetryRefund={
+                  item.paymentStatus === 'refund_failed'
+                    ? () => setRefundTarget(item)
+                    : undefined
+                }
+              />
               {actions.length > 0 && (
                 <View style={styles.actions}>
                   {actions.map(next => {
@@ -192,6 +249,21 @@ export default function AdminOrdersScreen() {
           );
         }}
       />
+      {refundTarget ? (
+        <CancelAndRefundModal
+          visible={!!refundTarget}
+          orderId={refundTarget.id}
+          orderTotal={refundTarget.total}
+          onClose={() => setRefundTarget(null)}
+          onDone={() => {
+            // Server has flipped status → cancelled + paymentStatus →
+            // refunded (or refund_failed on Razorpay error). The next
+            // watchAllOrders tick (within 10s) will reflect it; the
+            // banner above the card surfaces refund_failed if so.
+            setRefundTarget(null);
+          }}
+        />
+      ) : null}
     </SafeAreaView>
   );
 }

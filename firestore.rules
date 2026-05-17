@@ -127,6 +127,28 @@ service cloud.firestore {
       allow create, update, delete: if false;   // Cloud Functions only
     }
 
+    // PR 2 — payment hardening. Webhook-event dedup ledger. Cloud
+    // Functions write a doc per processed Razorpay event so a retry
+    // (Razorpay retries on non-2xx, and any network blip can cause
+    // duplicate deliveries) can short-circuit at the top of the
+    // handler. Strictly server-only; clients have no business
+    // reading this.
+    match /razorpayWebhookEvents/{eventId} {
+      allow read, write: if false;
+    }
+
+    // PR 2 — payment hardening. Refund audit ledger written by
+    // cancelPaidOrder. Admins see all refunds; the user who initiated
+    // a refund (admin OR shop owner of the order's shop) sees their
+    // own. No client writes — Cloud Functions are the only writer
+    // via Admin SDK.
+    match /refunds/{refundId} {
+      allow read: if isAdmin()
+        || (isSignedIn()
+            && resource.data.initiatedBy == request.auth.uid);
+      allow write: if false;
+    }
+
     // PR 1 — security hardening: new collection backing the
     // admin-approval flow for delivery partners (replaces the
     // self-service becomeDelivery callable). The user creates their

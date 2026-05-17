@@ -15,6 +15,13 @@ import EmptyState from '../../components/common/EmptyState';
 import Loader from '../../components/common/Loader';
 import ScreenHeader from '../../components/common/ScreenHeader';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
+// PR 3 — concurrency cleanup. authService.refreshClaims used by the
+// role-revocation UX path; helpers below race-guard rollbacks and
+// detect revoked claims. NOTE: auto-formatter has stripped these
+// imports twice during this PR — if you save and tsc complains
+// about Cannot find name 'handleRoleAuthError' / 'authService' /
+// 'shouldRollbackOptimistic', re-add this block.
+import { authService } from '../../services/authService';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
 import type { Order } from '../../types';
@@ -24,6 +31,8 @@ import {
     formatRupees,
     isToday,
 } from '../../utils/format';
+import { handleRoleAuthError } from '../../utils/handleRoleAuthError';
+import { shouldRollbackOptimistic } from '../../utils/optimisticRollback';
 
 /**
  * DeliveryDashboardScreen — Phase 12b.
@@ -45,6 +54,12 @@ import {
 export default function DeliveryDashboardScreen() {
   const nav = useNavigation<any>();
   const isDelivery = useAuthStore(s => s.isDelivery);
+  // PR 3 — concurrency cleanup (item 4). Used to push refreshed
+  // claims into useAuthStore when a watcher hands back permission-
+  // denied (admin revoked delivery role mid-session). NOTE:
+  // auto-formatter has stripped this declaration once already; if
+  // tsc complains "Cannot find name 'setUser'", re-add it.
+  const setUser = useAuthStore(s => s.setUser);
 
   const [available, setAvailable] = useState<Order[]>([]);
   const [mine, setMine] = useState<Order[]>([]);
@@ -97,6 +112,10 @@ export default function DeliveryDashboardScreen() {
       if (err) {
         availableErr = err;
         setAvailable([]);
+        // PR 3 — best-effort claim refresh on permission-denied.
+        // No-op for unrelated errors. Fire-and-forget; the role-guard
+        // render branch will pick up the cleared claim on next render.
+        void handleRoleAuthError(err, authService.refreshClaims, setUser);
       } else {
         availableErr = null;
         setAvailable(list);
@@ -108,6 +127,7 @@ export default function DeliveryDashboardScreen() {
       if (err) {
         mineErr = err;
         setMine([]);
+        void handleRoleAuthError(err, authService.refreshClaims, setUser);
       } else {
         mineErr = null;
         setMine(list);
@@ -180,20 +200,37 @@ export default function DeliveryDashboardScreen() {
 
   const handlePickedUp = async (order: Order) => {
     setPendingAction(order.id);
-    // Optimistic: stamp pickedUpAt locally so the button flips to
-    // "Delivered" without waiting for the poll.
+    // PR 3 — concurrency cleanup (item 3b). Capture the OPTIMISTIC
+    // pickedUpAt value so the rollback can verify the watcher
+    // hasn't installed a different value while the API was in
+    // flight. Without this guard, a 10s watcher tick that arrives
+    // between markPickedUp() failing and the rollback firing gets
+    // clobbered — worst case, undoing a real successful pickup
+    // recorded by a parallel call from another device.
+    const optimisticPickedUpAt = Date.now();
     setMine(prev =>
       prev.map(o =>
-        o.id === order.id ? { ...o, pickedUpAt: Date.now() } : o,
+        o.id === order.id ? { ...o, pickedUpAt: optimisticPickedUpAt } : o,
       ),
     );
     try {
       await orderService.markPickedUp({ orderId: order.id });
     } catch (e: any) {
-      // Rollback
-      setMine(prev =>
-        prev.map(o => (o.id === order.id ? { ...o, pickedUpAt: null } : o)),
-      );
+      setMine(prev => {
+        const current = prev.find(o => o.id === order.id);
+        if (
+          !current ||
+          !shouldRollbackOptimistic(current.pickedUpAt, optimisticPickedUpAt)
+        ) {
+          console.warn(
+            '[DeliveryDashboard] handlePickedUp rollback suppressed — watcher already updated',
+          );
+          return prev;
+        }
+        return prev.map(o =>
+          o.id === order.id ? { ...o, pickedUpAt: null } : o,
+        );
+      });
       Alert.alert('Update failed', e?.message || 'Please try again.');
     } finally {
       setPendingAction(null);
@@ -202,25 +239,44 @@ export default function DeliveryDashboardScreen() {
 
   const handleDelivered = async (order: Order) => {
     setPendingAction(order.id);
-    // Optimistic: flip status. Customer-facing push fires server-side
-    // via sendOrderStatusPush.
+    // PR 3 — concurrency cleanup (item 3c). Same guard pattern as
+    // handlePickedUp. We compare the optimistic status — 'delivered'
+    // — against current; if a watcher already moved the order to a
+    // DIFFERENT status (cancelled by admin, for instance), the
+    // rollback to 'out_for_delivery' would be wrong.
+    const optimisticDeliveredAt = Date.now();
     setMine(prev =>
       prev.map(o =>
         o.id === order.id
-          ? { ...o, status: 'delivered', deliveredAt: Date.now() }
+          ? {
+              ...o,
+              status: 'delivered',
+              deliveredAt: optimisticDeliveredAt,
+            }
           : o,
       ),
     );
     try {
       await orderService.markDelivered({ orderId: order.id });
     } catch (e: any) {
-      setMine(prev =>
-        prev.map(o =>
+      setMine(prev => {
+        const current = prev.find(o => o.id === order.id);
+        if (
+          !current ||
+          !shouldRollbackOptimistic(current.status, 'delivered')
+        ) {
+          console.warn(
+            '[DeliveryDashboard] handleDelivered rollback suppressed — watcher already updated to',
+            current?.status,
+          );
+          return prev;
+        }
+        return prev.map(o =>
           o.id === order.id
             ? { ...o, status: 'out_for_delivery', deliveredAt: null }
             : o,
-        ),
-      );
+        );
+      });
       Alert.alert('Update failed', e?.message || 'Please try again.');
     } finally {
       setPendingAction(null);

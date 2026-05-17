@@ -2015,7 +2015,11 @@ foundation is solid; everything below is gaps to close before public
 launch or shortly after. Items are grouped by the PR that should fix
 them so each diff stays reviewable.
 
-### PR 1 — Security hardening (launch blocker)
+### PR 1 — Security hardening (launch blocker) — ✅ SHIPPED May 17 2026 (commit adb7399)
+
+All four items below were closed by PR 1. Kept in the checklist for
+audit history. Pre-PR-1 delivery partners were grandfathered; any
+bulk audit/revoke if needed is tracked under PR-1-followup.
 
 - [ ] **`becomeDelivery` is self-service + leaks customer PII.** Any
       signed-in user can call the callable
@@ -2051,7 +2055,29 @@ them so each diff stays reviewable.
       `listShopMenuPublic`, and `listAllUsers` / `listAllShops` so
       auth-rule drift gets caught by CI.
 
-### PR 2 — Payment hardening (launch blocker)
+### PR 2 — Payment hardening (launch blocker) — ✅ SHIPPED May 17 2026
+
+All six items below were closed by PR 2 (Phase A server hardening +
+Phase B refund flow). Validated end-to-end with a real ₹1 Razorpay
+test transaction: confirmPayment → paid → admin cancel → refund_pending
+→ refunded. Includes one hotfix during testing:
+
+- `CancelAndRefundModal` keyboard-handling fix — wrapped in
+  `KeyboardAvoidingView`, backdrop-tap dismisses keyboard only (not
+  modal). Pattern propagated to all 4 admin input modals
+  (UserDetail, ShopDetailManagement, ShopRegistrationDetail,
+  DeliveryRequestDetail) in the keyboard-handling sweep PR shipped
+  immediately after PR 2. Canonical pattern documented in
+  `src/components/order/CancelAndRefundModal.tsx` top doc-comment.
+
+Two long-form shop-owner screens (`AddCustomMenuItemScreen`,
+`ShopMenuItemEditScreen`) use `ScrollView` only without
+`KeyboardAvoidingView`. Left unchanged in the sweep PR per defensive
+guidance (blindly adding KAV on Android can introduce double-scroll
+artifacts). **Watch family testing**: if anyone reports bottom
+inputs hidden behind the keyboard on these screens, wrap each form
+in `<KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>`
+inside the SafeAreaView. Tracked as `[Post-launch followup]`.
 
 - [ ] **No refund flow exists.** `updateOrderStatus` lets admin /
       shop-owner cancel a `paid` order with no Razorpay refund call
@@ -2101,42 +2127,58 @@ them so each diff stays reviewable.
       `razorpayOrderId`, call `razorpay.orders.fetch(oldOrderId)`
       and refuse retry if any payment was captured.
 
-### PR 3 — Concurrency cleanup (high priority, not blocker)
+### PR 3 — Concurrency cleanup (high priority, not blocker) — ✅ SHIPPED May 17 2026
 
-- [ ] **`OrdersScreen` swallows fetch failure → "No orders yet"
-      empty state on real users with orders.** `OrdersScreen.tsx:22-39`
-      — `listMine` failure just `console.warn`s; `loading` flips
-      false; user sees "No orders yet. Place your first order…"
-      even when they have orders the server couldn't fetch. **Fix:**
-      add `error` state and render an error banner with Retry; hide
-      the empty CTA while error is set.
-- [ ] **Optimistic rollback races overwrite concurrent watcher
-      ticks.** Three sites with the same bug class:
-      `AdminOrdersScreen.handleAction:71-95` (replaces entire orders
-      list, throws away orders that arrived from watcher during
-      the await), `useShopOrderDetail.ts:158-179` (rollback with
-      stale captured `previousStatus`), `DeliveryDashboardScreen`
-      `handleDelivered`/`handlePickedUp` (literal-null rollback
-      undoes successful watcher updates). **Fix:** in rollback, only
-      revert if `prev.status === optimisticStatus` — if the watcher
-      installed something else, trust the watcher.
-- [ ] **`ShopMenuScreen` silent fetch error → owner sees empty
-      menu, may re-add duplicates.** `ShopMenuScreen.tsx:57-67`.
-      Same pattern as `OrdersScreen` — wrap with error state +
-      retry banner.
-- [ ] **Role revocation mid-session has no UX.** When admin revokes
-      a user's shopOwner / delivery claim while they have the
-      relevant dashboard open, the next watcher tick returns
-      `permission-denied` but the UI keeps trying and `useAuthStore`
-      still has stale role flags until next app restart. **Fix:**
-      on watcher error with `permission-denied` or `unauthenticated`
-      code, call `authService.refreshClaims()` and update the auth
-      store; the role-guard EmptyState will route them out.
-- [ ] **`useOnlineDeliveryCount` keeps stale value forever on
-      permanent error.** If the admin claim is revoked, the last
-      successful count sticks indefinitely with no UI signal. Low
-      impact (it's a stat). **Fix:** detect persistent failure (3
-      consecutive errors) and clear to `null`.
+All five items below were closed by PR 3. Pure client-side: two pure
+helpers (`shouldRollbackOptimistic`, `handleRoleAuthError`), one
+extracted state-machine slice (`nextPollState`), error/retry banners
+on two screens, and three rollback-race guards. 344/344 unit tests
+green; deliberate-break demo on `optimisticRollback` flipped 3 tests
+red (returns-false-when-current-differs, strict-equality, null-vs-
+undefined) before revert. NOTE: auto-formatter aggressively strips
+the new imports (`authService`, `handleRoleAuthError`,
+`shouldRollbackOptimistic`, `useAuthStore`) on save in
+`DeliveryDashboardScreen.tsx` and `useShopOrderDetail.ts` — explicit
+"if tsc complains, re-add this" comments left in those files.
+
+- [x] **`OrdersScreen` swallows fetch failure → "No orders yet"
+      empty state on real users with orders.** Closed: added
+      `error` state + dismissable retry banner mirroring the
+      `AdminOrdersScreen` pattern; empty-state CTA suppressed while
+      `error` is set. `OrdersScreen.tsx:18-191`.
+- [x] **Optimistic rollback races overwrite concurrent watcher
+      ticks.** Closed at all three sites with a shared pure helper
+      `shouldRollbackOptimistic(currentValue, optimisticValue)` →
+      strict equality check; rollback is suppressed when the
+      watcher has already installed a different value. Applied at
+      `useShopOrderDetail.ts:170-192` (status), `DeliveryDashboard`
+      `handlePickedUp:186-216` (pickedUpAt timestamp) and
+      `handleDelivered:240-269` (status). `AdminOrdersScreen` was
+      already safe (replaces by id, doesn't drop concurrent
+      arrivals). 5 unit tests in `tests/utils/optimisticRollback.test.ts`.
+- [x] **`ShopMenuScreen` silent fetch error → owner sees empty
+      menu, may re-add duplicates.** Closed: same error-banner
+      pattern as `OrdersScreen` plus role-auth refresh on
+      permission-denied. `ShopMenuScreen.tsx:21-468`.
+- [x] **Role revocation mid-session has no UX.** Closed via pure
+      helper `handleRoleAuthError(err, refreshClaims, setUser)` →
+      detects `permission-denied`/`unauthenticated` (both hyphen
+      and underscore variants), force-refreshes claims, pushes
+      result into `useAuthStore` so the role-guard EmptyState
+      renders on next pass. Applied at
+      `ShopOwnerDashboardScreen.tsx:104`,
+      `DeliveryDashboardScreen.tsx:103,115` (both watchers),
+      `ShopMenuScreen.tsx`. 9 unit tests in
+      `tests/utils/handleRoleAuthError.test.ts`.
+- [x] **`useOnlineDeliveryCount` keeps stale value forever on
+      permanent error.** Closed: extracted pure `nextPollState`
+      slice with consecutive-failure counter, threshold = 3.
+      Single transient failure preserves the last count; 3 strikes
+      clear to `null`; any successful poll resets the counter. 6
+      unit tests in `tests/hooks/useOnlineDeliveryCount.test.ts`
+      (RNTL/react-test-renderer not in deps, so the helper is
+      tested rather than the hook surface — see test file header
+      for rationale). `useOnlineDeliveryCount.ts:1-129`.
 
 ### Tag-along items (ride with whichever PR fits)
 

@@ -6,11 +6,21 @@ import EmptyState from '../../components/common/EmptyState';
 import Loader from '../../components/common/Loader';
 import ScreenHeader from '../../components/common/ScreenHeader';
 import OrderStatusChip from '../../components/order/OrderStatusChip';
+// PR 2 — payment hardening (Phase B). Surface amount_mismatch /
+// authorized / refund states inline on the shop dashboard cards so
+// owners don't dispatch a problem order. Cancel & Refund is
+// initiated from ShopOrderDetail, not here.
+import PaymentStatusBanner from '../../components/order/PaymentStatusBanner';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
+// PR 3 — concurrency cleanup. authService.refreshClaims used by the
+// role-revocation UX path (admin revoked shopOwner mid-session →
+// refresh claims → role-guard EmptyState renders).
+import { authService } from '../../services/authService';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
 import type { Order } from '../../types';
 import { formatOrderTime, formatRupees } from '../../utils/format';
+import { handleRoleAuthError } from '../../utils/handleRoleAuthError';
 import { OrderStatus } from '../../utils/orderStateMachine';
 import { mapShopOrdersError } from '../../utils/shopOrdersErrorMessage';
 
@@ -57,6 +67,12 @@ export default function ShopOwnerDashboardScreen() {
   const nav = useNavigation<any>();
   const isShopOwner = useAuthStore(s => s.isShopOwner);
   const shopId = useAuthStore(s => s.shopId);
+  // PR 3 — concurrency cleanup (item 4). When the watcher returns
+  // permission-denied, the shopOwner claim was almost certainly
+  // revoked server-side by an admin. Refresh claims so the role
+  // guard above ('Shop owner access required') takes over on the
+  // next render.
+  const setUser = useAuthStore(s => s.setUser);
 
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
@@ -80,6 +96,12 @@ export default function ShopOwnerDashboardScreen() {
         // owner can actually act on. See utils/shopOrdersErrorMessage.
         setError(mapShopOrdersError(err));
         setOrders([]);
+        // PR 3 — fire-and-forget claim refresh on permission-denied
+        // / unauthenticated. No-op on unrelated errors. Once the
+        // refreshed claims hit useAuthStore, the role-guard render
+        // branch above takes over and the user sees the EmptyState
+        // instead of a dead dashboard.
+        void handleRoleAuthError(err, authService.refreshClaims, setUser);
       } else {
         setOrders(list);
         setError(null);
@@ -232,12 +254,12 @@ export default function ShopOwnerDashboardScreen() {
                 <Text style={styles.cardChevron}>›</Text>
               </View>
               <Text style={styles.meta}>
-                {itemCount} item{itemCount > 1 ? 's' : ''} ·{' '}
-                {formatRupees(item.total)}
+                {itemCount} item{itemCount > 1 ? 's' : ''} · {formatRupees(item.total)}
               </Text>
               <Text style={styles.phone}>
                 📞 {item.deliveryAddress?.phone || '—'}
               </Text>
+              <PaymentStatusBanner paymentStatus={item.paymentStatus} />
               <Text style={styles.tapHint}>Tap to view items & take action</Text>
             </Pressable>
           );
