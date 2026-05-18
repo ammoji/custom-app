@@ -44,6 +44,8 @@ const mkOrder = (overrides: Partial<Order> = {}): Order =>
     status: 'pending',
     createdAt: 1_700_000_000_000,
     estimatedDeliveryAt: 1_700_000_000_000 + 30 * 60_000,
+    // PR 12 — readyByEstimate. Defaults to null (legacy semantic).
+    readyByEstimate: null,
     ...overrides,
   }) as Order;
 

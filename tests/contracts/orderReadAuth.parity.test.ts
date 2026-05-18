@@ -58,13 +58,13 @@ const orderPlaced = {
 const orderOfdUnclaimed = {
   customerUid: CUSTOMER,
   shopId: SHOP_A,
-  status: 'out_for_delivery' as const,
+  status: 'ready_for_pickup' as const,
   deliveryPersonId: null,
 };
 const orderOfdClaimed = {
   customerUid: CUSTOMER,
   shopId: SHOP_A,
-  status: 'out_for_delivery' as const,
+  status: 'ready_for_pickup' as const,
   deliveryPersonId: DELIVERY_A,
 };
 
@@ -131,7 +131,7 @@ const matrix: Case[] = [
   },
   // ── Delivery — unassigned pickups board ─────────────────────
   {
-    name: 'delivery person can read unassigned out_for_delivery order',
+    name: 'delivery person can read unassigned ready_for_pickup order',
     uid: DELIVERY_B,
     claims: { delivery: true },
     order: orderOfdUnclaimed,

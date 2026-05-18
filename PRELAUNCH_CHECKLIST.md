@@ -4,6 +4,68 @@ Single source of truth for everything that must happen before real customers
 touch this app. Items grouped by category. Each item annotated with the
 Phase that introduced the requirement.
 
+## 🚀 Production Firebase project setup (separate workstream — before public launch)
+
+**Current state:** The repo has ONE Firebase project, `grocery-mvp-dev`.
+All testing, all family use, all server-side code, and all data live
+there. There is NO separate production project. The `EAS Update`
+production channel is just a client OTA channel; it points at the
+same `grocery-mvp-dev` backend as the preview channel.
+
+This must change before real paying customers touch the app, because
+test/dev data, test Razorpay keys, and dev-grade rules cannot back a
+production deployment. Outline of the work (1–2 days when ready):
+
+- [ ] **Create a fresh Firebase project** (e.g. `grocery-mvp-prod`)
+      under the same Google Cloud account. Enable Blaze plan
+      (required for Cloud Functions).
+- [ ] **Add billing alerts** on the new project so a runaway query or
+      Razorpay webhook storm doesn't surprise the invoice.
+- [ ] **Configure Razorpay LIVE keys** as secrets on the prod project
+      (`firebase functions:secrets:set RAZORPAY_KEY_ID --project
+      grocery-mvp-prod`). Verify the keys start with `rzp_live_` not
+      `rzp_test_`. Also set `RAZORPAY_WEBHOOK_SECRET`.
+- [ ] **Update `.firebaserc`** to alias both projects:
+      ```json
+      { "projects": { "default": "grocery-mvp-dev", "prod": "grocery-mvp-prod" } }
+      ```
+      Then deploys can use `--project prod`.
+- [ ] **Update `app.json`** so `expo.extra.firebase` resolves per
+      EAS channel. Typical pattern: separate `app.config.ts` that
+      reads `process.env.EAS_BUILD_PROFILE` to pick dev vs prod
+      Firebase config blocks. Set the corresponding `EXPO_PUBLIC_*`
+      env vars in `eas.json` per profile.
+- [ ] **Deploy server from scratch to prod:** rules, indexes,
+      functions. Sanity-verify all callables are listed with
+      `firebase functions:list --project prod`.
+- [ ] **Seed prod with admin accounts** using
+      `scripts/set-admin.ts` (one-shot, locally).
+- [ ] **App Check enabled on prod** (see App Check section below for
+      pre-conditions and rollout discipline). Native module setup
+      first, then flip every callable in one PR.
+- [ ] **EAS build a fresh native binary** pointing at prod config.
+      `eas build --profile production --platform all` after the
+      app.config.ts wiring is in place. New `runtimeVersion`
+      fingerprint because Firebase config differs.
+- [ ] **Submit to App Store + Play Store.** First submission, expect
+      review delays (3–7 days each).
+- [ ] **Data migration plan.** Decide which test data carries over.
+      Default: nothing — start prod with a clean slate. Family/test
+      shops + orders stay on dev.
+- [ ] **DNS / branded link** if you want `kiranamart.in` instead of
+      the auto-generated EAS link in marketing material.
+
+**Why this isn't done yet:** the app is still in family-testing
+phase. Creating a prod project before the feature surface is stable
+just creates two backends to keep in sync without commensurate value.
+Revisit when (a) family testing reports go quiet for 1–2 weeks, AND
+(b) you're ready to commit to a public launch date.
+
+**The bogus `--project grocery-mvp-prod` lines in old PR prompts
+(PR 9, PR 12, PR 10-11-12 bundle plan) were a mistake on my part —
+they assumed a prod project existed when it doesn't. If you re-read
+those prompts, skip those lines until the prod setup above is done.**
+
 ## 🔒 Security & Authentication
 
 - [ ] **App Check enforcement** — see the dedicated section below
@@ -359,13 +421,18 @@ callables piecemeal.
       menus won't get them automatically. Either (a) add an admin-only
       `syncCatalogToAllMenus` callable, or (b) extend `addProduct`
       (when we ship it) to fan-out into every active shop's menu.
-- [ ] **Cloud Functions Node.js 20 runtime upgrade** — deprecated
-      2026-04-30, decommissioned 2026-10-30. Bump
-      `functions/package.json` engines to `nodejs22` and re-deploy
-      before late October.
-- [ ] **`firebase-functions` SDK upgrade** — deploy log warned the
-      pinned version is outdated. Run `npm install --save firebase-functions@latest`
-      in `functions/` and review breaking changes before next deploy.
+- [x] **Cloud Functions Node.js 20 runtime upgrade** — bumped
+      `functions/package.json` engines to `node: "22"` in PR 9
+      (May 18 2026). Local build + tests green; staged dev/prod
+      deploys pending (Parts 5–8 of PR 9 are operator-driven).
+- [x] **`firebase-functions` SDK upgrade** — bumped
+      `firebase-functions ^6.0.1 → ^7.2.5` and `firebase-admin
+      ^12.6.0 → ^13.9.0` in PR 9 (May 18 2026). Zero code
+      changes required: every v2 surface we use (`onCall`,
+      `onSchedule`, `onDocumentCreated`, `onDocumentUpdated`,
+      `defineSecret`, `setGlobalOptions`, `HttpsError`,
+      `FieldValue.*`) compiles clean against v7. Staged
+      deploys pending.
 - [ ] **Auto-cancel orders not picked up within X minutes** —
       `cleanupAbandonedOrders` only handles payment-pending. Add a
       sibling scheduled job that finds `out_for_delivery` orders older
@@ -2423,6 +2490,633 @@ builds — but the only way to be sure is to OTA and try the picker on
 a real device. If the picker fails to launch (typical symptom: app
 crashes or shows a "Module not found" red-box), a fresh `eas build`
 is required before family testing can continue.
+
+### PR 12 — Shopkeeper ETA + early delivery visibility + status rename — ✅ CODE COMPLETE May 18 2026
+
+The biggest piece of family-testing feedback. Three coordinated
+changes:
+
+1. **Shopkeeper-provided `readyByEstimate`** field on every order;
+   server enforces it as REQUIRED on accept, OPTIONAL on preparing
+   (mid-prep update path).
+2. **Delivery dashboard early visibility** — partners now see
+   accepted/preparing orders in a "Heads up — coming soon" pool
+   so they can plan routes before the shop signals ready.
+3. **Customer-facing copy preservation** — the internal status
+   `ready_for_pickup` (renamed from `out_for_delivery` in a
+   prior PR) continues to read "Out for delivery" on customer
+   screens via a new `audience` prop on `OrderStatusChip`.
+
+> Note: the `out_for_delivery` → `ready_for_pickup` rename was
+> done end-to-end in Phase 12b. PR 12 only had two leftover spots
+> to fix: the `firestore.rules` delivery-pool clause (still
+> referenced the old name) and the `OrderStatusChip` customer
+> override.
+
+#### Schema (Part 1)
+
+- [x] `Order.readyByEstimate: number | null` added at
+      `@/src/types/index.ts:293-301`. Comment explains null
+      semantic for legacy orders.
+- [x] `toOrder()` coerces `raw.readyByEstimate ?? null` so legacy
+      docs render gracefully (`@/src/services/orderService.ts:82-86`).
+
+#### Status rename touch-ups (Part 2)
+
+The Phase 12b rename was complete in code except for two
+lingering references and the customer-facing copy override.
+
+- [x] **`firestore.rules`** — the delivery-pool clause still
+      referenced `out_for_delivery` (the only place in the
+      whole codebase outside `claude_files/` and docs). Replaced
+      with a broadened clause matching the new server query:
+      `status in {accepted, preparing, ready_for_pickup}` AND
+      `deliveryPersonId == null`. See
+      `@/firestore.rules:147-165`.
+- [x] **Customer-facing copy preserved.** New
+      `audience` prop on `OrderStatusChip`
+      (`@/src/components/order/OrderStatusChip.tsx`) defaults
+      to `'internal'` (admin/shop/delivery render "Ready for
+      Pickup") and overrides to `'customer'` (renders "Out for
+      delivery") via the `CUSTOMER_LABEL_OVERRIDES` map.
+      Wired on `@/src/screens/OrderDetailScreen.tsx:144`.
+      Push-notification `STATUS_TITLES` map in
+      `functions/src/index.ts` continues to send customers
+      "Out for delivery" — already correct.
+
+Audit confirms: `grep -r "out_for_delivery"` finds only this
+PRELAUNCH section, the rules comment block (rename rationale),
+two historical-context comment blocks in `src/types/index.ts`
++ `docs/`, and the untouched `claude_files/` scratch dir.
+
+#### Server-side ETA validation (Part 3)
+
+- [x] **Pure helper** `validateOrderStatusTransition` at
+      `@/functions/src/orderStatusTransitionHelpers.ts`. Same
+      discriminated `{ ok }` posture as
+      `cancelPaidOrderHelpers` / `customerCancelWindowHelpers`.
+      Rules:
+  - `status === 'accepted'`: ETA REQUIRED + finite + future.
+  - `status === 'preparing'`: ETA OPTIONAL; same
+    validation when present (mid-prep update path).
+  - any other transition: ETA dropped (forwards-compat for
+    a v(N+1) client we don't know about yet).
+- [x] **Wired into `updateOrderStatus`**
+      (`@/functions/src/index.ts:452-461, 517-528, 547-574`).
+      Persists `readyByEstimate` on the order doc on validated
+      transitions. Tucks the ETA into the statusHistory entry's
+      `reason` field (`ETA: <ISO>`) when no explicit reason
+      given — admin's "updated from" indicator parses this.
+- [x] **15 unit tests** at
+      `@/tests/functions/orderStatusTransitionHelpers.test.ts`
+      cover: missing/null/string/NaN/Infinity/past/future cases
+      for accept; optional + future cases for preparing;
+      ignored cases for other transitions; boundary case
+      (ETA == now is accepted).
+
+#### Delivery dashboard split (Part 4)
+
+- [x] **Server `listAvailableDeliveries` broadened**
+      (`@/functions/src/index.ts:2417-2446`) — `where('status',
+      'in', AVAILABLE_POOL_STATUSES)` returns the union of
+      {accepted, preparing, ready_for_pickup}. `claimDelivery`
+      still rejects anything that isn't ready_for_pickup, so
+      reading != claiming.
+- [x] **Function-level `canReadOrder` mirrors**
+      (`@/functions/src/getOrderAuth.ts:59-95`). Set lookup
+      across the three pool statuses. PR 8.1's
+      `system → customer` widening stayed; this PR widens
+      again on a different axis.
+- [x] **Client split into `headsUp` + `availableNow`**
+      (`@/src/screens/delivery/DeliveryDashboardScreen.tsx:168-185`).
+      New `HeadsUpCard` component (`@/src/screens/delivery/DeliveryDashboardScreen.tsx:584-636`)
+      with soft-yellow visual treatment (so partners don't
+      mistake it for a claimable card), "Ready by HH:MM"
+      line surfacing the shopkeeper's ETA, and `Tap to view
+      items` hint (no claim affordance).
+
+#### Shopkeeper UI (Part 5 — Option A)
+
+- [x] **ETA prompt modal** wired to Accept (mandatory) +
+      Start Preparing (optional, prefilled with remaining
+      minutes from existing readyByEstimate). Validates
+      1-240 minutes client-side; server is the source of
+      truth. `@/src/screens/shop/ShopOrderDetailScreen.tsx:146-201, 396-460`.
+- [x] **Hook + helper passes ETA through**
+      (`@/src/screens/shop/ShopOrderDetailScreen.useShopOrderDetail.ts:80-112, 132-187`).
+      `readyByEstimate` flows hook → runOrderActionOnce →
+      orderService.updateOrderStatus → callable.
+- [x] **Current ETA card** above the action buttons
+      (`@/src/screens/shop/ShopOrderDetailScreen.tsx:364-374`)
+      so the shop sees what the customer is currently being
+      told before tapping anything.
+
+Tracking Option B (quick-pick chips) as a follow-up PR if shops
+ask. Option A ships now per the prompt's recommendation.
+
+#### Admin summary line (Part 6)
+
+- [x] **"⏰ Ready by HH:MM"** line on every active card
+      (`@/src/screens/admin/AdminOrdersScreen.tsx:251-276`).
+- [x] **"(updated from HH:MM)"** trail when current
+      readyByEstimate diverges from the original
+      accepted-time ETA by more than 30 seconds. Pulls the
+      original from statusHistory[].reason via
+      `findOriginalEta` helper
+      (`@/src/screens/admin/AdminOrdersScreen.tsx:33-59`).
+- [x] **DO NOT REMOVE marker** added to the helper —
+      auto-formatter ate the function declaration once during
+      this PR; rewriting as a `const` arrow + DO NOT REMOVE
+      comment block survived subsequent saves.
+
+#### Customer copy (Part 7)
+
+- [x] **Audience-aware OrderStatusChip** — customer sees
+      "Out for delivery" when internal status is
+      `ready_for_pickup`. Admin/shop/delivery see "Ready for
+      Pickup" via the default `'internal'` audience.
+- [x] **OrderDetailScreen ETA copy** branches on status
+      (`@/src/screens/OrderDetailScreen.tsx:147-167`):
+  - accepted/preparing + readyByEstimate present →
+    "Ready by HH:MM at the shop. Delivery partner will pick
+    up and bring it to you."
+  - other in-flight states → existing minutes-left estimate.
+  - delivered/cancelled → hidden.
+
+#### Backwards-compat (Part 8)
+
+- [x] Every render path that uses `readyByEstimate` first
+      checks `if (order.readyByEstimate)` — null/undefined
+      legacy orders hide the ETA line and fall back to the
+      existing `estimatedDeliveryAt` minutes counter or omit
+      entirely. Pinned by retaining old test fixtures with
+      `readyByEstimate: null` (legacy semantic).
+- [x] No migration script needed.
+
+#### Verification
+
+- `npx tsc --noEmit` (root): **0 errors**.
+- `npx tsc --noEmit` (functions): **0 errors**.
+- `npm test`: **50 suites, 502/502** (479 → +15 ETA helper +
+  +7 PR 11 carry-over + +1 delivery-pool case minus a
+  refactored case).
+- `npm run audit:indexes`: 28 chains / 0 missing. The new
+  `where('status', 'in', [...])` + `where('deliveryPersonId',
+  '==', null)` + `orderBy('createdAt')` query in
+  `listAvailableDeliveries` may need a fresh composite
+  index in production — Firebase will surface the build
+  link in the deploy logs the first time the query runs
+  in prod and a partner is online. Track to verify
+  post-deploy.
+- Deliberate-break: short-circuited the past-timestamp guard
+  with `if (false && …)`. Two tests went red as expected
+  (`rejects accept with past timestamp`,
+  `preparing with past readyByEstimate is rejected`).
+  Reverted; 502 green.
+- One new `DO NOT REMOVE` marker added (Part 6 helper).
+  Auto-formatter resilience continues to hold for everything
+  else.
+
+#### Deploy plan
+
+Server-first per `.windsurf/deploy-discipline.md` because the
+new validation must be live before clients send `readyByEstimate`:
+
+```powershell
+$env:NODE_OPTIONS = "--use-system-ca"
+
+# 1. Functions first.
+cd functions; npm run build; cd ..
+firebase deploy --only functions --project grocery-mvp-dev
+firebase functions:list --project grocery-mvp-dev
+
+# 1a. Rules — broadened delivery-pool clause.
+firebase deploy --only firestore:rules --project grocery-mvp-dev
+
+# 2. TestFlight pointed at dev → run smoke tests below.
+
+# 3. Client OTA (only after dev smoke fully green).
+eas update --branch preview --message "PR 12 shopkeeper ETA workflow"
+
+# 4. Promote.
+eas update --branch production --message "PR 12 shopkeeper ETA workflow"
+
+# 5. Prod functions + rules (only after prod OTA verified).
+firebase deploy --only functions --project grocery-mvp-prod
+firebase deploy --only firestore:rules --project grocery-mvp-prod
+```
+
+#### Smoke tests (dev project first)
+
+1. Customer places order → shop accepts with "Ready in 20 min" →
+   delivery partner's "Heads up" section shows the order with
+   "Ready by [time]" badge → shop marks preparing → partner
+   sees it stay in heads-up → shop marks "Ready for pickup" →
+   moves to partner's "Available now" → claim → pickup → deliver.
+2. Shop accepts with 20 min → updates to 30 min mid-prep →
+   admin's card shows "(updated from [old time])".
+3. Shop tries Accept with 0 min or past → server returns
+   `invalid-argument`; client Alert shows the message.
+4. Find a legacy order (no `readyByEstimate`) → all four
+   screens (customer / shop / admin / delivery) render
+   without "undefined" / "NaN" leaks.
+5. Existing flows: PR 7 cancel-within-2-min, PR 8 bulk
+   menu availability, PR 11 admin timeline expansion — all
+   still pass.
+
+#### Rollback
+
+- Server validation broken → `git revert` PR 12 commit, redeploy
+  functions. v(N-1) client + v(N-1) server is what was running
+  before.
+- Client OTA UI bug → `eas update --branch production
+  --republish [previous-update-id]`. v(N-1) client + vN server
+  works because the server happily ignores extra fields.
+- vN client + v(N-1) server is the **broken** combination —
+  v(N-1) server doesn't know `readyByEstimate` and the
+  callable will reject "Unknown argument". Always deploy
+  server before client; always roll back client before server.
+
+### PR 11 — Admin order timeline view — ✅ CODE COMPLETE May 18 2026
+
+JS-only, OTA-able. Pure read-only UI on `AdminOrdersScreen`.
+Builds confidence that the `statusHistory` data we've been
+writing since PR 2 is end-to-end correct, before PR 12 starts
+mutating it. Zero schema, callable, or rule changes.
+
+#### What shipped
+
+- [x] **Pure helpers extracted to a testable module.**
+      `@/src/utils/orderTimeline.ts` — exports
+      `labelForTimelineStatus(status)` and
+      `formatTimelineActor(by)` plus the `TimelineEntry` type.
+      Kept separate from the React component so the actor-
+      parsing rules and label mapping pin in unit tests
+      without a renderer.
+- [x] **Visual component.**
+      `@/src/components/order/OrderTimeline.tsx` — vertical
+      strip of dots + connector lines on the left, status
+      label + timestamp + actor + optional reason on the
+      right. React Native primitives only (View / Text /
+      StyleSheet). `numberOfLines` clamps on actor (1) and
+      reason (2) to prevent runaway cards.
+- [x] **Disclosure wired on AdminOrdersScreen.**
+      `@/src/screens/admin/AdminOrdersScreen.tsx:50-58, 364-395, 511-518`.
+      New `timelineExpandedId` state, independent of
+      `overrideExpandedId`. Disclosure label shows step
+      count (`▸ Full timeline (5 steps)`) so admins get
+      a hint without expanding. One card open at a time.
+- [x] **Insertion-order rendering.** Comment block
+      explicitly forbids sorting by `at` so back-to-back
+      same-ms writes (cancel + refund_pending in one
+      transaction) stay in the order the server wrote them.
+      `arrayUnion` preserves insertion order in Firestore.
+- [x] **Existing PR 7 blocks preserved.** Delivery substate
+      strip and manual-override disclosure unchanged. New
+      timeline section sits below them with the same
+      `borderTopWidth: 1` separator treatment.
+
+#### Status label coverage
+
+The `statusHistory.status` union is wider than
+`Order['status']`. Pinned in tests:
+
+- Canonical order union: `pending`, `accepted`, `preparing`,
+  `out_for_delivery`, `delivered`, `cancelled`.
+- Payment + refund sub-states: `paid`, `authorized`,
+  `amount_mismatch`, `refund_pending`, `refund_failed`,
+  `refunded`.
+- Unknown tokens fall through to the raw value (no silent
+  drops if the server adds a new state before the client
+  knows about it).
+
+#### Actor parsing rules
+
+`statusHistory[].by` follows two server-side shapes:
+
+- `${role}:${uid}` for human actors → render as
+  `${role}:${uid.slice(0,4)}...` to keep the cell compact
+  and avoid leaking full uids in screenshots.
+- bare token (`system`, `razorpay-webhook`) or short
+  namespaced token (`system:cleanup`,
+  `client-confirm:abc1234` ≤ 8-char suffix) → render verbatim.
+
+The 8-char threshold is the heuristic that distinguishes
+"short namespaced token" from "uid". Pinned in
+`@/tests/utils/orderTimeline.test.ts:14-50`.
+
+#### Verification
+
+- `npx tsc --noEmit` (root + functions): **0 errors**.
+- `npm test`: **49 suites, 486/486** (479 → +7 PR 11 cases
+  covering uid truncation, namespaced tokens, bare tokens,
+  empty/null fallback, all status labels, unknown-status
+  fallback).
+- `npm run audit:indexes`: 28 chains / 0 missing.
+- Deliberate-break: changed expected uppercase-role
+  assertion → red as expected (`Expected: "CUSTOMER:7Xkj..."
+  Received: "customer:7Xkj..."`) → reverted; 486 green.
+- One new `DO NOT REMOVE` comment in
+  `@/src/screens/admin/AdminOrdersScreen.tsx:15-16` for the
+  OrderTimeline import block — added defensively because
+  the file had a history of auto-formatter import strips
+  before PR 8.1 / PR 9 fixed it. Could be removed once we
+  confirm via a few editor saves that the formatter still
+  isn't re-stripping; tracking as a low-priority follow-up.
+
+#### Deferred
+
+- [ ] **Component-render snapshot test.** Repo has no
+      `*.test.tsx` infrastructure (jest unit config doesn't
+      pull in react-native renderer). Spinning up
+      react-native-testing-library just for one timeline
+      snapshot wasn't worth the dependency surface this PR.
+      The pure-helper tests cover the logic; the visual
+      surface is exercised by the manual smoke tests below.
+      Track as a follow-up if we land more component-only
+      logic that can't be extracted to pure helpers.
+
+#### Smoke tests on preview phone
+
+1. **Fresh order.** Card shows status chip + placed
+   timestamp + `▸ Full timeline (1 steps)` disclosure.
+   Expand → single `Pending · <time> · by system` row.
+2. **Full lifecycle.** Place → accept → prepare →
+   out_for_delivery → claim → pickup → deliver. After each
+   transition the disclosure step-count and timeline grow
+   by one; actors show as `shopOwner:JK2L...`,
+   `delivery:9Mxs...`, etc.
+3. **Customer cancel within 2-min window** (PR 7).
+   Timeline entry shows `by customer:XXXX...` (PR 8.1's
+   role widening flowing through end-to-end).
+4. **Admin cancel + refund.** Three rapid entries —
+   `cancelled`, `refund_pending`, `refunded` — appear in
+   server insertion order with refund reason rendered in
+   italic below.
+5. **Long timeline (8+ entries).** Card height grows
+   smoothly; no clipping; FlatList scroll still works.
+
+#### Deploy plan
+
+Pure client OTA. No `functions/` deploy.
+
+```powershell
+npm test
+eas update --branch preview --message "PR 11 admin order timeline"
+# preview smoke
+eas update --branch production --message "PR 11 admin order timeline"
+```
+
+### PR 10 — Quickwins bundle (shop radius + required name + Resend OTP) — ✅ CODE COMPLETE May 18 2026
+
+JS-only OTA bundle. Three small fixes that the test team needs at
+once instead of three sequential reopen cycles.
+
+#### Part 1 — Open shop radius for cross-city testing
+
+- [x] **`SHOW_ALL_SHOPS = true`** replaces the
+      `FORCE_SHOW_ALL_SHOPS_IN_DEV = __DEV__` flag in
+      `@/src/services/shopService.ts:9-18`. The old flag was
+      `false` in TestFlight production builds, which is why
+      Bangalore + Mumbai testers saw zero shops past each
+      other. Comment block explains the testing-phase
+      rationale and how to flip back at real-customer launch.
+- [x] **Both branches updated.** Web Firestore path
+      (`@/src/services/shopService.ts:42-45`) and native
+      callable path (`@/src/services/shopService.ts:49-52`)
+      both gate on the new flag. `NEAR_KM = 1` constant kept
+      so the 1-km behaviour is one-line restorable.
+- [x] **Server: no change required.** `listShopsPublic`
+      callable at `@/functions/src/index.ts:4349-4365`
+      returns ALL active shops decorated with `distanceKm`
+      and sorted; the radius filter has always been client-
+      side. Confirmed via grep before editing.
+
+#### Part 2 — Required full name on profile
+
+- [x] **Server `validateProfilePatch` flipped.**
+      `@/functions/src/profileHelpers.ts:84-116`. Previously
+      `name: null | ''` collapsed to `null` ("clear it");
+      now any patch that includes the `name` key must carry
+      a non-empty trimmed string, otherwise the helper
+      returns
+      `{ ok: false, field: 'name', message: 'Full name is required' }`.
+      Patches that don't include `name` at all (e.g. the
+      "update email only" flow) still pass — existing users
+      with `name` already set keep working.
+- [x] **`email` carve-out preserved.** Email is still
+      optional and `null/''` still collapses to `null`. The
+      doc-comment now explicitly contrasts the two fields.
+- [x] **Client `ProfileScreen` UX.**
+      `@/src/screens/ProfileScreen.tsx:105-138` —
+      `onSaveProfile` early-returns with an Alert when name
+      is blank; sends `name: name.trim()` (no `|| null`
+      fallback) on success. Save button disabled when
+      `name.trim().length === 0`
+      (`@/src/screens/ProfileScreen.tsx:280`). Red asterisk
+      on the "Full name" label and a "Required" helper line
+      below the input
+      (`@/src/screens/ProfileScreen.tsx:249-258`).
+- [x] **Phone field already readonly.** Wrapped in
+      `readOnlyField` View, not an `Input`, so the user
+      can't edit it. No change needed.
+- [x] **Tests pinned.**
+      `@/tests/functions/profileValidation.test.ts:73-94` —
+      three new cases: empty string, null, whitespace-only.
+      Old "null and '' both clear the field" test rewritten
+      to `email-only: …` to keep coverage of the email
+      carve-out
+      (`@/tests/functions/profileValidation.test.ts:57-67`).
+
+**Deferred (scoped out per the prompt's escape hatch):**
+
+- [ ] **First-sign-in profile gate.** After OTP confirm, if
+      `profile.name` is empty, route to ProfileScreen with
+      `requiredSetup: true` and hide the back button until
+      saved. Server-side rejection covers the worst case
+      today (an empty-name save fails loudly), but the UX
+      is still: tap Profile → see asterisk → fill in. A new
+      OTP'd user who never opens Profile won't be forced.
+      Track as a Phase-of-testing follow-up.
+
+#### Part 3 — Resend OTP button (already on disk, ships with this PR)
+
+- [x] **Diff-checked.** `git diff src/screens/LoginScreen.tsx`
+      against HEAD returned empty — the staged work was
+      already merged in a previous session. All seven spec
+      items verified present:
+      `RESEND_COOLDOWN_SECS = 30`
+      (`@/src/screens/LoginScreen.tsx:21`),
+      `resendCooldown` state + `useEffect` countdown
+      (`@/src/screens/LoginScreen.tsx:35-59`), `onResendOtp`
+      handler with `auth/too-many-requests` catch
+      (`@/src/screens/LoginScreen.tsx:89-115`), Pressable
+      "Resend OTP" link with cooldown copy
+      (`@/src/screens/LoginScreen.tsx:200-215`),
+      `linkDisabled` style applied at line 209, diagnostic
+      `console.error` in `onConfirmOtp` catch
+      (`@/src/screens/LoginScreen.tsx:136-140`).
+
+#### Verification
+
+- `npx tsc --noEmit` (root): **0 errors**.
+- `npx tsc --noEmit` (functions): **0 errors**.
+- `npm test`: **48 suites, 479/479** (476 → +3 new PR 10
+  cases for empty/null/whitespace name).
+- `npm run audit:indexes`: 28 chains / 8 composite / 0 missing.
+- Deliberate-break: flipped expected message on the
+  empty-name test → red as expected
+  (`Expected: "Name is optional and may be cleared"
+  Received: "Full name is required"`) → reverted; 479 green.
+- Zero new `DO NOT REMOVE` markers (PR 8.1 / PR 9 fix held).
+
+#### Deploy plan
+
+JS-only OTA. No `functions/` runtime change is strictly
+needed (the validateProfilePatch tightening compiles into
+existing function bodies but the callable already deploys
+on every push). Recommend bundling with the upcoming PR 9
+functions deploy:
+
+```powershell
+$env:NODE_OPTIONS = "--use-system-ca"
+
+# 1. Functions (rolls in the validateProfilePatch tightening).
+cd functions; npm run build; cd ..
+firebase deploy --only functions --project grocery-mvp-dev
+
+# 2. Client OTA.
+npm test
+eas update --branch preview --message "PR 10 quickwins"
+
+# 3. Smoke test on preview channel, then promote.
+eas update --branch production --message "PR 10 quickwins"
+```
+
+#### Smoke tests on preview phone
+
+1. Bangalore + Mumbai testers both see every active shop
+   (no longer 0 results outside their city).
+2. Open Profile → red asterisk on "Full name" + "Required"
+   helper visible. Clear name → Save button greys out.
+   Tap-and-hold to bypass disable → Alert "Name required".
+3. Existing user with name already set: full flow still
+   works, including update-email-only saves.
+4. Curl `updateMyProfile` with `{name: ''}` directly →
+   `invalid-argument: name: Full name is required`.
+5. Resend OTP cooldown countdown visible after sending OTP;
+   tap before 0 = no-op; tap at 0 = new SMS arrives, timer
+   resets to 30.
+
+### PR 9 — Node 22 + firebase-functions/admin SDK upgrade — ⏸ CODE COMPLETE, DEPLOY PENDING (May 18 2026)
+
+Server-only PR. Three coordinated bumps driven by Google Cloud's
+Node 20 deprecation calendar (deprecated 2026-04-30, decommissioned
+2026-10-30 — after which no new deploys are accepted on Node 20).
+
+**Resolved versions:**
+
+| package | before | after |
+| --- | --- | --- |
+| `firebase-admin` | `12.7.0` | `13.9.0` |
+| `firebase-functions` | `6.6.0` | `7.2.5` |
+| `razorpay` | `2.9.6` | `2.9.6` (out of scope) |
+| Cloud Functions runtime | `nodejs20` | `nodejs22` |
+
+**Fix list (Part 2): empty.**
+
+The major bumps (admin v12 → v13, functions v6 → v7) compiled
+clean against the entire `functions/src/` tree on the first try.
+Every high-risk surface enumerated in the prompt was verified
+against the new types:
+
+- `defineSecret` × 4 (RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET,
+  RAZORPAY_WEBHOOK_SECRET, FCM_SERVER_KEY) → unchanged.
+- `setGlobalOptions({ region: 'asia-south1' })` → unchanged.
+- `onCall`, `HttpsError(code, message)` × ~30 callables → unchanged.
+- `onSchedule({ schedule, timeZone, ...}, async event => ...)` for
+  `cleanupAbandonedOrders` → unchanged.
+- `onDocumentCreated` × 2, `onDocumentUpdated` × 3 →
+  `event.data.data()` accessor pattern still valid.
+- `firebase-admin`: `initializeApp`, `getAuth`, `getFirestore`,
+  `getStorage`, `FieldValue.serverTimestamp()`,
+  `FieldValue.arrayUnion()`, `FieldValue.arrayRemove()`,
+  `FieldValue.increment()` → unchanged.
+
+Zero `// @ts-ignore`/`// @ts-expect-error` added.
+
+**Verification (Parts 3-4):**
+
+- `cd functions; npx tsc --noEmit` → **0 errors**.
+- `cd ..; npx tsc --noEmit` → **0 errors** (PR 8.1 baseline preserved).
+- `npm test` → **48 suites, 476/476** green.
+- `npm run audit:indexes` → 28 chains / 8 composite / 0 missing.
+- Zero new `DO NOT REMOVE` comments needed (PR 8.1 prep held).
+
+**Install gotchas observed:**
+
+- `npm install --save firebase-admin@latest firebase-functions@latest`
+  failed with `ERESOLVE` because the bare-`@latest` tag tried to
+  pull `firebase-admin@13.10.0`, which doesn't yet exist on the
+  registry — `npm view firebase-admin version` returns `13.9.0`.
+  Likely an npm tag-cache quirk. Pinning explicit versions
+  (`firebase-admin@13.9.0 firebase-functions@7.2.5`) resolved
+  cleanly.
+- `npm install` failed with `UNABLE_TO_VERIFY_LEAF_SIGNATURE`
+  until `$env:NODE_OPTIONS = "--use-system-ca"` was set (same
+  corporate-CA workaround already documented for `firebase
+  deploy` in `.windsurf/deploy-discipline.md`).
+- `npm warn EBADENGINE` because local Node is v24, package now
+  requires v22. Cosmetic — only the Cloud Functions runtime
+  enforces engines; local build still works on v24.
+
+**Deferred to operator (Parts 5-8):**
+
+These steps require running Firebase CLI against live projects
+and were not executed by the assistant:
+
+- [ ] **Part 5 — Local emulator smoke.** `cd functions; npm run
+      serve` then exercise `placeOrder` (COD), `cancelMyPendingOrder`,
+      `listMyOrders` via `firebase functions:shell`.
+- [ ] **Part 6 — Dev deploy.**
+      ```powershell
+      $env:NODE_OPTIONS = "--use-system-ca"
+      cd functions; npm run build; cd ..
+      firebase deploy --only functions --project grocery-mvp-dev
+      firebase functions:list --project grocery-mvp-dev
+      ```
+      Confirm function count matches pre-deploy (~30) and console
+      shows `runtime: nodejs22` on at least one function.
+- [ ] **Part 7 — Dev smoke tests.** Place online order →
+      Razorpay payment → confirmation; cancel within 2-min window
+      (PR 7); admin suspendShop/unsuspendShop; wait for next
+      `cleanupAbandonedOrders` cron tick; grep
+      `firebase functions:log` for `unhandled|deprecation|error`.
+- [ ] **Part 8 — Prod deploy.** Only after Part 7 fully green:
+      `firebase deploy --only functions --project grocery-mvp-prod`,
+      then `firebase functions:list` + console runtime spot-check.
+
+**Rollback plan (if prod deploy breaks):**
+
+1. Targeted redeploy of the broken callable.
+2. Revert PR 9 commit, `npm install` (restores `firebase-admin@12`
+   + `firebase-functions@6` + Node 20 engine), redeploy.
+   Buys time until late October before runtime decom forces
+   re-attempt.
+3. Worst case: Firebase Console "revert to previous version" per
+   function (slow but guaranteed).
+
+Don't roll back on transient noise — only on a reproducible
+callable category failure.
+
+**Out of scope (confirmed):**
+
+- Razorpay SDK bump — pinned at `^2.9.4`, separate PR if needed.
+- TypeScript bump — `^5.6.0` is fine for Node 22 + functions v7.
+- v1/v2 boundary refactor — already 100% v2.
+- App Check enable — tracked separately (see
+  "App Check enforcement (intentionally deferred)" section above).
+- Splitting `index.ts` — separate refactor.
 
 ### PR 8.1 — Cleanup bundle — ✅ SHIPPED May 18 2026
 

@@ -50,8 +50,18 @@ export type GetOrderAuthInput = {
  *   3. The shop owner whose shopId claim matches order.shopId
  *   4. The delivery person already assigned to this order
  *   5. Any delivery person, IF the order is unassigned and
- *      currently out_for_delivery (the "available pickups" board)
+ *      currently in the available pool: `accepted` |
+ *      `preparing` | `ready_for_pickup` (PR 12 broadened this from
+ *      ready_for_pickup-only to give partners early visibility for
+ *      route planning; claimDelivery still rejects anything that
+ *      isn't ready_for_pickup, so reading != claiming).
  */
+const DELIVERY_POOL_STATUSES = new Set<string>([
+  'accepted',
+  'preparing',
+  'ready_for_pickup',
+]);
+
 export function canReadOrder(input: GetOrderAuthInput): boolean {
   const { uid, claims, order } = input;
   const isOwner =
@@ -76,7 +86,8 @@ export function canReadOrder(input: GetOrderAuthInput): boolean {
       return true;
     }
     if (
-      order.status === 'out_for_delivery' &&
+      typeof order.status === 'string' &&
+      DELIVERY_POOL_STATUSES.has(order.status) &&
       (order.deliveryPersonId == null || order.deliveryPersonId === '')
     ) {
       return true;

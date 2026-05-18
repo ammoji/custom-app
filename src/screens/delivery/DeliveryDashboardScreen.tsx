@@ -69,6 +69,10 @@ export default function DeliveryDashboardScreen() {
   const [togglingOnline, setTogglingOnline] = useState(false);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [showAvailable, setShowAvailable] = useState(true);
+  // PR 12 — "heads up" pool (accepted/preparing) shown above the
+  // claimable section so partners can plan ahead. Defaults open
+  // because the whole point of the feature is early visibility.
+  const [showHeadsUp, setShowHeadsUp] = useState(true);
   const [showMine, setShowMine] = useState(true);
   // Delivery History defaults collapsed — it's reference data, not
   // action data. The partner shouldn't have to scroll past it to
@@ -148,7 +152,7 @@ export default function DeliveryDashboardScreen() {
       if (o.status === 'delivered' && isToday(o.deliveredAt ?? 0)) {
         completedToday += 1;
       }
-      if (o.status === 'out_for_delivery') active += 1;
+      if (o.status === 'ready_for_pickup') active += 1;
     }
     return { completedToday, active };
   }, [mine]);
@@ -157,8 +161,27 @@ export default function DeliveryDashboardScreen() {
   // intentionally hide already-delivered orders from the active list
   // so the screen doesn't accumulate cruft over the day.
   const activeMine = useMemo(
-    () => mine.filter(o => o.status === 'out_for_delivery'),
+    () => mine.filter(o => o.status === 'ready_for_pickup'),
     [mine],
+  );
+
+  // PR 12 — the server `listAvailableDeliveries` callable now returns
+  // the union of {accepted, preparing, ready_for_pickup} that nobody
+  // has claimed yet. Split client-side:
+  //   - headsUp (accepted | preparing) — NOT claimable yet; shown
+  //     so partners can plan routes / batches before the shop
+  //     signals "ready".
+  //   - availableNow (ready_for_pickup) — the existing claim pool.
+  const headsUp = useMemo(
+    () =>
+      available.filter(
+        o => o.status === 'accepted' || o.status === 'preparing',
+      ),
+    [available],
+  );
+  const availableNow = useMemo(
+    () => available.filter(o => o.status === 'ready_for_pickup'),
+    [available],
   );
 
   // Delivery History = orders this partner has delivered, newest
@@ -243,7 +266,7 @@ export default function DeliveryDashboardScreen() {
     // handlePickedUp. We compare the optimistic status — 'delivered'
     // — against current; if a watcher already moved the order to a
     // DIFFERENT status (cancelled by admin, for instance), the
-    // rollback to 'out_for_delivery' would be wrong.
+    // rollback to 'ready_for_pickup' would be wrong.
     const optimisticDeliveredAt = Date.now();
     setMine(prev =>
       prev.map(o =>
@@ -273,7 +296,7 @@ export default function DeliveryDashboardScreen() {
         }
         return prev.map(o =>
           o.id === order.id
-            ? { ...o, status: 'out_for_delivery', deliveredAt: null }
+            ? { ...o, status: 'ready_for_pickup', deliveredAt: null }
             : o,
         );
       });
@@ -325,7 +348,7 @@ export default function DeliveryDashboardScreen() {
         </View>
       )}
       <FlatList
-        data={showAvailable ? available : []}
+        data={showAvailable ? availableNow : []}
         keyExtractor={o => `avail-${o.id}`}
         contentContainerStyle={styles.list}
         ItemSeparatorComponent={() => <View style={{ height: spacing.md }} />}
@@ -435,13 +458,44 @@ export default function DeliveryDashboardScreen() {
                 </View>
               ))}
 
+            {/* PR 12 — Heads up section: accepted / preparing
+                orders the shop hasn't yet flipped to
+                ready_for_pickup. Visual treatment differs from
+                Available Pickups (no "Tap to accept" hint, no
+                claim affordance) so partners don't try to
+                pre-commit. Tapping opens detail; the detail screen
+                shows the pickup is not yet claimable. */}
             <SectionHeader
-              title="Available Pickups"
+              title="Heads up — coming soon"
+              expanded={showHeadsUp}
+              onToggle={() => setShowHeadsUp(s => !s)}
+              count={headsUp.length}
+            />
+            {showHeadsUp && headsUp.length === 0 && (
+              <EmptyState
+                title="No upcoming pickups"
+                subtitle="Accepted / preparing orders will appear here so you can plan routes ahead."
+              />
+            )}
+            {showHeadsUp &&
+              headsUp.map(o => (
+                <View key={`heads-${o.id}`} style={{ marginBottom: spacing.md }}>
+                  <HeadsUpCard
+                    order={o}
+                    onPress={() =>
+                      nav.navigate('DeliveryOrderDetail', { orderId: o.id })
+                    }
+                  />
+                </View>
+              ))}
+
+            <SectionHeader
+              title="Available now"
               expanded={showAvailable}
               onToggle={() => setShowAvailable(s => !s)}
-              count={available.length}
+              count={availableNow.length}
             />
-            {showAvailable && available.length === 0 && (
+            {showAvailable && availableNow.length === 0 && (
               <EmptyState
                 title="No pickups available"
                 subtitle={
@@ -509,6 +563,76 @@ function Stat({
       </Text>
       <Text style={styles.statLabel}>{label}</Text>
     </View>
+  );
+}
+
+/**
+ * PR 12 — HeadsUpCard.
+ *
+ * Visually distinct from AvailablePickupCard so partners don't
+ * mistake an accepted/preparing order (NOT claimable yet) for an
+ * available-now pickup. Differences:
+ *   - "Coming soon" pill instead of the implicit available state.
+ *   - "Ready by HH:MM" line surfaces the shopkeeper's ETA so the
+ *     partner can plan routes / batches.
+ *   - "Tap to view items" hint (no mention of accept) — claim
+ *     happens later, only on the Available now section.
+ *
+ * No optimistic claim here. Tapping opens DeliveryOrderDetail,
+ * which shows the not-yet-claimable state cleanly.
+ */
+function HeadsUpCard({
+  order,
+  onPress,
+}: {
+  order: Order;
+  onPress: () => void;
+}) {
+  const itemCount = order.items.reduce((n, i) => n + i.quantity, 0);
+  const stateLabel =
+    order.status === 'preparing' ? 'Shop preparing' : 'Shop accepted';
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`Upcoming pickup for ${order.shopName}`}
+      style={({ pressed }) => [
+        styles.card,
+        styles.headsUpCard,
+        pressed && styles.cardBodyPressed,
+      ]}
+    >
+      <View style={styles.cardHeader}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.shopName} numberOfLines={1}>
+            {order.shopName}
+          </Text>
+          <Text style={styles.headsUpState}>{stateLabel}</Text>
+        </View>
+        <Text style={styles.cardChevron}>›</Text>
+      </View>
+      {order.readyByEstimate ? (
+        <Text style={styles.headsUpEta}>
+          ⏰ Ready by {formatOrderTime(order.readyByEstimate)}
+        </Text>
+      ) : (
+        <Text style={styles.headsUpEta}>
+          ⏰ ETA not yet set by the shop
+        </Text>
+      )}
+      <Text style={styles.address} numberOfLines={2}>
+        Drop: {order.deliveryAddress.line1}
+        {order.deliveryAddress.line2
+          ? `, ${order.deliveryAddress.line2}`
+          : ''}
+        , {order.deliveryAddress.pincode}
+      </Text>
+      <Text style={styles.meta}>
+        {itemCount} item{itemCount > 1 ? 's' : ''} ·{' '}
+        {formatRupees(order.total)}
+      </Text>
+      <Text style={styles.tapHint}>Tap to view items</Text>
+    </Pressable>
   );
 }
 
@@ -741,6 +865,23 @@ const styles = StyleSheet.create({
     marginBottom: spacing.xs,
   },
   cardBodyPressed: { opacity: 0.7 },
+  // PR 12 — heads-up card visual treatment. Soft yellow tint
+  // distinguishes from the active blue/green Available cards so
+  // partners don't mistake one for the other at a glance.
+  headsUpCard: {
+    backgroundColor: '#FEF9E7',
+    borderColor: '#F4D03F',
+  },
+  headsUpState: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  headsUpEta: {
+    ...typography.bodyBold,
+    color: colors.primaryDark,
+    marginTop: spacing.xs,
+  },
   cardChevron: {
     ...typography.h2,
     color: colors.textSecondary,

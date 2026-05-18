@@ -28,6 +28,8 @@ import { validateAllItemsInSameShop } from './cartIntegrityHelpers';
 // If tsc complains "Cannot find name 'canCustomerCancelPaidOrder'",
 // re-add this line.
 import { canCustomerCancelPaidOrder } from './customerCancelWindowHelpers';
+// PR 12 — DO NOT REMOVE. Used by `updateOrderStatus` callable below.
+import { validateOrderStatusTransition } from './orderStatusTransitionHelpers';
 // PR 6.1 — DO NOT REMOVE. Used by `getMenuImageUploadUrl` callable.
 // Auto-formatter stripped this once during PR 6.1 development.
 import { validateGetUploadUrlInput } from './menuImageUploadHelpers';
@@ -130,15 +132,15 @@ type OrderStatus =
   | 'pending'
   | 'accepted'
   | 'preparing'
-  | 'out_for_delivery'
+  | 'ready_for_pickup'
   | 'delivered'
   | 'cancelled';
 
 const VALID_ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   pending: ['accepted', 'cancelled'],
   accepted: ['preparing', 'cancelled'],
-  preparing: ['out_for_delivery', 'cancelled'],
-  out_for_delivery: ['delivered'],
+  preparing: ['ready_for_pickup', 'cancelled'],
+  ready_for_pickup: ['delivered'],
   delivered: [],
   cancelled: [],
 };
@@ -429,7 +431,7 @@ export const placeOrder = onCall<PlaceOrderInput>(
       // to null at create-time is REQUIRED so the
       // listAvailableDeliveries query (where deliveryPersonId == null)
       // can find this order once the shop owner moves it to
-      // out_for_delivery. Firestore equality on missing fields
+      // ready_for_pickup. Firestore equality on missing fields
       // doesn't work, hence the explicit null.
       deliveryPersonId: null,
       pickedUpAt: null,
@@ -453,6 +455,11 @@ type UpdateOrderStatusInput = {
   orderId: string;
   newStatus: OrderStatus;
   reason?: string;
+  // PR 12 — shopkeeper-provided ETA. REQUIRED when newStatus ===
+  // 'accepted'; OPTIONAL when newStatus === 'preparing' (used to
+  // update the ETA mid-prep). Ignored on all other transitions.
+  // Validation in `validateOrderStatusTransition` (pure helper).
+  readyByEstimate?: number;
 };
 
 export const updateOrderStatus = onCall<UpdateOrderStatusInput>(
@@ -509,6 +516,19 @@ export const updateOrderStatus = onCall<UpdateOrderStatusInput>(
       );
     }
 
+    // PR 12 — ETA validation. Pure helper enforces:
+    //   - accepted: readyByEstimate REQUIRED + future
+    //   - preparing: readyByEstimate OPTIONAL + future when present
+    //   - other transitions: drop whatever the client sent
+    const etaCheck = validateOrderStatusTransition({
+      status: newStatus,
+      readyByEstimate: request.data.readyByEstimate,
+      now: Date.now(),
+    });
+    if (!etaCheck.ok) {
+      throw new HttpsError(etaCheck.code, etaCheck.message);
+    }
+
     // PR 2 — payment hardening (item 1 part 2). Cancelling a PAID
     // order via this callable would mark the order cancelled while
     // money stays with the merchant — no Razorpay refund call, no
@@ -528,14 +548,30 @@ export const updateOrderStatus = onCall<UpdateOrderStatusInput>(
 
     const now = Date.now();
     const actorRole = isAdmin ? 'admin' : 'shopOwner';
+    // PR 12 — stamp readyByEstimate on the order doc when the
+    // helper validated one. We also tuck it into the
+    // statusHistory entry's `reason` field for audit purposes
+    // (e.g. `ETA: 6:45 PM`) when the caller didn't pass an
+    // explicit reason — the timeline view surfaces this for
+    // "updated from" indicators.
+    const etaUpdate =
+      etaCheck.readyByEstimate !== undefined
+        ? { readyByEstimate: etaCheck.readyByEstimate }
+        : {};
+    const historyReason =
+      reason ??
+      (etaCheck.readyByEstimate !== undefined
+        ? `ETA: ${new Date(etaCheck.readyByEstimate).toISOString()}`
+        : undefined);
     await ref.update({
       status: newStatus,
+      ...etaUpdate,
       updatedAt: FieldValue.serverTimestamp(),
       statusHistory: FieldValue.arrayUnion({
         status: newStatus,
         at: now,
         by: `${actorRole}:${auth.uid}`,
-        ...(reason ? { reason } : {}),
+        ...(historyReason ? { reason: historyReason } : {}),
       }),
     });
 
@@ -2099,7 +2135,7 @@ const ORDER_STATUS_LABELS: Record<string, string> = {
   pending: 'Order received',
   accepted: 'Order accepted',
   preparing: 'Preparing your order',
-  out_for_delivery: 'Out for delivery',
+  ready_for_pickup: 'Out for delivery',
   delivered: 'Order delivered',
   cancelled: 'Order cancelled',
 };
@@ -2357,9 +2393,9 @@ export const sendNewOrderPushToShop = onDocumentCreated(
 // ────────────────────────────────────────────────────────────
 //
 // State encoding (no new statuses; existing state machine is unchanged):
-//   out_for_delivery + deliveryPersonId=null              → available pickup
-//   out_for_delivery + deliveryPersonId=X + pickedUpAt=null → claimed
-//   out_for_delivery + deliveryPersonId=X + pickedUpAt=ts  → en route
+//   ready_for_pickup + deliveryPersonId=null              → available pickup
+//   ready_for_pickup + deliveryPersonId=X + pickedUpAt=null → claimed
+//   ready_for_pickup + deliveryPersonId=X + pickedUpAt=ts  → en route
 //   delivered                                              → done
 //
 // Online presence: users/{uid}.deliveryStatus ('online' | 'offline')
@@ -2378,13 +2414,29 @@ function requireDeliveryRole(
   return { uid: auth.uid };
 }
 
+// PR 12 — broaden the "available pool" to include `accepted` and
+// `preparing` orders that don't yet have a delivery partner. The
+// client splits the result into:
+//   - "Heads up" (accepted | preparing) → not claimable yet, but
+//     visible with the readyByEstimate badge so partners can plan
+//     routes / batches.
+//   - "Available now" (ready_for_pickup) → tapping claims.
+// claimDelivery still rejects anything that isn't ready_for_pickup,
+// so a malicious / racing client can't claim an order before the
+// shop signals it's done.
+const AVAILABLE_POOL_STATUSES = [
+  'accepted',
+  'preparing',
+  'ready_for_pickup',
+] as const;
+
 export const listAvailableDeliveries = onCall(
   { cors: true, enforceAppCheck: false },
   async request => {
     requireDeliveryRole(request);
     const snap = await db
       .collection('orders')
-      .where('status', '==', 'out_for_delivery')
+      .where('status', 'in', AVAILABLE_POOL_STATUSES as unknown as string[])
       .where('deliveryPersonId', '==', null)
       .orderBy('createdAt', 'asc') // oldest first — fairer for shops
       .limit(50)
@@ -2432,7 +2484,7 @@ export const claimDelivery = onCall<{ orderId: string }>(
         status: OrderStatus;
         deliveryPersonId: string | null;
       };
-      if (order.status !== 'out_for_delivery') {
+      if (order.status !== 'ready_for_pickup') {
         throw new HttpsError(
           'failed-precondition',
           'Order not ready for pickup',
@@ -2448,7 +2500,7 @@ export const claimDelivery = onCall<{ orderId: string }>(
         deliveryPersonId: uid,
         updatedAt: FieldValue.serverTimestamp(),
         statusHistory: FieldValue.arrayUnion({
-          status: 'out_for_delivery',
+          status: 'ready_for_pickup',
           at: Date.now(),
           by: `delivery:${uid}`,
           reason: 'Delivery partner claimed',
@@ -2492,7 +2544,7 @@ export const markPickedUp = onCall<{ orderId: string }>(
       pickedUpAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
       statusHistory: FieldValue.arrayUnion({
-        status: 'out_for_delivery',
+        status: 'ready_for_pickup',
         at: now,
         by: `delivery:${uid}`,
         reason: 'Picked up from shop',
@@ -2528,7 +2580,7 @@ export const markDelivered = onCall<{ orderId: string }>(
     if (order.status === 'delivered') {
       return { ok: true, alreadySet: true };
     }
-    if (order.status !== 'out_for_delivery') {
+    if (order.status !== 'ready_for_pickup') {
       throw new HttpsError(
         'failed-precondition',
         `Cannot deliver from status ${order.status}`,
@@ -2582,11 +2634,11 @@ export const sendNewPickupPushToDelivery = onDocumentUpdated(
     const before = event.data?.before.data();
     const after = event.data?.after.data();
     if (!before || !after) return;
-    // Fire only on the transition INTO out_for_delivery, not on
+    // Fire only on the transition INTO ready_for_pickup, not on
     // subsequent updates (pickup / delivery) of the same order.
     if (
-      before.status === 'out_for_delivery' ||
-      after.status !== 'out_for_delivery'
+      before.status === 'ready_for_pickup' ||
+      after.status !== 'ready_for_pickup'
     ) {
       return;
     }
@@ -3498,13 +3550,13 @@ export const revokeDelivery = onCall<{ uid: string; reason?: string }>(
     // Reassign in-flight deliveries by clearing deliveryPersonId.
     // Other delivery partners can then claim via claimDelivery. We
     // DON'T cancel the orders — too disruptive for the customer who
-    // already paid. The status stays out_for_delivery; the
+    // already paid. The status stays ready_for_pickup; the
     // listAvailableDeliveries query treats deliveryPersonId==null as
     // "available" so this re-enters the pickup pool.
     const inflightSnap = await db
       .collection('orders')
       .where('deliveryPersonId', '==', uid)
-      .where('status', '==', 'out_for_delivery')
+      .where('status', '==', 'ready_for_pickup')
       .get();
     const reassignedOrderIds: string[] = [];
     if (!inflightSnap.empty) {

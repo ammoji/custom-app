@@ -13,9 +13,13 @@ service cloud.firestore {
              && request.auth.token.shopOwner == true
              && request.auth.token.shopId == shopId;
     }
-    // Phase 12b: any user with the delivery claim. Combined with the
-    // status==out_for_delivery + deliveryPersonId==null clause below,
-    // this lets delivery people see ONLY available pickups.
+    // Phase 12b / PR 12: any user with the delivery claim. Combined
+    // with the broadened pool clause below
+    // (status in {accepted, preparing, ready_for_pickup} +
+    // deliveryPersonId==null), this lets delivery people see every
+    // unclaimed order in the prep pipeline so they can plan ahead;
+    // claiming is still gated to status==ready_for_pickup server-
+    // side via claimDelivery.
     function isDeliveryPerson() {
       return isSignedIn() && request.auth.token.delivery == true;
     }
@@ -144,8 +148,20 @@ service cloud.firestore {
                   || isAdmin()
                   || isShopOwnerOf(resource.data.shopId)
                   || isDeliveryAssignedToThisOrder()
+                  // PR 12 — broaden the delivery pool: partners now
+                  // see accepted/preparing/ready_for_pickup orders
+                  // that aren't yet claimed, so they can plan ahead.
+                  // Claim is still gated to ready_for_pickup
+                  // server-side; reading != claiming. Also note the
+                  // status rename: `out_for_delivery` was renamed
+                  // to `ready_for_pickup` in PR 12 (the semantic is
+                  // "shop is done, awaiting delivery partner pickup";
+                  // customer-facing copy still reads "Out for
+                  // delivery").
                   || (isDeliveryPerson()
-                      && resource.data.status == 'out_for_delivery'
+                      && (resource.data.status == 'accepted'
+                          || resource.data.status == 'preparing'
+                          || resource.data.status == 'ready_for_pickup')
                       && resource.data.deliveryPersonId == null);
       allow create, update, delete: if false;   // Cloud Functions only
     }

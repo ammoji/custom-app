@@ -103,11 +103,21 @@ export default function ProfileScreen() {
   );
 
   const onSaveProfile = async () => {
+    // PR 10 — name is required. Belt-and-braces: server rejects
+    // empty `name` patches too (validateProfilePatch), but checking
+    // here gives an instant inline message instead of a roundtrip.
+    if (!name.trim()) {
+      Alert.alert(
+        'Name required',
+        'Please enter your full name to continue.',
+      );
+      return;
+    }
     setSaving(true);
     setSaveError(null);
     try {
       const updated = await profileService.updateMyProfile({
-        name: name.trim() || null,
+        name: name.trim(),
         email: email.trim() || null,
       });
       setProfile(updated);
@@ -236,13 +246,16 @@ export default function ProfileScreen() {
           </Text>
         </View>
 
-        <Text style={styles.label}>Name</Text>
+        <Text style={styles.label}>
+          Full name <Text style={styles.requiredAsterisk}>*</Text>
+        </Text>
         <Input
           value={name}
           onChangeText={setName}
-          placeholder="Your name"
+          placeholder="Your full name"
           maxLength={80}
         />
+        <Text style={styles.helperText}>Required</Text>
 
         <Text style={styles.label}>Email</Text>
         <Input
@@ -264,6 +277,7 @@ export default function ProfileScreen() {
             title={saving ? 'Saving…' : 'Save profile'}
             onPress={onSaveProfile}
             loading={saving}
+            disabled={name.trim().length === 0}
             fullWidth
           />
         </View>
@@ -395,6 +409,14 @@ const styles = StyleSheet.create({
     backgroundColor: '#FEE2E2',
     borderRadius: radii.sm,
     padding: spacing.sm,
+  },
+  requiredAsterisk: {
+    color: colors.danger,
+  },
+  helperText: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginTop: 2,
   },
   inlineErrorText: { ...typography.caption, color: colors.danger },
   errorBanner: {

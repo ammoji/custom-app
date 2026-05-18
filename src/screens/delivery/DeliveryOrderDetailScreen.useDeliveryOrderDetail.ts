@@ -11,7 +11,7 @@ import type { Order } from '../../types';
  *
  * Three derived flags drive the UI:
  *   - `isAssigned`             — the current uid owns this order
- *   - `isAvailableForClaim`    — unassigned + out_for_delivery (pickup)
+ *   - `isAvailableForClaim`    — unassigned + ready_for_pickup (pickup)
  *   - `isTerminalForOthers`    — claimed by someone else, or delivered
  *
  * `handleClaim` is the one that needs revert-on-failure — the race
@@ -96,7 +96,7 @@ export function deriveDeliveryFlags(
     !!isDelivery &&
     !isAssignedToMe &&
     isUnassigned &&
-    order.status === 'out_for_delivery';
+    order.status === 'ready_for_pickup';
   const isPickedUp = !!order.pickedUpAt;
   // "Terminal for others" = the viewer can't claim AND isn't the
   // owner. Either someone else has it, or it's done. The screen

@@ -18,11 +18,11 @@ describe('shouldRollbackOptimistic', () => {
 
   test('returns false when current differs (watcher installed something else; don\'t clobber)', () => {
     // Caller wrote 'preparing' optimistically; meanwhile the 10s
-    // watcher tick saw the server flip to 'out_for_delivery' and
+    // watcher tick saw the server flip to 'ready_for_pickup' and
     // installed it. Rolling back to the captured pre-optimistic
     // value would CLOBBER the authoritative state. Must return
     // false.
-    expect(shouldRollbackOptimistic('out_for_delivery', 'preparing')).toBe(
+    expect(shouldRollbackOptimistic('ready_for_pickup', 'preparing')).toBe(
       false,
     );
   });

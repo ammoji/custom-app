@@ -54,19 +54,43 @@ describe('validateProfilePatch', () => {
     expect(result.field).toBe('email');
   });
 
-  test('null and "" both clear the field (collapsed to null)', () => {
-    const r1 = validateProfilePatch({ name: null, email: null });
+  test('email-only: null and "" both clear email (collapsed to null)', () => {
+    // PR 10 carve-out: name still REQUIRED when present, but email
+    // keeps its "null/empty = clear" semantics so users can blank
+    // out an optional email without re-entering their name.
+    const r1 = validateProfilePatch({ email: null });
     expect(r1.ok).toBe(true);
-    if (r1.ok) {
-      expect(r1.value.name).toBeNull();
-      expect(r1.value.email).toBeNull();
-    }
-    const r2 = validateProfilePatch({ name: '', email: '' });
+    if (r1.ok) expect(r1.value.email).toBeNull();
+    const r2 = validateProfilePatch({ email: '' });
     expect(r2.ok).toBe(true);
-    if (r2.ok) {
-      expect(r2.value.name).toBeNull();
-      expect(r2.value.email).toBeNull();
-    }
+    if (r2.ok) expect(r2.value.email).toBeNull();
+  });
+
+  // PR 10 — Part 2 — name is REQUIRED when present in the patch.
+  // Pins the behaviour change away from the previous "null collapses
+  // to null" semantics. Patches that don't touch the `name` key are
+  // still allowed (covered by the partial-patch test below).
+  test('PR 10: rejects empty-string name with a "Full name is required" message', () => {
+    const r = validateProfilePatch({ name: '' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.field).toBe('name');
+    expect(r.message).toBe('Full name is required');
+  });
+
+  test('PR 10: rejects null name (was previously a clear-the-field path)', () => {
+    const r = validateProfilePatch({ name: null });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.field).toBe('name');
+    expect(r.message).toBe('Full name is required');
+  });
+
+  test('PR 10: rejects whitespace-only name (trim collapses to empty)', () => {
+    const r = validateProfilePatch({ name: '   ' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.field).toBe('name');
   });
 
   test('keeps untouched keys absent from the result (partial patch)', () => {

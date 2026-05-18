@@ -113,7 +113,7 @@ describe('canCustomerCancelPaidOrder — payment + status gates', () => {
 
   // One test per non-pending status — parameterised. Catches the
   // "shop already accepted, must escalate" path.
-  test.each(['accepted', 'preparing', 'out_for_delivery', 'delivered', 'cancelled'])(
+  test.each(['accepted', 'preparing', 'ready_for_pickup', 'delivered', 'cancelled'])(
     'rejects status=%s (must escalate to admin)',
     statusValue => {
       const r = canCustomerCancelPaidOrder({

@@ -3,7 +3,7 @@
  * access is granted to the placing customer, any admin, the shop
  * owner whose shopId claim matches `resource.data.shopId`, the
  * delivery person assigned to the order, or any delivery person
- * looking at an unassigned 'out_for_delivery' pickup. Writes are
+ * looking at an unassigned 'ready_for_pickup' pickup. Writes are
  * `if false` — Cloud Functions are the only writer.
  *
  * Read covered here. Write coverage lives in `orders-write.test.ts`
@@ -64,7 +64,7 @@ beforeEach(async () => {
     await setDoc(doc(db as any, 'orders', ORDER_OFD_UNCLAIMED), {
       customerUid: CUSTOMER,
       shopId: SHOP_A,
-      status: 'out_for_delivery',
+      status: 'ready_for_pickup',
       deliveryPersonId: null,
     });
     // Out for delivery, claimed by DELIVERY_A. DELIVERY_B should
@@ -73,7 +73,7 @@ beforeEach(async () => {
     await setDoc(doc(db as any, 'orders', ORDER_OFD_CLAIMED), {
       customerUid: CUSTOMER,
       shopId: SHOP_A,
-      status: 'out_for_delivery',
+      status: 'ready_for_pickup',
       deliveryPersonId: DELIVERY_A,
     });
   });
@@ -149,7 +149,7 @@ describe('/orders/{orderId} reads — delivery person', () => {
     await assertFails(getDoc(doc(db, 'orders', ORDER_OFD_CLAIMED)));
   });
 
-  test('delivery person can read unassigned out_for_delivery order (available pickup)', async () => {
+  test('delivery person can read unassigned ready_for_pickup order (available pickup)', async () => {
     const db = ctxFor(env, {
       kind: 'delivery',
       uid: DELIVERY_B,
@@ -159,7 +159,7 @@ describe('/orders/{orderId} reads — delivery person', () => {
 
   test('delivery person cannot read ready-but-not-out order', async () => {
     // status='ready' + deliveryPersonId=null — the rule requires
-    // status=='out_for_delivery' for the unassigned-pickups clause to
+    // status=='ready_for_pickup' for the unassigned-pickups clause to
     // match. Pinning so a future "show ready orders too" change is
     // caught.
     const db = ctxFor(env, {

@@ -1,9 +1,11 @@
 import { useNavigation, useRoute } from '@react-navigation/native';
-import React from 'react';
+import React, { useState } from 'react';
 import {
     Alert,
     Image,
     Linking,
+    Modal,
+    TextInput,
     Platform,
     Pressable,
     ScrollView,
@@ -52,7 +54,7 @@ import { useShopOrderDetail } from './ShopOrderDetailScreen.useShopOrderDetail';
 const SHOP_OWNER_ALLOWED_ACTIONS: OrderStatus[] = [
   'accepted',
   'preparing',
-  'out_for_delivery',
+  'ready_for_pickup',
 ];
 
 export default function ShopOrderDetailScreen() {
@@ -71,6 +73,22 @@ export default function ShopOrderDetailScreen() {
     handleAction,
     retry,
   } = useShopOrderDetail(orderId);
+
+  // PR 12 — ETA prompt state. MUST be declared HERE (before any
+  // conditional early returns below) because React's Rules of Hooks
+  // require the same hook call order on every render. Previously this
+  // useState was declared after the early returns at the bottom,
+  // which crashed the screen the moment `order` transitioned from
+  // null → loaded (the render path suddenly had +1 hook compared to
+  // the loading render). Captured in Sentry as a ShopOrderDetailScreen
+  // throw on first data load. Fixed in PR 12 hotfix.
+  //
+  // `etaPrompt.action` is the OrderStatus we'll dispatch to once the
+  // user confirms the minutes input.
+  const [etaPrompt, setEtaPrompt] = useState<{
+    action: OrderStatus;
+    minutes: string;
+  } | null>(null);
 
   // Role guard: if the caller isn't a shop owner at all, the
   // navigation entry point shouldn't have been visible — but in
@@ -141,8 +159,52 @@ export default function ShopOrderDetailScreen() {
     SHOP_OWNER_ALLOWED_ACTIONS.includes(s),
   );
 
+  // (etaPrompt state was moved to the top of the component to satisfy
+  // Rules of Hooks — see comment near useShopOrderDetail above.)
+
+  const ETA_REQUIRED: OrderStatus[] = ['accepted'];
+  const ETA_OPTIONAL: OrderStatus[] = ['preparing'];
+
   const onActionPress = async (newStatus: OrderStatus) => {
+    // Accept transition: mandatory ETA. Open prompt instead of
+    // dispatching directly.
+    if (ETA_REQUIRED.includes(newStatus)) {
+      setEtaPrompt({ action: newStatus, minutes: '20' });
+      return;
+    }
+    // Preparing transition: open the prompt with the existing ETA
+    // pre-filled (so the shop can keep it OR update). Pre-fill
+    // computed from order.readyByEstimate when present, else 20.
+    if (ETA_OPTIONAL.includes(newStatus)) {
+      const remaining = order.readyByEstimate
+        ? Math.max(
+            1,
+            Math.round((order.readyByEstimate - Date.now()) / 60_000),
+          )
+        : 20;
+      setEtaPrompt({ action: newStatus, minutes: String(remaining) });
+      return;
+    }
     const result = await handleAction(newStatus);
+    if (!result.ok) {
+      Alert.alert('Update failed', result.error);
+    }
+  };
+
+  const onConfirmEta = async () => {
+    if (!etaPrompt) return;
+    const n = parseInt(etaPrompt.minutes, 10);
+    if (!Number.isFinite(n) || n < 1 || n > 240) {
+      Alert.alert(
+        'Invalid ETA',
+        'Enter a number of minutes between 1 and 240.',
+      );
+      return;
+    }
+    const readyByEstimate = Date.now() + n * 60_000;
+    const action = etaPrompt.action;
+    setEtaPrompt(null);
+    const result = await handleAction(action, readyByEstimate);
     if (!result.ok) {
       Alert.alert('Update failed', result.error);
     }
@@ -309,6 +371,18 @@ export default function ShopOrderDetailScreen() {
           )}
         </View>
 
+        {/* PR 12 — surface the current ETA so the shop knows what
+            the customer is seeing before tapping any action. */}
+        {order.readyByEstimate && order.status !== 'delivered' &&
+          order.status !== 'cancelled' && (
+          <View style={styles.etaCard}>
+            <Text style={styles.etaLabel}>Ready by</Text>
+            <Text style={styles.etaValue}>
+              {formatOrderTime(order.readyByEstimate)}
+            </Text>
+          </View>
+        )}
+
         {/* Action buttons */}
         {actions.length > 0 && (
           <View style={styles.actionsRow}>
@@ -330,6 +404,70 @@ export default function ShopOrderDetailScreen() {
           </View>
         )}
       </ScrollView>
+
+      {/* PR 12 — ETA prompt modal. Opens when the shopkeeper taps
+          Accept (mandatory) or Start Preparing (optional update).
+          Validates 1–240 minutes; on confirm, dispatches
+          handleAction with readyByEstimate = now + minutes * 60_000.
+          Option A from the prompt: simple numeric input. Track
+          quick-pick chips (Option B) as a follow-up if shops ask. */}
+      <Modal
+        visible={!!etaPrompt}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setEtaPrompt(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>
+              {etaPrompt?.action === 'accepted'
+                ? 'Accept order'
+                : 'Update ETA'}
+            </Text>
+            <Text style={styles.modalBody}>
+              How many minutes until this order is ready for pickup?
+            </Text>
+            <View style={styles.modalInputRow}>
+              <Text style={styles.modalInputPrefix}>Ready in</Text>
+              <TextInput
+                value={etaPrompt?.minutes ?? ''}
+                onChangeText={v =>
+                  setEtaPrompt(prev =>
+                    prev ? { ...prev, minutes: v.replace(/\D/g, '').slice(0, 3) } : prev,
+                  )
+                }
+                keyboardType="number-pad"
+                style={styles.modalInput}
+                accessibilityLabel="Minutes until ready"
+                autoFocus
+              />
+              <Text style={styles.modalInputSuffix}>min</Text>
+            </View>
+            <View style={styles.modalActions}>
+              <View style={{ flex: 1 }}>
+                <Button
+                  title="Cancel"
+                  variant="secondary"
+                  onPress={() => setEtaPrompt(null)}
+                  fullWidth
+                />
+              </View>
+              <View style={{ width: 12 }} />
+              <View style={{ flex: 1 }}>
+                <Button
+                  title={
+                    etaPrompt?.action === 'accepted'
+                      ? 'Accept'
+                      : 'Start preparing'
+                  }
+                  onPress={onConfirmEta}
+                  fullWidth
+                />
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -443,6 +581,57 @@ const styles = StyleSheet.create({
     marginTop: spacing.md,
   },
   actionBtn: { flexGrow: 1, minWidth: 140 },
+  // PR 12 — ETA card + modal styles.
+  etaCard: {
+    marginTop: spacing.md,
+    padding: spacing.md,
+    backgroundColor: colors.primaryLight,
+    borderRadius: radii.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  etaLabel: { ...typography.caption, color: colors.primaryDark },
+  etaValue: { ...typography.bodyBold, color: colors.primaryDark },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'center',
+    padding: spacing.lg,
+  },
+  modalCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    padding: spacing.lg,
+  },
+  modalTitle: { ...typography.h2, marginBottom: spacing.sm },
+  modalBody: {
+    ...typography.body,
+    color: colors.textSecondary,
+    marginBottom: spacing.md,
+  },
+  modalInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  modalInputPrefix: { ...typography.body },
+  modalInput: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    ...typography.body,
+    textAlign: 'center',
+  },
+  modalInputSuffix: { ...typography.body, color: colors.textSecondary },
+  modalActions: {
+    flexDirection: 'row',
+    marginTop: spacing.sm,
+  },
   errorBanner: {
     marginHorizontal: spacing.lg,
     marginTop: spacing.md,

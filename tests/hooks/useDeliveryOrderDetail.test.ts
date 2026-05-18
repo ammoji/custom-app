@@ -10,7 +10,7 @@
  * Three regression-prone behaviours pinned here:
  *   1. The watcher contract: first error callback MUST clear loading.
  *   2. The derived flags: `isAvailableForClaim` opens ONLY when the
- *      order is unassigned + out_for_delivery + viewer is delivery
+ *      order is unassigned + ready_for_pickup + viewer is delivery
  *      role + not the assignee. Anything else closes it.
  *   3. The claim race: a failed `claimDelivery` returns a discriminated
  *      error result instead of throwing. The screen depends on this
@@ -49,9 +49,11 @@ const mkOrder = (overrides: Partial<Order> = {}): Order =>
     },
     paymentMethod: 'cod',
     paymentStatus: 'pending',
-    status: 'out_for_delivery',
+    status: 'ready_for_pickup',
     createdAt: 1_700_000_000_000,
     estimatedDeliveryAt: 1_700_000_000_000 + 30 * 60_000,
+    // PR 12 — readyByEstimate. Defaults to null (legacy semantic).
+    readyByEstimate: null,
     deliveryPersonId: null,
     pickedUpAt: null,
     deliveredAt: null,
@@ -80,7 +82,7 @@ describe('reduceWatcherUpdate', () => {
   });
 
   test('error after a successful render preserves the prior order', () => {
-    const order = mkOrder({ status: 'out_for_delivery' });
+    const order = mkOrder({ status: 'ready_for_pickup' });
     const afterSuccess = reduceWatcherUpdate(INITIAL_STATE, { order });
     const afterError = reduceWatcherUpdate(afterSuccess, {
       order: null,
@@ -97,7 +99,7 @@ describe('deriveDeliveryFlags', () => {
     expect(deriveDeliveryFlags(null, 'me', true)).toEqual(FLAGS_NULL_ORDER);
   });
 
-  test('available-for-claim: unassigned + out_for_delivery + delivery role', () => {
+  test('available-for-claim: unassigned + ready_for_pickup + delivery role', () => {
     const flags = deriveDeliveryFlags(mkOrder(), 'me', true);
     expect(flags.isAvailableForClaim).toBe(true);
     expect(flags.isAssigned).toBe(false);
@@ -163,7 +165,7 @@ describe('deriveDeliveryFlags', () => {
     expect(flags.isTerminalForOthers).toBe(false);
   });
 
-  test('order not yet out_for_delivery (e.g. preparing) → not available, terminal for others', () => {
+  test('order not yet ready_for_pickup (e.g. preparing) → not available, terminal for others', () => {
     const flags = deriveDeliveryFlags(
       mkOrder({ status: 'preparing' }),
       'me',
@@ -254,7 +256,7 @@ describe('applyOptimisticPickedUp / applyOptimisticDelivered', () => {
 
   test('applyOptimisticDelivered flips status + stamps deliveredAt on a copy', () => {
     const order = mkOrder({
-      status: 'out_for_delivery',
+      status: 'ready_for_pickup',
       pickedUpAt: 1_700_000_005_000,
     });
     const next = applyOptimisticDelivered(order, 1_700_000_010_000);
@@ -262,7 +264,7 @@ describe('applyOptimisticPickedUp / applyOptimisticDelivered', () => {
     expect(next?.status).toBe('delivered');
     expect(next?.deliveredAt).toBe(1_700_000_010_000);
     expect(next?.pickedUpAt).toBe(1_700_000_005_000); // preserved
-    expect(order.status).toBe('out_for_delivery'); // not mutated
+    expect(order.status).toBe('ready_for_pickup'); // not mutated
   });
 
   test('null order passthrough on both helpers', () => {

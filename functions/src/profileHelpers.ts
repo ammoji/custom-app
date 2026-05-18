@@ -72,14 +72,23 @@ const NAME_MAX = 80;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
- * Validate a profile patch. Either field may be:
+ * Validate a profile patch.
+ *
+ * `email` may be:
  *   - undefined  → not touched
  *   - null / ""  → cleared (normalised to null in the result)
  *   - string     → trimmed and validated
  *
- * Empty-string inputs collapse to null so the Cloud Function can use
- * a single `FieldValue.delete()` path for both null and "". This keeps
- * the "what got cleared" audit story simple.
+ * `name` is REQUIRED when present (PR 10). Whenever the patch
+ * includes a `name` key it must be a non-empty string after trim;
+ * empty/null/whitespace-only patches return a validation error
+ * (not a null-collapse). Patches that don't include `name` at all
+ * pass through unchanged so an "update email only" flow keeps
+ * working for users who already have a name set.
+ *
+ * Empty-string `email` inputs still collapse to null so the Cloud
+ * Function can use a single `FieldValue.delete()` path for both
+ * null and "". This keeps the "what got cleared" audit story simple.
  */
 export function validateProfilePatch(
   patch: ProfilePatch,
@@ -87,25 +96,32 @@ export function validateProfilePatch(
   const out: ValidatedProfilePatch = {};
 
   if ('name' in patch) {
+    // PR 10 — name is now REQUIRED whenever the patch touches it.
+    // Previously empty-string / null collapsed to null ("clear it"),
+    // which left profiles in a half-set state that bit downstream
+    // (e.g. address book defaulting `address.name` from
+    // profile.name). Patches that don't touch the name field still
+    // pass through unchanged, so existing flows that update only
+    // email keep working.
     const raw = patch.name;
-    if (raw == null || raw === '') {
-      out.name = null;
-    } else if (typeof raw !== 'string') {
-      return { ok: false, field: 'name', message: 'Name must be a string' };
-    } else {
-      const trimmed = raw.trim();
-      if (trimmed.length === 0) {
-        out.name = null;
-      } else if (trimmed.length > NAME_MAX) {
-        return {
-          ok: false,
-          field: 'name',
-          message: `Name must be ${NAME_MAX} characters or fewer`,
-        };
-      } else {
-        out.name = trimmed;
-      }
+    if (raw == null) {
+      return { ok: false, field: 'name', message: 'Full name is required' };
     }
+    if (typeof raw !== 'string') {
+      return { ok: false, field: 'name', message: 'Name must be a string' };
+    }
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) {
+      return { ok: false, field: 'name', message: 'Full name is required' };
+    }
+    if (trimmed.length > NAME_MAX) {
+      return {
+        ok: false,
+        field: 'name',
+        message: `Name must be ${NAME_MAX} characters or fewer`,
+      };
+    }
+    out.name = trimmed;
   }
 
   if ('email' in patch) {

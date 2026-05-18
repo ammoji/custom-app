@@ -6,13 +6,16 @@ import { GeoPoint, Shop } from '../types';
 import { haversineKm } from '../utils/distance';
 import { db } from './firebase';
 
+// PR 10 — Phase-of-testing flag. While the team is testing across
+// multiple Indian cities, every tester should see every active shop
+// regardless of distance. The previous `FORCE_SHOW_ALL_SHOPS_IN_DEV`
+// flag was gated on `__DEV__`, which is `false` in TestFlight builds,
+// so cross-city testers couldn't see each other's shops. Flip back
+// to `false` for real-customer launch — and ideally make this
+// server-side configurable per launch-pincode/state at that point
+// (tracked in PRELAUNCH_CHECKLIST).
+const SHOW_ALL_SHOPS = true;
 const NEAR_KM = 1;
-
-// DEV-ONLY ESCAPE HATCH: To test with shops outside the radius,
-// set EXPO_PUBLIC_FORCE_SHOW_ALL_SHOPS=true in .env.local
-// This has no effect in production builds (__DEV__ is always false).
-const FORCE_SHOW_ALL_SHOPS_IN_DEV =
-  __DEV__;
 
 const isNative = Platform.OS !== 'web';
 
@@ -30,22 +33,22 @@ export const shopService = {
   // + RN 0.81 + static frameworks — same root cause as orderService's
   // listMyOrders / getOrder Plan B). The server already filters
   // status==active and computes distanceKm + sorts; we still apply
-  // the FORCE_SHOW_ALL_SHOPS_IN_DEV override on native so behaviour
-  // matches web.
+  // the SHOW_ALL_SHOPS / NEAR_KM gate on native so behaviour matches
+  // web.
   async getNearbyShops(userLocation: GeoPoint): Promise<Shop[]> {
     if (!isNative) {
       const snap = await getDocs(collection(db, 'shops'));
       const shops = snap.docs.map(d => d.data() as Shop);
       return shops
         .map(s => ({ ...s, distanceKm: haversineKm(userLocation, s.location) }))
-        .filter(s => FORCE_SHOW_ALL_SHOPS_IN_DEV || (s.distanceKm ?? 0) <= NEAR_KM)
+        .filter(s => SHOW_ALL_SHOPS || (s.distanceKm ?? 0) <= NEAR_KM)
         .sort((a, b) => (a.distanceKm ?? 0) - (b.distanceKm ?? 0));
     }
     const fn = getNativeFunctions().httpsCallable('listShopsPublic');
     const result = await fn({ userLocation });
     const shops = ((result.data as any)?.shops ?? []) as Shop[];
     return shops.filter(
-      s => FORCE_SHOW_ALL_SHOPS_IN_DEV || (s.distanceKm ?? 0) <= NEAR_KM,
+      s => SHOW_ALL_SHOPS || (s.distanceKm ?? 0) <= NEAR_KM,
     );
   },
 

@@ -14,7 +14,7 @@ import type { Order } from '../types';
  *
  * Active = orders that still need someone's attention. Delivered and
  * cancelled are terminal; everything else (pending → accepted →
- * preparing → out_for_delivery) counts as "needs eyeballs". The
+ * preparing → ready_for_pickup) counts as "needs eyeballs". The
  * online-partner stat is fetched separately via a callable, so this
  * helper deliberately does NOT touch users data — it only reduces
  * the orders array.
@@ -24,7 +24,7 @@ const ACTIVE_STATUSES = new Set<Order['status']>([
   'pending',
   'accepted',
   'preparing',
-  'out_for_delivery',
+  'ready_for_pickup',
 ]);
 
 function isSameLocalDay(a: number, b: number): boolean {

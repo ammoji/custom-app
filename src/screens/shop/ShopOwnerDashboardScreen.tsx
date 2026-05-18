@@ -299,18 +299,18 @@ export default function ShopOwnerDashboardScreen() {
               <PaymentStatusBanner paymentStatus={item.paymentStatus} />
               {/* PR 7 — delivery substate timeline. The macro
                   `status` field only goes through pending →
-                  accepted → preparing → out_for_delivery →
+                  accepted → preparing → ready_for_pickup →
                   delivered. The delivery partner's interim states
                   live in `deliveryPersonId` and `pickedUpAt`. Show
                   them so an order doesn't appear to jump from
                   "Out for Delivery" to "Delivered" with no
                   intermediate visibility. Same shape as
                   AdminOrdersScreen — pinned by inspection. */}
-              {(item.status === 'out_for_delivery' ||
+              {(item.status === 'ready_for_pickup' ||
                 item.status === 'delivered') && (
                 <View style={styles.deliveryFlow}>
                   {!item.deliveryPersonId &&
-                    item.status === 'out_for_delivery' && (
+                    item.status === 'ready_for_pickup' && (
                       <Text style={styles.flowStepPending}>
                         ⏳ Awaiting delivery partner
                       </Text>

@@ -137,13 +137,34 @@ export default function OrderDetailScreen() {
         {/* Status header */}
         <View style={styles.statusCard}>
           <View style={styles.statusRow}>
-            <OrderStatusChip status={order.status} />
+            {/* PR 12 — customer audience: chip says "Out for
+                delivery" when the internal status is
+                ready_for_pickup. Familiar phrasing; matches what
+                every other delivery app shows. */}
+            <OrderStatusChip status={order.status} audience="customer" />
             <Text style={styles.orderId}>{order.id}</Text>
           </View>
           <Text style={styles.placedAt}>Placed {formatOrderTime(order.createdAt)}</Text>
-          {order.status !== 'delivered' && order.status !== 'cancelled' && (
-            <Text style={styles.eta}>Arriving in ~{minutesLeft} min</Text>
-          )}
+          {/* PR 12 — ETA copy varies by status:
+              - accepted / preparing with readyByEstimate: surface
+                the shopkeeper's "Ready by HH:MM" so the customer
+                sees the same time the shop committed to.
+              - other in-flight states (incl. ready_for_pickup):
+                fall back to the existing minutes-left estimate.
+              - delivered / cancelled: hidden. */}
+          {order.status !== 'delivered' &&
+            order.status !== 'cancelled' &&
+            (order.readyByEstimate &&
+            (order.status === 'accepted' || order.status === 'preparing') ? (
+              <Text style={styles.eta}>
+                Ready by {formatOrderTime(order.readyByEstimate)} at the
+                shop. Delivery partner will pick up and bring it to you.
+              </Text>
+            ) : (
+              minutesLeft > 0 && (
+                <Text style={styles.eta}>Arriving in ~{minutesLeft} min</Text>
+              )
+            ))}
         </View>
 
         {/* Delivery address */}

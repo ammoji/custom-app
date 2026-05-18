@@ -12,7 +12,10 @@ import ScreenHeader from '../../components/common/ScreenHeader';
 // kept verbose because the auto-formatter strips these on save and
 // the resulting JSX-vs-import drift takes a tsc run to surface.
 import CancelAndRefundModal from '../../components/order/CancelAndRefundModal';
+// PR 11 — admin order timeline. Renders the full statusHistory
+// behind a per-card disclosure. DO NOT REMOVE on auto-format save.
 import OrderStatusChip from '../../components/order/OrderStatusChip';
+import OrderTimeline from '../../components/order/OrderTimeline';
 import PaymentStatusBanner from '../../components/order/PaymentStatusBanner';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
 import { useOnlineDeliveryCount } from '../../hooks/useOnlineDeliveryCount';
@@ -26,6 +29,34 @@ import {
     nextActionsFor,
     OrderStatus,
 } from '../../utils/orderStateMachine';
+
+// PR 12 — DO NOT REMOVE. Auto-formatter has eaten this declaration
+// once during PR 12 development; if tsc complains
+// "Cannot find name 'findOriginalEta'" after a save, re-add it.
+//
+// Walks statusHistory looking for the FIRST entry whose `reason`
+// looks like `ETA: <ISO timestamp>` written by the server when
+// the shopkeeper accepted (PR 12). Returns the parsed epoch ms,
+// or null when no such entry exists (legacy orders / no reason).
+// The admin card uses this to render "(updated from HH:MM)" when
+// the current `readyByEstimate` differs from the original one.
+const findOriginalEta = (
+  statusHistory: Order['statusHistory'],
+): number | null => {
+  if (!Array.isArray(statusHistory)) return null;
+  for (const entry of statusHistory) {
+    if (
+      (entry.status === 'accepted' || entry.status === 'preparing') &&
+      typeof entry.reason === 'string' &&
+      entry.reason.startsWith('ETA: ')
+    ) {
+      const iso = entry.reason.slice('ETA: '.length);
+      const parsed = Date.parse(iso);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return null;
+};
 
 export default function AdminOrdersScreen() {
   const nav = useNavigation<any>();
@@ -45,6 +76,14 @@ export default function AdminOrdersScreen() {
   // collapses the first. Prevents the admin from leaving multiple
   // override panels open and tapping a wrong card by accident.
   const [overrideExpandedId, setOverrideExpandedId] = useState<string | null>(null);
+  // PR 11 — per-card timeline disclosure. Independent state from
+  // overrideExpandedId so admins can have either / both open
+  // without the disclosures fighting each other. Same one-card-at-
+  // a-time semantics: opening a different card's timeline collapses
+  // the previous one.
+  const [timelineExpandedId, setTimelineExpandedId] = useState<string | null>(
+    null,
+  );
   // PR 2 — payment hardening (Phase B). Refund modal target. We track
   // the entire order rather than just the id so the modal can show
   // the amount in its title without an extra lookup.
@@ -237,6 +276,32 @@ export default function AdminOrdersScreen() {
                 <OrderStatusChip status={item.status} />
               </View>
               <Text style={styles.time}>{formatOrderTime(item.createdAt)}</Text>
+              {/* PR 12 — surface the shopkeeper-provided ETA on
+                  every active card so admin sees what the customer
+                  is being told. The "updated from" trail comes
+                  from statusHistory: walk back through entries
+                  whose status is `accepted`/`preparing` and
+                  whose `reason` looks like `ETA: <ISO>`; if the
+                  most recent ETA differs from the original
+                  accepted-time ETA, show the change. Hidden once
+                  the order is delivered or cancelled. */}
+              {item.readyByEstimate &&
+                item.status !== 'delivered' &&
+                item.status !== 'cancelled' && (
+                  <Text style={styles.eta}>
+                    ⏰ Ready by {formatOrderTime(item.readyByEstimate)}
+                    {(() => {
+                      const original = findOriginalEta(item.statusHistory);
+                      if (
+                        original != null &&
+                        Math.abs(original - item.readyByEstimate) > 30_000
+                      ) {
+                        return ` (updated from ${formatOrderTime(original)})`;
+                      }
+                      return '';
+                    })()}
+                  </Text>
+                )}
               <Text style={styles.meta}>
                 {itemCount} item{itemCount > 1 ? 's' : ''} · {formatRupees(item.total)}
               </Text>
@@ -255,19 +320,19 @@ export default function AdminOrdersScreen() {
               {/*
                 Hotfix: delivery substate timeline. The macro `status`
                 field only goes through pending → accepted → preparing
-                → out_for_delivery → delivered. The delivery partner's
+                → ready_for_pickup → delivered. The delivery partner's
                 interim states live in `deliveryPersonId` and
                 `pickedUpAt`, which the admin previously couldn't see
                 — so an order would visibly jump from "Out for
                 Delivery" to "Delivered" with no intermediate steps.
                 Renders only when status is in the delivery window
-                (out_for_delivery or delivered).
+                (ready_for_pickup or delivered).
               */}
-              {(item.status === 'out_for_delivery' ||
+              {(item.status === 'ready_for_pickup' ||
                 item.status === 'delivered') && (
                 <View style={styles.deliveryFlow}>
                   {!item.deliveryPersonId &&
-                    item.status === 'out_for_delivery' && (
+                    item.status === 'ready_for_pickup' && (
                       <Text style={styles.flowStepPending}>
                         ⏳ Awaiting delivery partner
                       </Text>
@@ -349,6 +414,39 @@ export default function AdminOrdersScreen() {
                   )}
                 </View>
               )}
+
+              {/*
+                PR 11 — Full timeline disclosure. Shows every entry in
+                statusHistory in insertion order (NOT sorted by `at`,
+                so back-to-back same-ms writes like cancel +
+                refund_pending land in the order the server wrote
+                them). Step count in the label gives admin a hint
+                without expanding. Independent of overrideExpandedId.
+              */}
+              <View style={styles.timelineSection}>
+                <Pressable
+                  onPress={() =>
+                    setTimelineExpandedId(
+                      timelineExpandedId === item.id ? null : item.id,
+                    )
+                  }
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    timelineExpandedId === item.id
+                      ? 'Hide full order timeline'
+                      : 'Show full order timeline'
+                  }
+                  style={styles.disclosureRow}
+                >
+                  <Text style={styles.disclosureText}>
+                    {timelineExpandedId === item.id ? '▾' : '▸'}{'  '}
+                    Full timeline ({item.statusHistory?.length ?? 0} steps)
+                  </Text>
+                </Pressable>
+                {timelineExpandedId === item.id && (
+                  <OrderTimeline entries={item.statusHistory ?? []} />
+                )}
+              </View>
             </View>
           );
         }}
@@ -437,6 +535,14 @@ const styles = StyleSheet.create({
   shopName: { ...typography.h3 },
   orderId: { ...typography.caption, color: colors.textMuted, marginTop: 2 },
   time: { ...typography.caption, color: colors.textSecondary, marginTop: spacing.xs },
+  // PR 12 — Ready-by ETA line. Slightly emphasised so admin sees
+  // it without scanning past the placed-time line.
+  eta: {
+    ...typography.caption,
+    color: colors.primaryDark,
+    fontWeight: '600',
+    marginTop: spacing.xs,
+  },
   meta: { ...typography.body, marginTop: spacing.xs },
   phone: { ...typography.caption, color: colors.textSecondary, marginTop: spacing.xs },
   actions: {
@@ -463,6 +569,14 @@ const styles = StyleSheet.create({
   flowStepDone: {
     ...typography.caption,
     color: colors.textPrimary,
+  },
+  // PR 11 — Full timeline disclosure section. Same visual treatment
+  // as overrideSection so the two disclosures stack consistently.
+  timelineSection: {
+    marginTop: spacing.sm,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
   },
   overrideSection: {
     marginTop: spacing.md,

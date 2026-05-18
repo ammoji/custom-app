@@ -282,16 +282,30 @@ export type Order = {
   refundedAt?: number;
   // Free-form admin reason captured at the time of paid-cancel.
   cancellationReason?: string;
-  status: 'pending' | 'accepted' | 'preparing' | 'out_for_delivery' | 'delivered' | 'cancelled';
+  // PR 12 — status `out_for_delivery` was renamed to
+  // `ready_for_pickup`. The semantic is "shop is done; awaiting
+  // delivery partner pickup". Customer-facing copy still reads
+  // "Out for delivery" (familiar phrasing) — only the internal
+  // value + admin/shop/delivery UI labels changed.
+  status: 'pending' | 'accepted' | 'preparing' | 'ready_for_pickup' | 'delivered' | 'cancelled';
   createdAt: number;
   estimatedDeliveryAt: number;
+  // PR 12 — shopkeeper-provided ETA for when the order will be
+  // ready for pickup. Set when the shopkeeper accepts (mandatory
+  // server-side validation; see
+  // `functions/src/orderStatusTransitionHelpers.ts`). May be
+  // updated during the preparing phase if the shop is running
+  // late. Null only on legacy orders placed before PR 12 — every
+  // render path checks for that and falls back to
+  // `estimatedDeliveryAt` or omits the line entirely.
+  readyByEstimate: number | null;
   // Delivery-flow fields (Phase 12b). All three are null on a freshly
   // placed order. We don't add new statuses to the state machine; the
   // combination of (status, deliveryPersonId, pickedUpAt) encodes the
   // substate:
-  //   out_for_delivery + deliveryPersonId=null              → available pickup
-  //   out_for_delivery + deliveryPersonId=X + pickedUpAt=null → claimed, en route to shop
-  //   out_for_delivery + deliveryPersonId=X + pickedUpAt=ts  → picked up, on the way to customer
+  //   ready_for_pickup + deliveryPersonId=null              → available pickup
+  //   ready_for_pickup + deliveryPersonId=X + pickedUpAt=null → claimed, en route to shop
+  //   ready_for_pickup + deliveryPersonId=X + pickedUpAt=ts  → picked up, on the way to customer
   //   delivered        + deliveredAt=ts                     → done
   deliveryPersonId: string | null;
   pickedUpAt: number | null;

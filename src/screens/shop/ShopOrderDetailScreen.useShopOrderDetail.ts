@@ -80,6 +80,8 @@ export function reduceWatcherUpdate(
 export type UpdateOrderStatusFn = (input: {
   orderId: string;
   newStatus: OrderStatus;
+  // PR 12 — ETA passed through on accept / preparing transitions.
+  readyByEstimate?: number;
 }) => Promise<void>;
 
 /**
@@ -92,9 +94,14 @@ export async function runOrderActionOnce(
   updateOrderStatus: UpdateOrderStatusFn,
   orderId: string,
   newStatus: OrderStatus,
+  readyByEstimate?: number,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
-    await updateOrderStatus({ orderId, newStatus });
+    await updateOrderStatus({
+      orderId,
+      newStatus,
+      ...(readyByEstimate !== undefined ? { readyByEstimate } : {}),
+    });
     return { ok: true };
   } catch (e: any) {
     return {
@@ -126,6 +133,7 @@ export type UseShopOrderDetailResult = ShopOrderDetailState & {
   pendingStatus: OrderStatus | null;
   handleAction: (
     newStatus: OrderStatus,
+    readyByEstimate?: number,
   ) => Promise<{ ok: true } | { ok: false; error: string }>;
   retry: () => void;
 };
@@ -162,7 +170,7 @@ export function useShopOrderDetail(
   }, [orderId, watch, retryNonce]);
 
   const handleAction = useCallback(
-    async (newStatus: OrderStatus) => {
+    async (newStatus: OrderStatus, readyByEstimate?: number) => {
       const previousStatus = state.order?.status;
       // Optimistic update so the chip + button row refresh
       // instantly. Reverted below on failure.
@@ -171,7 +179,12 @@ export function useShopOrderDetail(
         order: applyOptimisticStatus(prev.order, newStatus),
       }));
       setPendingStatus(newStatus);
-      const result = await runOrderActionOnce(update, orderId, newStatus);
+      const result = await runOrderActionOnce(
+        update,
+        orderId,
+        newStatus,
+        readyByEstimate,
+      );
       if (!result.ok && previousStatus) {
         // PR 3 — concurrency cleanup. Only roll back to
         // previousStatus if the current order's status is STILL the

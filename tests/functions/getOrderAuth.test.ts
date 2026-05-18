@@ -14,7 +14,7 @@
  *   3. Shop owner whose claim shopId matches order.shopId
  *   4. Delivery person already assigned to this order
  *   5. Any delivery person, IF the order is unassigned and
- *      currently out_for_delivery (the available-pickups board)
+ *      currently ready_for_pickup (the available-pickups board)
  */
 import { canReadOrder } from '../../functions/src/getOrderAuth';
 
@@ -73,14 +73,14 @@ describe('canReadOrder — accepts', () => {
     ).toBe(true);
   });
 
-  test('any delivery person when the order is unassigned + out_for_delivery (available pickups)', () => {
+  test('any delivery person when the order is unassigned + ready_for_pickup (available pickups)', () => {
     expect(
       canReadOrder({
         uid: 'delivery_002',
         claims: { delivery: true },
         order: {
           ...baseOrder,
-          status: 'out_for_delivery',
+          status: 'ready_for_pickup',
           deliveryPersonId: null,
         },
       }),
@@ -121,28 +121,37 @@ describe('canReadOrder — rejects', () => {
     ).toBe(false);
   });
 
-  test('a delivery person looking at a non-assigned, non-out_for_delivery order', () => {
-    // The available-pickups branch only opens when status is
-    // out_for_delivery AND deliveryPersonId is null. Other states
-    // (pending / accepted / preparing) must NOT leak to delivery
-    // people who aren't assigned.
+  test('a delivery person looking at a non-assigned, pending order (outside the pool)', () => {
+    // PR 12 broadened the pool to {accepted, preparing,
+    // ready_for_pickup}. `pending` and `cancelled` / `delivered`
+    // are still off-limits to non-assigned delivery people.
     expect(
       canReadOrder({
         uid: 'delivery_003',
         claims: { delivery: true },
-        order: { ...baseOrder, status: 'preparing', deliveryPersonId: null },
+        order: { ...baseOrder, status: 'pending', deliveryPersonId: null },
       }),
     ).toBe(false);
   });
 
-  test('a delivery person looking at an out_for_delivery order already assigned to someone else', () => {
+  test('a delivery person looking at a non-assigned, delivered order', () => {
+    expect(
+      canReadOrder({
+        uid: 'delivery_003',
+        claims: { delivery: true },
+        order: { ...baseOrder, status: 'delivered', deliveryPersonId: null },
+      }),
+    ).toBe(false);
+  });
+
+  test('a delivery person looking at an ready_for_pickup order already assigned to someone else', () => {
     expect(
       canReadOrder({
         uid: 'delivery_004',
         claims: { delivery: true },
         order: {
           ...baseOrder,
-          status: 'out_for_delivery',
+          status: 'ready_for_pickup',
           deliveryPersonId: 'delivery_001',
         },
       }),

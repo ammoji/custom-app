@@ -79,6 +79,11 @@ function toOrder(raw: any): Order {
     pickedUpAt: raw.pickedUpAt ? tsToMillis(raw.pickedUpAt) : null,
     deliveredAt: raw.deliveredAt ? tsToMillis(raw.deliveredAt) : null,
     deliveryPersonId: raw.deliveryPersonId ?? null,
+    // PR 12 — readyByEstimate is a plain epoch ms in Firestore (the
+    // server writes Date.now() + minutes*60_000), but legacy orders
+    // placed before PR 12 don't have the field. Coerce missing →
+    // null so render code can `if (order.readyByEstimate)` safely.
+    readyByEstimate: raw.readyByEstimate ?? null,
     statusHistory: Array.isArray(raw.statusHistory)
       ? raw.statusHistory.map((h: any) => ({ ...h, at: tsToMillis(h.at) }))
       : raw.statusHistory,
@@ -254,6 +259,11 @@ export const orderService = {
     orderId: string;
     newStatus: OrderStatus;
     reason?: string;
+    // PR 12 — shopkeeper-provided ETA (epoch ms). REQUIRED on
+    // accept transitions, OPTIONAL on preparing transitions, ignored
+    // otherwise. Server-side validation is the source of truth; this
+    // signature just lets call sites pass the value through.
+    readyByEstimate?: number;
   }): Promise<void> {
     if (isNative) {
       // Use RNFB so the admin custom-claim on the phone-authed user is

@@ -32,6 +32,10 @@ function mkOrder(overrides: Partial<Order>): Order {
     status: 'pending',
     createdAt: NOW,
     estimatedDeliveryAt: NOW + 30 * 60_000,
+    // PR 12 — readyByEstimate is now part of the Order shape.
+    // Default to null in test fixtures (legacy-order semantic);
+    // tests that exercise the new ETA flow override this.
+    readyByEstimate: null,
     deliveryPersonId: null,
     pickedUpAt: null,
     deliveredAt: null,
@@ -71,7 +75,7 @@ describe('computeAdminOrderStats', () => {
       mkOrder({ id: 'a', status: 'pending', createdAt: NOW }),
       mkOrder({ id: 'b', status: 'accepted', createdAt: NOW }),
       mkOrder({ id: 'c', status: 'preparing', createdAt: NOW }),
-      mkOrder({ id: 'd', status: 'out_for_delivery', createdAt: NOW }),
+      mkOrder({ id: 'd', status: 'ready_for_pickup', createdAt: NOW }),
       mkOrder({ id: 'e', status: 'delivered', createdAt: NOW }),
       mkOrder({ id: 'f', status: 'cancelled', createdAt: NOW }),
     ];
