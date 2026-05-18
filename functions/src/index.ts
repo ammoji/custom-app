@@ -34,6 +34,11 @@ import {
     type AddressInput,
 } from './profileHelpers';
 import { checkRetryPaymentGuard } from './retryPaymentHelpers';
+// PR 6 — DO NOT REMOVE. Auto-formatter has stripped this import twice
+// already during PR 6 development. Used by addCustomMenuItem +
+// updateMenuItem to validate that imageUrl points to our Storage
+// bucket (rejects external URLs like picsum.photos).
+import { validateMenuImageUrl } from './imageUrlHelpers';
 // PR 5 — DO NOT REMOVE. Auto-formatter has stripped both of these PR 5
 // imports during development. Used by `placeOrder` (minOrder gate)
 // and `updateShopSettings`. If tsc complains about either name,
@@ -3367,10 +3372,24 @@ export const updateMenuItem = onCall<{
         if (typeof v !== 'string' || !VALID_CATEGORIES.has(v)) {
           throw new HttpsError('invalid-argument', 'category is not a known CategoryId');
         }
-      } else if (k === 'name' || k === 'imageUrl' || k === 'packLabel') {
+      } else if (k === 'name' || k === 'packLabel') {
         if (typeof v !== 'string' || (k === 'name' && !v.trim())) {
           throw new HttpsError('invalid-argument', `${k} must be a non-empty string`);
         }
+      } else if (k === 'imageUrl') {
+        // PR 6 — tighten imageUrl: must be empty (clears the field —
+        // server falls back to the placeholder in addCustomMenuItem
+        // semantics) or a Storage CDN URL. Rejects external URLs.
+        const valid = validateMenuImageUrl(v);
+        if (!valid.ok) {
+          throw new HttpsError('invalid-argument', valid.reason);
+        }
+        // Normalize: empty/null collapses to a placeholder string so
+        // the on-disk doc field stays a non-empty string (existing
+        // schema). Concrete URL passes through trimmed.
+        update[k] =
+          valid.url ?? 'https://placehold.co/400x400/e2e8f0/64748b?text=Custom+Item';
+        continue;
       }
       update[k] = v;
     }
@@ -3511,6 +3530,16 @@ export const addCustomMenuItem = onCall<{
       );
     }
 
+    // PR 6 — validate imageUrl through the shared helper. Accepts
+    // undefined / empty / Storage CDN URL; rejects external hosts so
+    // shop owners can't hot-link copyrighted imagery or bypass the
+    // in-app upload flow. Empty / null collapses to the placeholder
+    // below.
+    const imageValidation = validateMenuImageUrl(imageUrl);
+    if (!imageValidation.ok) {
+      throw new HttpsError('invalid-argument', imageValidation.reason);
+    }
+
     const now = Date.now();
     const rand = Math.random().toString(36).slice(2, 8);
     const menuItemId = `custom_${now}_${rand}`;
@@ -3524,10 +3553,7 @@ export const addCustomMenuItem = onCall<{
       shopId,
       productId: null,
       name: trimmedName,
-      imageUrl:
-        typeof imageUrl === 'string' && imageUrl.trim()
-          ? imageUrl.trim()
-          : fallbackImage,
+      imageUrl: imageValidation.url ?? fallbackImage,
       packLabel: packLabel.trim(),
       category,
       price,

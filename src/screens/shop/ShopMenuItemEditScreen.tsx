@@ -1,15 +1,15 @@
 import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Alert,
-  Image,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Switch,
-  Text,
-  TextInput,
-  View,
+    Alert,
+    Image,
+    Pressable,
+    ScrollView,
+    StyleSheet,
+    Switch,
+    Text,
+    TextInput,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../../components/common/Button';
@@ -20,7 +20,10 @@ import { CATEGORIES, CategoryId } from '../../constants/categories';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
 import type { RootStackParamList } from '../../navigation/AppNavigator';
 import { orderService } from '../../services/orderService';
+import { uploadMenuImage } from '../../services/storage';
+import { useAuthStore } from '../../store/useAuthStore';
 import type { MenuItem } from '../../types';
+import { pickAndResizeImage } from '../../utils/imageUpload';
 
 /**
  * Edit a single menu item. The form is reactive to `isCustom`:
@@ -45,6 +48,11 @@ export default function ShopMenuItemEditScreen() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState(false);
+  // PR 6 — image upload state. Only used in the CUSTOM branch; GLOBAL
+  // items inherit their image from the catalog and have no image
+  // picker.
+  const [uploading, setUploading] = useState(false);
+  const shopId = useAuthStore(s => s.shopId);
 
   // Editable form state. We keep price/mrp as strings while editing
   // so the user can type "" and "12." mid-input without losing focus
@@ -137,6 +145,36 @@ export default function ShopMenuItemEditScreen() {
 
   const hasChanges =
     dirtyFields !== null && Object.keys(dirtyFields).length > 0;
+
+  // PR 6 — image picker handler for CUSTOM items. Same shape as the
+  // one in AddCustomMenuItemScreen — extracted to a screen-local
+  // function rather than a shared hook because the only state it
+  // touches is local (setImageUrl, setUploading) and the dirty-fields
+  // diff machinery is also local.
+  const handlePick = async (source: 'camera' | 'gallery') => {
+    if (!shopId) {
+      Alert.alert(
+        'Not signed in as shop owner',
+        'Sign out and back in, then try again.',
+      );
+      return;
+    }
+    const picked = await pickAndResizeImage(source);
+    if (!picked.ok) {
+      if (picked.reason === 'cancelled') return;
+      Alert.alert('Could not pick image', picked.message ?? picked.reason);
+      return;
+    }
+    setUploading(true);
+    try {
+      const url = await uploadMenuImage({ shopId, localUri: picked.uri });
+      setImageUrl(url);
+    } catch (e: any) {
+      Alert.alert('Upload failed', e?.message ?? 'Please try again.');
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const handleSave = async () => {
     if (!item || !dirtyFields) return;
@@ -262,16 +300,48 @@ export default function ShopMenuItemEditScreen() {
                 placeholderTextColor={colors.textSecondary}
               />
             </Field>
-            <Field label="Image URL">
-              <TextInput
-                value={imageUrl}
-                onChangeText={setImageUrl}
-                placeholder="https://…"
-                style={styles.input}
-                placeholderTextColor={colors.textSecondary}
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
+            {/* PR 6 — image picker replaces URL text input (custom
+                items only). Server rejects external URLs via
+                validateMenuImageUrl, so the picker is the only path
+                to set/replace the image. */}
+            <Field label="Image">
+              {imageUrl ? (
+                <Image
+                  source={{ uri: imageUrl }}
+                  style={styles.imageEditPreview}
+                  accessibilityLabel="Current menu item image"
+                />
+              ) : (
+                <View
+                  style={[
+                    styles.imageEditPreview,
+                    styles.imageEditPlaceholder,
+                  ]}
+                >
+                  <Text style={styles.imageEditPlaceholderText}>
+                    No image
+                  </Text>
+                </View>
+              )}
+              <View style={styles.imageEditButtonsRow}>
+                <View style={styles.imageEditButtonCell}>
+                  <Button
+                    title="📷 Take photo"
+                    variant="secondary"
+                    onPress={() => handlePick('camera')}
+                    disabled={uploading || saving}
+                    loading={uploading}
+                  />
+                </View>
+                <View style={styles.imageEditButtonCell}>
+                  <Button
+                    title="🖼️ Gallery"
+                    variant="secondary"
+                    onPress={() => handlePick('gallery')}
+                    disabled={uploading || saving}
+                  />
+                </View>
+              </View>
             </Field>
             <Field label="Category">
               <CategoryPicker
@@ -500,4 +570,25 @@ const styles = StyleSheet.create({
   },
   categoryChipText: { ...typography.caption, color: colors.textSecondary },
   categoryChipTextActive: { color: colors.primaryDark, fontWeight: '700' },
+  // PR 6 — image picker styles (custom-only branch).
+  imageEditPreview: {
+    width: '100%',
+    aspectRatio: 1,
+    borderRadius: radii.sm,
+    backgroundColor: colors.bg,
+    marginBottom: spacing.sm,
+  },
+  imageEditPlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderStyle: 'dashed',
+  },
+  imageEditPlaceholderText: {
+    ...typography.caption,
+    color: colors.textMuted,
+  },
+  imageEditButtonsRow: { flexDirection: 'row', gap: spacing.sm },
+  imageEditButtonCell: { flex: 1 },
 });

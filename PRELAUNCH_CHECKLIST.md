@@ -2301,6 +2301,87 @@ PRs 1, 2, 4):
 location producing garbled JSX (line 178); fixed by re-running the
 edit with full surrounding context.
 
+### PR 6 — Image upload for menu items — ✅ SHIPPED May 17 2026
+
+Real shops can finally onboard without hosting their menu photos
+somewhere else. Camera + gallery picker → resize to 1024px square
+JPEG → upload to Firebase Storage under `menu/{shopId}/...` → URL
+flows into the existing `imageUrl` field. Server tightened to reject
+non-Storage URLs.
+
+- [x] **Storage rules.** `storage.rules` gains a
+      `menu/{shopId}/{filename}` rule: public read (anonymous
+      customers browse), shopOwner write gated on matching `shopId`
+      claim + 5MB cap + image/* contentType regex. Existing
+      `/products/` and `/shops/` rules untouched.
+- [x] **`validateMenuImageUrl` server helper + 14 tests.** Pure
+      helper in `functions/src/imageUrlHelpers.ts:1-87`. Three
+      accepted shapes: undefined/null/empty → ok with null; URL on
+      `firebasestorage.googleapis.com` or `*.firebasestorage.app`
+      (both — this project uses the newer subdomain); everything
+      else (picsum.photos, http, malformed) rejected. Wired into
+      `addCustomMenuItem` and `updateMenuItem` in
+      `functions/src/index.ts`. Tests at
+      `tests/functions/imageUrlHelpers.test.ts:1-115` cover the
+      canonical exploit (external host), spoofed-substring
+      hostname attack, http downgrade, non-string types, malformed.
+- [x] **Client picker + uploader.** `src/utils/imageUpload.ts:1-115`
+      exports `pickAndResizeImage(source)` wrapping
+      `expo-image-picker` + `expo-image-manipulator`. Returns a
+      tagged union (`cancelled` is a normal user action — silent
+      no-op; `permission-denied` / `unknown` surface an alert).
+      `src/services/storage.ts:1-58` exports `uploadMenuImage`
+      using the firebase web SDK on both platforms (existing
+      `storage` handle from `firebase.ts` works cross-platform per
+      the file-level comment there; avoids pulling
+      `@react-native-firebase/storage` for a single feature).
+- [x] **UI replaced in both shop screens.**
+      `AddCustomMenuItemScreen.tsx` and `ShopMenuItemEditScreen.tsx`
+      (custom-only branch) now render a preview + "📷 Take photo" /
+      "🖼️ Gallery" buttons + remove. The old "Image URL (optional)"
+      text input is gone. GLOBAL items in the edit screen are
+      unchanged — they inherit their image from the catalog.
+- [x] **iOS perms.** Already present in `app.json` from earlier
+      Razorpay setup (`NSCameraUsageDescription`,
+      `NSPhotoLibraryUsageDescription`,
+      `NSPhotoLibraryAddUsageDescription`). Copy mentions "payment
+      provider"; revisit if App Store review nitpicks.
+- [x] **Deps installed.** `expo-image-picker@^55.0.20` and
+      `expo-image-manipulator@^55.0.16` added via `npm install
+      --save` (the `npx expo install` route failed with a fetch
+      error mid-session). VERSIONS ARE NEWER THAN SDK 54's pinned
+      versions — run `npx expo install --check` on the user's
+      machine to confirm runtime compatibility; downgrade to SDK
+      54's pinned versions (~17.0.x / ~14.0.x) if expo-doctor flags
+      them.
+
+Verification:
+- `npm test`: 44 suites, 420 tests (was 406 → +14 new in
+  `tests/functions/imageUrlHelpers.test.ts`).
+- `npx tsc --noEmit` (functions): clean.
+- `npx tsc --noEmit` (root): 3 baseline errors only (firebase.ts
+  + 2 in useOrderStore.ts — all pre-existing, unrelated).
+- `npm run audit:indexes`: 22 chains / 8 composite / 0 missing
+  (unchanged, no new queries).
+- Deliberate break: commented out the host-check branch in
+  `validateMenuImageUrl`. Three tests went red, including the
+  canonical `rejects external host (picsum.photos) — canonical
+  exploit`. Reverted; all green.
+
+NOTE: auto-formatter stripped helper imports during PR 6 (same
+class of bug as PRs 1, 2, 4, 5):
+- `validateMenuImageUrl` stripped from `functions/src/index.ts` twice.
+- `useAuthStore`, `pickAndResizeImage`, `uploadMenuImage` stripped
+  from `AddCustomMenuItemScreen.tsx` and `ShopMenuItemEditScreen.tsx`
+  on the same save. "DO NOT REMOVE" comment blocks left above each.
+
+OTA risk callout: this PR adds TWO new Expo native modules. Both are
+config-plugin-managed and SHOULD work via OTA on existing TestFlight
+builds — but the only way to be sure is to OTA and try the picker on
+a real device. If the picker fails to launch (typical symptom: app
+crashes or shows a "Module not found" red-box), a fresh `eas build`
+is required before family testing can continue.
+
 ### Tag-along items (ride with whichever PR fits)
 
 - [ ] **Enable App Check on every callable.** Currently

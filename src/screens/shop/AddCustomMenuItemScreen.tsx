@@ -1,14 +1,14 @@
 import { useNavigation } from '@react-navigation/native';
 import React, { useState } from 'react';
 import {
-  Alert,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Switch,
-  Text,
-  TextInput,
-  View,
+    Alert,
+    Pressable,
+    ScrollView,
+    StyleSheet,
+    Switch,
+    Text,
+    TextInput,
+    View
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../../components/common/Button';
@@ -16,6 +16,10 @@ import ScreenHeader from '../../components/common/ScreenHeader';
 import { CATEGORIES, CategoryId } from '../../constants/categories';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
 import { orderService } from '../../services/orderService';
+// PR 6 — image upload pipeline. DO NOT REMOVE: auto-formatter has
+// stripped these in past PRs (1, 2, 4, 5, 6) and once already during
+// PR 6 itself. If tsc complains about useAuthStore /
+// pickAndResizeImage / uploadMenuImage, re-add these three lines.
 
 /**
  * Form to add a new CUSTOM menu item to the shop owner's menu.
@@ -292,4 +296,22 @@ const styles = StyleSheet.create({
   },
   categoryChipText: { ...typography.caption, color: colors.textSecondary },
   categoryChipTextActive: { color: colors.primaryDark, fontWeight: '700' },
+  // PR 6 — image preview + button styles.
+  imagePreview: {
+    width: '100%',
+    aspectRatio: 1,
+    borderRadius: radii.sm,
+    backgroundColor: colors.bg,
+    marginBottom: spacing.sm,
+  },
+  imagePlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderStyle: 'dashed',
+  },
+  placeholderText: { ...typography.caption, color: colors.textMuted },
+  imageButtonsRow: { flexDirection: 'row', gap: spacing.sm },
+  imageButtonCell: { flex: 1 },
 });
