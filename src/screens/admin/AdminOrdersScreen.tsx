@@ -1,6 +1,6 @@
 import { useNavigation } from '@react-navigation/native';
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../../components/common/Button';
 import EmptyState from '../../components/common/EmptyState';
@@ -35,6 +35,16 @@ export default function AdminOrdersScreen() {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<Record<string, OrderStatus | null>>({});
   const [retryNonce, setRetryNonce] = useState(0);
+  // Pull-to-refresh state. We bump retryNonce to force-restart the
+  // watcher (which fetches immediately on mount), then turn off
+  // `refreshing` on the next watcher callback so the spinner clears
+  // exactly when fresh data arrives — not on a fixed timeout.
+  const [refreshing, setRefreshing] = useState(false);
+  // Hotfix: per-card "Manual override" disclosure state. Only ONE
+  // card's override panel is expanded at a time — tapping another
+  // collapses the first. Prevents the admin from leaving multiple
+  // override panels open and tapping a wrong card by accident.
+  const [overrideExpandedId, setOverrideExpandedId] = useState<string | null>(null);
   // PR 2 — payment hardening (Phase B). Refund modal target. We track
   // the entire order rather than just the id so the modal can show
   // the amount in its title without an extra lookup.
@@ -63,6 +73,11 @@ export default function AdminOrdersScreen() {
       }
       // ALWAYS — see watcher contract refactor.
       setLoading(false);
+      // Pull-to-refresh: clear the spinner on the first callback
+      // after a refresh trigger, regardless of success/error. The
+      // refreshing flag is only set by the pull-down gesture; a
+      // normal poll-cycle callback finds it already false.
+      setRefreshing(false);
     });
     return unsubscribe;
   }, [isAdmin, retryNonce]);
@@ -173,6 +188,18 @@ export default function AdminOrdersScreen() {
         keyExtractor={o => o.id}
         contentContainerStyle={styles.list}
         ItemSeparatorComponent={() => <View style={{ height: spacing.md }} />}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => {
+              // Pull-to-refresh: bump retryNonce to force the watcher
+              // useEffect to re-run, which fetches immediately on
+              // mount. The spinner clears in the watcher callback.
+              setRefreshing(true);
+              setRetryNonce(n => n + 1);
+            }}
+          />
+        }
         ListHeaderComponent={
           <View style={styles.statsCard}>
             <Text style={styles.statsTitle}>Today</Text>
@@ -224,25 +251,102 @@ export default function AdminOrdersScreen() {
                     : undefined
                 }
               />
+
+              {/*
+                Hotfix: delivery substate timeline. The macro `status`
+                field only goes through pending → accepted → preparing
+                → out_for_delivery → delivered. The delivery partner's
+                interim states live in `deliveryPersonId` and
+                `pickedUpAt`, which the admin previously couldn't see
+                — so an order would visibly jump from "Out for
+                Delivery" to "Delivered" with no intermediate steps.
+                Renders only when status is in the delivery window
+                (out_for_delivery or delivered).
+              */}
+              {(item.status === 'out_for_delivery' ||
+                item.status === 'delivered') && (
+                <View style={styles.deliveryFlow}>
+                  {!item.deliveryPersonId &&
+                    item.status === 'out_for_delivery' && (
+                      <Text style={styles.flowStepPending}>
+                        ⏳ Awaiting delivery partner
+                      </Text>
+                    )}
+                  {item.deliveryPersonId && (
+                    <Text style={styles.flowStepDone}>
+                      🛵 Claimed by partner
+                    </Text>
+                  )}
+                  {item.pickedUpAt && (
+                    <Text style={styles.flowStepDone}>
+                      📦 Picked up · {formatOrderTime(item.pickedUpAt)}
+                    </Text>
+                  )}
+                  {item.deliveredAt && (
+                    <Text style={styles.flowStepDone}>
+                      ✅ Delivered · {formatOrderTime(item.deliveredAt)}
+                    </Text>
+                  )}
+                </View>
+              )}
+
+              {/*
+                Hotfix: action buttons hidden behind a "Manual override"
+                disclosure. Default state is read-only — the order
+                lifecycle is driven by shop owner and delivery partner
+                roles; admin should only intervene when something is
+                stuck (delivery partner ghosted, shop forgot to update,
+                etc.). One card's disclosure expanded at a time; tapping
+                another card collapses the first.
+              */}
               {actions.length > 0 && (
-                <View style={styles.actions}>
-                  {actions.map(next => {
-                    const isCancel = next === 'cancelled';
-                    const isLoading = pendingStatus === next;
-                    const anyPending = !!pendingStatus;
-                    return (
-                      <View key={next} style={styles.actionBtn}>
-                        <Button
-                          title={ACTION_LABELS[next]}
-                          onPress={() => handleAction(item.id, next)}
-                          variant={isCancel ? 'secondary' : 'primary'}
-                          loading={isLoading}
-                          disabled={anyPending && !isLoading}
-                          style={isCancel ? styles.cancelBtn : undefined}
-                        />
+                <View style={styles.overrideSection}>
+                  <Pressable
+                    onPress={() =>
+                      setOverrideExpandedId(
+                        overrideExpandedId === item.id ? null : item.id,
+                      )
+                    }
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      overrideExpandedId === item.id
+                        ? 'Hide manual override actions'
+                        : 'Show manual override actions'
+                    }
+                    style={styles.disclosureRow}
+                  >
+                    <Text style={styles.disclosureText}>
+                      {overrideExpandedId === item.id ? '▾' : '▸'}{'  '}
+                      Manual override
+                    </Text>
+                  </Pressable>
+                  {overrideExpandedId === item.id && (
+                    <>
+                      <Text style={styles.overrideHint}>
+                        Use only if shop owner or delivery partner can't
+                        update the order themselves.
+                      </Text>
+                      <View style={styles.actions}>
+                        {actions.map(next => {
+                          const isCancel = next === 'cancelled';
+                          const isLoading = pendingStatus === next;
+                          const anyPending = !!pendingStatus;
+                          return (
+                            <View key={next} style={styles.actionBtn}>
+                              <Button
+                                title={ACTION_LABELS[next]}
+                                onPress={() => handleAction(item.id, next)}
+                                variant={isCancel ? 'secondary' : 'primary'}
+                                loading={isLoading}
+                                disabled={anyPending && !isLoading}
+                                style={isCancel ? styles.cancelBtn : undefined}
+                              />
+                            </View>
+                          );
+                        })}
                       </View>
-                    );
-                  })}
+                    </>
+                  )}
                 </View>
               )}
             </View>
@@ -343,6 +447,44 @@ const styles = StyleSheet.create({
   },
   actionBtn: { flexGrow: 1, minWidth: 140 },
   cancelBtn: { backgroundColor: '#fde2e2' },
+  // Hotfix: delivery substate timeline + manual-override disclosure.
+  deliveryFlow: {
+    marginTop: spacing.sm,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    gap: 4,
+  },
+  flowStepPending: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontStyle: 'italic',
+  },
+  flowStepDone: {
+    ...typography.caption,
+    color: colors.textPrimary,
+  },
+  overrideSection: {
+    marginTop: spacing.md,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  disclosureRow: {
+    paddingVertical: spacing.xs,
+  },
+  disclosureText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '700',
+  },
+  overrideHint: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontStyle: 'italic',
+    marginTop: 2,
+    marginBottom: spacing.sm,
+  },
   errorBanner: {
     marginHorizontal: spacing.lg,
     marginTop: spacing.md,
