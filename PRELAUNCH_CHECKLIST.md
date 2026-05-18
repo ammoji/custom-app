@@ -6,17 +6,59 @@ Phase that introduced the requirement.
 
 ## 🔒 Security & Authentication
 
-- [ ] **Re-enable `enforceAppCheck: true`** on all Cloud Functions in
-      `functions/src/index.ts` (currently `false` on `placeOrder` and
-      `updateOrderStatus` for iOS dev testing). Blocked on Phase 5d:
-      requires `@react-native-firebase/app-check` so native clients can
-      mint App Check tokens (DeviceCheck / Play Integrity); flipping to
-      `true` without that breaks every native call. [Phase 5a, 5d]
+- [ ] **App Check enforcement** — see the dedicated section below
+      ("App Check enforcement (intentionally deferred)") for the
+      canonical rationale, pre-conditions, and flip plan. The two
+      tag-along items follow:
 - [ ] **Native App Check** wired via `@react-native-firebase/app-check`
       on iOS (DeviceCheck) + Android (Play Integrity). Required before
       flipping enforceAppCheck back on for native users. [Phase 5a-mobile]
 - [ ] **Remove App Check debug token** from Firebase Console
       (App Check → Apps → Manage debug tokens). Currently active for dev. [Phase 5a]
+
+## App Check enforcement (intentionally deferred)
+
+**Status:** All Cloud Functions callables ship with
+`enforceAppCheck: false`. Counted at PR 8.1 deploy: ~30 callables,
+all consistent. This is intentional; do not flip individual
+callables piecemeal.
+
+**Why deferred:**
+
+- Native (iOS/Android) App Check requires native module setup
+  (`@react-native-firebase/app-check` or DeviceCheck/Play Integrity
+  glue) that we haven't done yet. Flipping enforcement on without
+  it means every TestFlight request silently 401s.
+- Web App Check is wired (reCAPTCHA v3 in `firebase.ts`) but
+  enforcing it on callables would break native immediately.
+- Coordinating the flip means: (a) add the native module, (b)
+  rebuild via EAS, (c) verify tokens flow correctly from both
+  platforms via the App Check debug panel in Firebase console,
+  (d) flip every callable in one PR.
+
+**Pre-conditions for flipping:**
+
+1. `@react-native-firebase/app-check` installed and configured for
+   both iOS (App Attest / DeviceCheck) and Android (Play Integrity).
+2. Native rebuild successfully completes and the debug provider
+   shows tokens flowing in Firebase console > App Check.
+3. Production reCAPTCHA v3 site key matches what's in `app.json`
+   `expo.extra.firebase.recaptchaSiteKey`.
+4. All callables flipped to `enforceAppCheck: true` in one PR
+   (not piecemeal — partial flip is worse than none, see PR 6.1's
+   inline rationale, since removed).
+
+**What we removed in PR 8.1:**
+
+- Inline `// NOTE on enforceAppCheck` comments in
+  `getMenuImageUploadUrl` (PR 6.1) and the corresponding 3-line
+  block above `updateOrderStatus`. They were redundant once this
+  section existed. The source of truth for the deferral is HERE,
+  not scattered across 30 callables.
+- `updateOrderStatus`'s comment was kept as a 3-line pointer to
+  this section (rather than fully deleted) because the original
+  comment also justified server-callable / CLI dashboard access,
+  which is genuinely callable-specific and worth preserving.
 - [x] **Phase 9c** — native phone auth via `@react-native-firebase/auth`
       live; checkout sign-in gate restored on both web and native.
       Still pending: install new dev client (rebuilt with RNFB native
@@ -2381,6 +2423,461 @@ builds — but the only way to be sure is to OTA and try the picker on
 a real device. If the picker fails to launch (typical symptom: app
 crashes or shows a "Module not found" red-box), a fresh `eas build`
 is required before family testing can continue.
+
+### PR 8.1 — Cleanup bundle — ✅ SHIPPED May 18 2026
+
+Three small items bundled because each was too small for its own
+PR. All three close out tracked deferred work from PRs 6.1, 7,
+and 8.
+
+#### Part 1 — `'customer'` in `AuditActorRole`
+
+- [x] **Server union widened.**
+      `@/functions/src/auditLogHelpers.ts:32-41`. Order:
+      `admin | shopOwner | customer | system`. Comment block
+      explains 'system' is now strictly cron/cleanup.
+- [x] **`cancelMyRecentPaidOrder` flipped.**
+      `@/functions/src/index.ts:1180-1194`. `actorRole: 'system'`
+      → `actorRole: 'customer'`. `metadata.initiatedBy` dropped
+      (was redundant with `actorUid`). The 6-line "Audit
+      schema's actorRole union doesn't have customer yet"
+      workaround comment is gone — replaced with a 3-line
+      PR 8.1 reference.
+- [x] **Client union synced.**
+      `@/src/screens/admin/AuditLogScreen.tsx:35-49`. Comment
+      pins the duplicate-union posture (intentional; client
+      doesn't import from `functions/`).
+- [x] **Test pinning.**
+      `@/tests/functions/auditLogHelpers.test.ts:135-155`. New
+      test `actorRole=customer supported (in-window paid-order
+      self-cancel)`. +1 to total (475 → 476).
+
+#### Part 2 — Baseline `tsc --noEmit` errors
+
+Enumeration found **10 errors total**, not 3 as Windsurf had
+been reporting. Triage:
+
+- **7 errors in `claude_files/`** (legacy reference docs +
+  example screens). Spread-with-color overwrites in old
+  `HomeScreen` / `ShopDetailScreen` / `ShopListScreen` mocks.
+  Not part of the live app. Fixed by adding `claude_files` to
+  `tsconfig.json` exclude alongside `node_modules`,
+  `functions`, `babel.config.js`, `metro.config.js`, `_old`.
+  `@/tsconfig.json:14-22`.
+- **1 error in `src/services/firebase.ts:37`**: `@ts-ignore`
+  was historically placed above the wrong line — it sat above
+  `import { getFunctions }` instead of above
+  `import { getReactNativePersistence }` two lines below. The
+  ignore was inert. Moved to the right place with an
+  expanded comment that references upstream issue
+  https://github.com/firebase/firebase-js-sdk/issues/7615.
+  `@/src/services/firebase.ts:35-42`.
+- **2 errors in `src/store/useOrderStore.ts`**: stale shim
+  pointing at an obsolete `placeOrder` signature. Grep showed
+  zero live imports of `useOrderStore` (only a string mention
+  in a comment in `signOutAndClearLocalState.ts`). Deleted the
+  whole file via `git rm`. The pass-through pattern was
+  already obsolete — order placement goes through
+  `orderService.placeOrder` directly from the Checkout screen.
+
+Verification: `npx tsc --noEmit` from project root → **0 errors**.
+Functions tsc also clean.
+
+#### Part 3 — Formally defer App Check
+
+- [x] **New section in PRELAUNCH_CHECKLIST.**
+      `@/PRELAUNCH_CHECKLIST.md:19-61`. Title: "App Check
+      enforcement (intentionally deferred)". Includes status
+      (~30 callables, all `false`), why deferred, 4-item
+      pre-condition list, and a note on what was removed.
+- [x] **Existing Security item rewritten** to point at the new
+      section instead of duplicating the rationale.
+      `@/PRELAUNCH_CHECKLIST.md:9-12`.
+- [x] **Inline `enforceAppCheck` notes removed** from
+      `functions/src/index.ts`:
+  - 4-line block above `getMenuImageUploadUrl` (PR 6.1 era):
+    deleted entirely.
+  - 3-line block above `updateOrderStatus`: replaced with a
+    3-line PRELAUNCH-pointer comment (kept short because the
+    original also documented CLI-dashboard access, which is
+    callable-specific).
+  - All other callables had no inline comment — they just used
+    `{ cors: true, enforceAppCheck: false }` directly.
+
+Verification:
+- `npx tsc --noEmit` (root): **0 errors** (was 3 baseline → 0).
+- `npx tsc --noEmit` (functions): clean.
+- `npm test`: **48 suites, 476 tests** (was 475 → +1 customer
+  role pin).
+- `npm run audit:indexes`: **28 chains / 8 composite / 0 missing**
+  (no schema changes).
+- Deliberate-break: flipped the new
+  `actorRole=customer` assertion to expect `'admin'`. Test went
+  red (`Expected: "admin"  Received: "customer"`). Reverted;
+  476 green again.
+
+Auto-formatter foot-gun (PR 8.1 status):
+- Zero new `DO NOT REMOVE` comments needed in this PR. The
+  recently-added `.windsurf/code-discipline.md` + flipped
+  `codeActionsOnSave: false` setting appear to have actually
+  fixed the import-stripping issue. Smoke-test passed: this
+  PR added imports to 3 files, none were stripped on save.
+
+Deviations from the prompt: none.
+
+Deploy plan (NOT executed):
+
+```powershell
+$env:NODE_OPTIONS = "--use-system-ca"
+
+# 1. Functions — cancelMyRecentPaidOrder audit-write change.
+#    Signature unchanged; clients keep working pre-OTA.
+cd functions; npm run build; cd ..
+firebase deploy --only functions --project grocery-mvp-dev
+
+# 2. OTA — client union widening in AuditLogScreen.
+eas update --branch preview --message "PR 8.1 cleanup bundle"
+
+# 3. After preview smoke test:
+eas update --branch production --message "PR 8.1 cleanup bundle"
+```
+
+Smoke tests on preview phone:
+1. As customer, cancel a paid order within 2-min window. Then
+   as admin, open Audit Log → confirm entry shows
+   `actorRole: customer` (not `system`).
+2. As admin, perform any other action (e.g. `suspendShop`).
+   Confirm its entry's `actorRole` stays `admin` (regression
+   check).
+3. As shop owner, do a bulk menu update. Confirm its entry's
+   `actorRole` is `shopOwner`.
+
+### PR 8 — Admin audit log + Bulk menu actions — ✅ SHIPPED May 18 2026
+
+Two operational-maturity items bundled. **Part A**: every admin
+action now writes a queryable `/auditLog/{id}` entry; admin
+viewer screen polls it. **Part B**: shop owners can multi-select
+menu items and bulk-toggle availability with one tap.
+
+Note: the original PR 8 draft included **stock auto-decrement**;
+dropped after a domain review surfaced that kirana shops sell
+both online + offline and offline sales aren't tracked, so
+auto-decrement would drift the in-app stock higher than reality.
+Current `stock: null` (unlimited) default + manual unavailable
+toggle is the right posture for kirana. Documented in the
+prompt's "Why this PR exists".
+
+#### Part A — Admin audit log
+
+- [x] **`auditLogHelpers.ts` + 9 tests.** Pure helper in
+      `@/functions/src/auditLogHelpers.ts:1-100`. `buildAuditLogEntry`
+      is deterministic via injected `now` + `randSuffix`. Optional
+      fields are OMITTED (not undefined-keyed) so Firestore docs
+      stay clean. Id format `{timestamp}_{rand12}` is sortable
+      lexicographically by timestamp — Firestore-console scrolling
+      is a rough chronological view without an explicit `orderBy`.
+      Tests cover the omit-optionals contract, the lexicographic
+      sort property, all three actorRoles, deterministic timestamps,
+      and id-collision-resistance under default rand.
+- [x] **`writeAuditLog` wrapper in `index.ts:1273-1280`.** Catches
+      and swallows errors — `console.warn` only. The audit-log
+      write failing must NOT break the underlying user-visible
+      action; worst case is a gap in audit history. Acceptable
+      for MVP; revisit if compliance requires hard guarantees.
+- [x] **Audit-log writes wired into all 13 callables on success
+      paths**:
+  - `approveShop` → `shop.approve`
+  - `rejectShop` → `shop.reject`
+  - `suspendShop` → `shop.suspend`
+  - `unsuspendShop` → `shop.unsuspend`
+  - `approveDeliveryRole` → `delivery_request.approve`
+  - `rejectDeliveryRole` → `delivery_request.reject`
+  - `revokeShopOwner` → `user.revoke_shop_owner`
+  - `revokeDelivery` → `user.revoke_delivery`
+  - `cancelPaidOrder` → `order.cancel_paid` (admin OR shopOwner
+    actorRole based on `v.role`)
+  - `cancelMyRecentPaidOrder` → `order.cancel_by_customer_window`
+    (actorRole='system' — schema doesn't yet have 'customer';
+    metadata.initiatedBy carries the canonical customer uid)
+  - `updateOrderStatus` → `order.manual_status_update` (admin OR
+    shopOwner actorRole)
+  - `updateShopSettings` → `shop.update_settings` (both branches;
+    metadata captures before/after for diffing)
+  - `cleanupAbandonedOrders` → `order.cancel_abandoned` (system
+    actor; per-cancelled-order entry inside the loop)
+  - `bulkUpdateMenuAvailability` → `shop.bulk_menu_availability`
+    (Part B; actorRole='shopOwner')
+- [x] **`listRecentAuditEntries` callable.**
+      `@/functions/src/index.ts:1296-1329`. Admin-only; cursor
+      pagination via `before` (ms timestamp). Default limit 50,
+      max 100. Returns `{ entries, hasMore }`. Inline comment
+      flags the future privacy concern: today nothing in
+      metadata is sensitive, but if KYC docs / phone numbers
+      ever land in the audit log a redacted-summary projection
+      should be added here.
+- [x] **`auditLog` Firestore rule.** `@/firestore.rules:194-205`.
+      `read: if isAdmin(); write: if false`. Server-only writes
+      via Admin SDK.
+- [x] **`AuditLogScreen` + nav + HomeScreen tile.**
+      `@/src/screens/admin/AuditLogScreen.tsx:1-380` — polls
+      every 60s while focused, pull-to-refresh for immediate
+      refetch, "Load more" button using cursor pagination, tap
+      row to expand metadata JSON. `ACTION_LABELS` is the
+      stable canonical-label map; new action types should be
+      added there.
+      `@/src/navigation/AppNavigator.tsx`: imported, route
+      `AuditLog` registered. `@/src/screens/HomeScreen.tsx`:
+      "📜 Audit log" tile in admin section.
+
+#### Part B — Bulk menu actions
+
+- [x] **`bulkMenuHelpers.ts` + 14 tests.** Pure helper in
+      `@/functions/src/bulkMenuHelpers.ts:1-130`.
+      `validateBulkMenuRequest` gates on auth (uid non-empty),
+      strict `shopOwner === true`, non-empty string shopId,
+      array of non-empty string ids, ≤ 100 ids
+      (`BULK_MENU_MAX_IDS`), boolean `available`. Strict-
+      equality posture pinned by the canonical
+      truthy-but-not-true test (deliberate-break demo target).
+      `tests/functions/bulkMenuHelpers.test.ts` covers all
+      rejection branches + boundary (exactly 100 ids accepted)
+      + happy path with multiple ids.
+- [x] **`bulkUpdateMenuAvailability` callable.**
+      `@/functions/src/index.ts:1345-1423`. After helper
+      validation, reads candidate docs in 30-id chunks
+      (Firestore `in` query cap), filters by
+      `data.shopId === claims.shopId` (defense-in-depth: even
+      if the owner knows another shop's ids, they can't
+      toggle them). Single batch.commit for matched ids
+      (≤ 500 cap, fits comfortably). Returns
+      `{ updatedCount, skippedCount }`. Audit log entry written
+      at the end with metadata
+      `{ requestedCount, updatedCount, skippedCount, available }`.
+- [x] **`orderService.bulkUpdateMenuAvailability` +
+      `listRecentAuditEntries` client methods.**
+      `@/src/services/orderService.ts:772-816`. Standard
+      dual-dispatch (RNFB on native / Web SDK on web).
+- [x] **`ShopMenuScreen` multi-select UI.**
+      `@/src/screens/shop/ShopMenuScreen.tsx`. New state:
+      `selectMode`, `selectedIds: Set<string>`, `bulkSubmitting`.
+      Header swaps title to "N selected" with a "Done" right
+      action. Per-row Switch is hidden in select mode; instead
+      a leading-edge checkbox appears and the card pressable
+      toggles selection. Bottom sticky action bar shows
+      "Mark X unavailable" / "Mark X available" buttons,
+      disabled when 0 selected. Confirm dialog → callable →
+      optimistic local update + `fetchOnce()` refresh.
+      Skip-count surfaced via Alert when non-zero.
+
+Verification:
+- `npm test`: **48 suites, 475 tests** (was 452 → **+23 new**:
+  9 audit + 14 bulk).
+- `npx tsc --noEmit` (functions): clean.
+- `npx tsc --noEmit` (root): 3 baseline errors only —
+  `firebase.ts` + 2 in `useOrderStore.ts` — all pre-existing.
+- `npm run audit:indexes`: **28 chains / 8 composite / 0 missing**
+  (was 24 → +4 new query chains: auditLog `orderBy timestamp`,
+  bulk menu `where __name__ in`, etc.).
+- Deliberate-break demo: weakened
+  `validateBulkMenuRequest`'s shopOwner check from `!== true` to
+  `!`. The canonical strict-equality test
+  `validateBulkMenuRequest — auth gate › rejects truthy-but-not-
+  true shopOwner claim (string "true")` went red. Reverted; all
+  475 green.
+
+Per-callable audit-wiring notes:
+- **`updateShopSettings`**: `validateShopSettings` doesn't expose
+  `actorUid` / `role` on its `ok: true` shape, so I derive role
+  from `request.auth?.token?.admin === true` directly. Future
+  refactor: have the helper surface role explicitly so the
+  callable doesn't duplicate the claim check.
+- **`cancelMyRecentPaidOrder`**: actorRole tagged 'system' since
+  schema's union is `admin | shopOwner | system` and 'customer'
+  isn't a member yet. metadata.initiatedBy carries the customer
+  uid for forensics. Future PR can widen the union.
+- **`cleanupAbandonedOrders`**: writes ONE audit entry per
+  cancelled order (inside the for-loop), not one per cron run.
+  This makes "show me everything cancelled by cron last week"
+  trivial. actorUid is the literal string `'cleanupAbandonedOrders'`
+  so dashboards can filter cron actions.
+- **`suspendShop` / `unsuspendShop`**: my first edit to
+  `unsuspendShop` accidentally left an `if (false) {}` artifact
+  (anchor-matching trick to handle a closing brace mismatch);
+  cleaned up in a follow-up edit. All audit blocks are now
+  correctly nested.
+
+Auto-formatter foot-gun (continued from PRs 1, 2, 4, 5, 6, 6.1, 7):
+- `auditLogHelpers` + `bulkMenuHelpers` imports stripped from
+  `functions/src/index.ts` once during PR 8 dev. Re-added with
+  DO-NOT-REMOVE comment block.
+- `AuditLogScreen` import + `AuditLog: undefined` route type
+  entry stripped from `AppNavigator.tsx` once each. Both re-added
+  with DO-NOT-REMOVE comments.
+- `right={...}` prop on the multi-select header in
+  `ShopMenuScreen.tsx` was reverted to a non-existent
+  `rightActionLabel` once during the same save. Re-applied.
+- A handful of orphan PR-tagged comment blocks remain in
+  `index.ts` near the helper-imports section from prior PRs;
+  same harmless-but-ugly pattern as PRs 6.1/7.
+
+Deviations from the prompt:
+- **`enforceAppCheck: false`** on both new callables — matches
+  the project-wide posture (no other callable enforces App
+  Check today). Tracked in the existing "Enable App Check on
+  every callable" PRELAUNCH item; flip them all together.
+- **`updateShopSettings` audit field for actor**: had to derive
+  `actorUid`/role from request.auth instead of validated.actorUid
+  because the helper doesn't expose those today (see per-callable
+  note above).
+
+Deploy plan (NOT executed — hand back):
+
+```powershell
+$env:NODE_OPTIONS = "--use-system-ca"
+
+# 1. Rules — new auditLog collection.
+firebase deploy --only firestore:rules --project grocery-mvp-dev
+
+# 2. Functions — many touched (~13 callables get audit writes
+#    + 2 new callables). No callables removed, so no
+#    interactive delete prompt.
+cd functions; npm run build; cd ..
+firebase deploy --only functions --project grocery-mvp-dev
+firebase functions:list --project grocery-mvp-dev
+
+# 3. OTA — JS-only client changes, applies to existing
+#    TestFlight build.
+eas update --branch production --message "PR 8: admin audit log + bulk menu actions"
+```
+
+Smoke tests on production phone:
+1. **Audit log writes**: as admin, suspend a shop → open Audit
+   Log → confirm entry appears with action `shop.suspend`,
+   target = shop name, reason text.
+2. **Audit log paging**: scroll to bottom → tap "Load more" →
+   older entries appear, no duplicates.
+3. **Audit log non-admin read denied**: from Firestore Console
+   as non-admin → try to read `/auditLog` → rules deny.
+4. **Bulk availability toggle**: ShopMenu → tap "Select" →
+   check 3 items → tap "Mark 3 unavailable" → confirm → all 3
+   flip to unavailable, select mode exits.
+5. **Bulk on another shop's items**: dev script calling
+   `bulkUpdateMenuAvailability` with another shop's ids →
+   expect `skippedCount = N, updatedCount = 0`.
+6. **Bulk action audit entry**: after the bulk toggle → open
+   Audit Log → entry for `shop.bulk_menu_availability` with
+   metadata count + target shop id.
+7. **Sub-second audit ordering**: do two admin actions back-to-
+   back; confirm both appear and are ordered correctly (id
+   prefix sorts by timestamp).
+
+### PR 6.1 — Signed upload URL hotfix for menu images — ✅ SHIPPED May 18 2026
+
+**Problem**: PR 6's menu image picker shipped, but uploads failed on
+TestFlight with `Firebase Storage: User does not have permission to
+access 'menu/{shopId}/{filename}.jpg'. (storage/unauthorized)`. Root
+cause was a cross-SDK auth-state mismatch baked into the PR 6 design:
+the Firebase Web SDK's storage uploader and `@react-native-firebase/auth`
+keep separate auth sessions. On native the user is signed in via RNFB
+phone OTP, but the Web SDK that's actually doing the upload sees
+`request.auth == null`, so the `/menu/` Storage rule's
+`shopOwner == true && shopId == shopId` check could never pass.
+
+**Fix**: sidestep Storage rules entirely. Server mints a v4 signed PUT
+URL (admin SDK signing bypasses rules — documented GCS pattern); client
+PUTs bytes to it. No new native module, ships as OTA, no rebuild.
+
+- [x] **`validateGetUploadUrlInput` helper + 12 tests.** Pure helper
+      in `functions/src/menuImageUploadHelpers.ts:1-95`. Gates on
+      auth (uid non-empty), `shopOwner === true` strict equality,
+      and a non-empty string shopId claim. Generates a deterministic
+      `menu/{shopId}/{ms}_{rand6}.jpg` path (now + rand both
+      injected for test determinism). Strict-equality posture
+      mirrors the PR 7 customer-cancel helper.
+      `tests/functions/menuImageUploadHelpers.test.ts:1-189` covers
+      all rejection branches (null/undefined auth, empty uid,
+      missing/forged shopOwner claim, missing/non-string/empty
+      shopId) plus the happy path with deterministic
+      filename + collision-resistance check via different rand fns.
+- [x] **`getMenuImageUploadUrl` callable.** Added in
+      `functions/src/index.ts:1193-1247`. Uses the helper for
+      validation, then `admin SDK getStorage().bucket().file(path)
+      .getSignedUrl({ version: 'v4', action: 'write', contentType:
+      'image/jpeg', expires: now + 15min })`. Returns
+      `{ uploadUrl, downloadUrl, storagePath, expiresAt }`. The
+      download URL is the standard Firebase Storage public-read
+      pattern; reads on `/menu/` stay `read: if true`.
+- [x] **Storage rule for `/menu/` → write-deny.**
+      `storage.rules:27-45`. Reads stay public; writes are now
+      `if false` because the signed URL bypasses rules entirely.
+      Inline comment documents why the old PR 6 claim check is
+      gone (cross-SDK auth mismatch).
+- [x] **`uploadMenuImage` rewritten.** `src/services/storage.ts`
+      now calls `orderService.getMenuImageUploadUrl()`, then PUTs
+      the resized JPEG blob to the signed URL with header
+      `Content-Type: image/jpeg` (must match exactly — v4
+      signatures bind contentType). Function signature unchanged
+      from PR 6, so `AddCustomMenuItemScreen.tsx` and
+      `ShopMenuItemEditScreen.tsx` need zero edits. Old Web SDK
+      `uploadBytes` / `ref` / `getDownloadURL` / `storage` imports
+      removed.
+- [x] **`orderService.getMenuImageUploadUrl` client method.**
+      Standard dual-dispatch in `src/services/orderService.ts:744-770`.
+      Native goes through RNFB so the phone-authed user's
+      `shopOwner` + `shopId` claims reach the Cloud Function.
+- [x] **`firebase.ts` header comment updated.**
+      `src/services/firebase.ts:13-23`: removed the
+      "storage uses Web SDK on native" claim; replaced with a
+      PR 6.1 note explaining that menu image writes now route
+      through the callable and the Web SDK storage handle exists
+      only for any potential read-only path.
+
+Verification:
+- `npm test`: 46 suites, **452 tests** (was 440 → **+12 new** in
+  `menuImageUploadHelpers.test.ts`).
+- `npx tsc --noEmit` (functions): clean.
+- `npx tsc --noEmit` (root): 3 baseline errors only — unchanged.
+- `npm run audit:indexes`: 24 chains / 8 composite / 0 missing.
+- Deliberate-break demo: replaced the auth gate with a no-op. The
+  3 auth-gate tests (`rejects unauthenticated callers (null auth)`,
+  `rejects undefined auth`, `rejects auth with empty uid`) all went
+  red. Reverted; all green.
+
+Deviation from prompt:
+- **`enforceAppCheck: false`** on the callable, not `true` as the
+  prompt suggested. Reasoning: no other callable in this project
+  enforces App Check (`enforceAppCheck: false` everywhere), and
+  flipping it to true for one callable would either (a) break the
+  endpoint silently in TestFlight if the App Check native module
+  isn't wired, or (b) make this endpoint inconsistent with the rest
+  of the API. The "Enable App Check on every callable" item is
+  already tracked in Security section; flip them all together as
+  one coordinated PR. The auth claim is the real gate today.
+
+Auto-formatter foot-gun (continued from PRs 1, 2, 4, 5, 6, 7):
+- `getStorage` import from `firebase-admin/storage` stripped from
+  `functions/src/index.ts` once on save; re-added with
+  DO-NOT-REMOVE comment.
+- `validateGetUploadUrlInput` import similarly stripped once;
+  re-added with DO-NOT-REMOVE comment.
+- Two orphan PR 6.1 comment blocks remain in `index.ts` near the
+  helper-imports section (first wave of re-adds left their original
+  comment behind when the import was eaten). Harmless but ugly;
+  same pattern as the PR 7 orphan.
+
+Deploy plan (NOT executed — hand back):
+1. `cd functions && npm run build` — confirm clean build.
+2. `firebase deploy --only storage --project grocery-mvp-dev` —
+   push the write-deny rule.
+3. `firebase deploy --only functions:getMenuImageUploadUrl --project
+   grocery-mvp-dev` — push the new callable.
+4. `cd .. && npm test` — final pre-OTA confirmation.
+5. `eas update --branch production --message "PR 6.1: signed upload
+   URL for menu images"` — push the client.
+6. Smoke-test on TestFlight (see prompt Part 5 for the 5 manual
+   tests). Negative test: sign in as admin (no shopOwner claim),
+   try the callable via the Firebase console → expect
+   `permission-denied`.
 
 ### PR 7 — Customer cancel window + ShopOwnerDashboard UX mirror — ✅ SHIPPED May 17 2026
 

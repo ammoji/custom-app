@@ -731,6 +731,90 @@ export const orderService = {
     return result.data as { ok: boolean; refundId?: string };
   },
 
+  // PR 6.1 — Mint a signed PUT URL for a menu image upload. Server
+  // derives shopId from the caller's auth claims and chooses the
+  // storage path; client just blindly PUTs bytes to uploadUrl with
+  // header Content-Type: image/jpeg (must match exactly — v4
+  // signatures bind contentType), then saves downloadUrl on the
+  // menu item doc.
+  //
+  // Native dispatch goes through RNFB so the phone-authed user's
+  // custom claims (shopOwner, shopId) reach the Cloud Function. The
+  // Web SDK path is for web only.
+  async getMenuImageUploadUrl(): Promise<{
+    uploadUrl: string;
+    downloadUrl: string;
+    storagePath: string;
+    expiresAt: number;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'getMenuImageUploadUrl',
+      );
+      const result = await fn({});
+      return result.data as {
+        uploadUrl: string;
+        downloadUrl: string;
+        storagePath: string;
+        expiresAt: number;
+      };
+    }
+    const fn = httpsCallable(functions, 'getMenuImageUploadUrl');
+    const result = await fn({});
+    return result.data as {
+      uploadUrl: string;
+      downloadUrl: string;
+      storagePath: string;
+      expiresAt: number;
+    };
+  },
+
+  // PR 8 Part B — Bulk-toggle availability on multiple menu items
+  // owned by the caller's shop. Server validates shopOwner claim +
+  // per-id ownership; ids that don't match the caller's shop are
+  // silently dropped (returned as `skippedCount`).
+  async bulkUpdateMenuAvailability(args: {
+    menuItemIds: string[];
+    available: boolean;
+  }): Promise<{ updatedCount: number; skippedCount: number }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'bulkUpdateMenuAvailability',
+      );
+      const result = await fn(args);
+      return result.data as {
+        updatedCount: number;
+        skippedCount: number;
+      };
+    }
+    const fn = httpsCallable(functions, 'bulkUpdateMenuAvailability');
+    const result = await fn(args);
+    return result.data as {
+      updatedCount: number;
+      skippedCount: number;
+    };
+  },
+
+  // PR 8 Part A — Admin-only paginated audit-log reader. Cursor
+  // pagination via `before` (ms timestamp). Returns up to `limit`
+  // entries (default 50, max 100) ordered by timestamp desc, plus
+  // a `hasMore` flag for the "Load more" button.
+  async listRecentAuditEntries(args?: {
+    limit?: number;
+    before?: number;
+  }): Promise<{ entries: any[]; hasMore: boolean }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'listRecentAuditEntries',
+      );
+      const result = await fn(args ?? {});
+      return result.data as { entries: any[]; hasMore: boolean };
+    }
+    const fn = httpsCallable(functions, 'listRecentAuditEntries');
+    const result = await fn(args ?? {});
+    return result.data as { entries: any[]; hasMore: boolean };
+  },
+
   // Returns shops with no current owner (ownerUid null/missing).
   // Powers the BecomeShopOwner picker.
   async listAvailableShops(): Promise<

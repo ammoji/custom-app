@@ -10,9 +10,17 @@
  *     Expo SDK 54 + RN 0.81 + static frameworks (Swift module emit
  *     errors that no Podfile patch could fix). See PRELAUNCH_CHECKLIST
  *     for the migration target once upstream resolves it.
- *   - native: still uses this web SDK for storage AND for Firestore
- *     reads of world-readable collections (shops, products). Those work
- *     cross-SDK because their security rules don't gate on request.auth.
+ *   - native: still uses this web SDK for Firestore reads of
+ *     world-readable collections (shops, products). Those work
+ *     cross-SDK because their security rules don't gate on
+ *     request.auth.
+ *   - PR 6.1: storage uploads NO LONGER use the Web SDK on native.
+ *     The cross-SDK auth mismatch (RNFB auth ≠ Web SDK auth) made
+ *     every auth-gated write fail with storage/unauthorized. Menu
+ *     image uploads now route through the `getMenuImageUploadUrl`
+ *     callable (signed PUT URL). The `storage` export below is
+ *     still defined for any read-only path that may use it on web,
+ *     but no client code path writes via the Web SDK anymore.
  *
  * Real-time snapshot listeners (onSnapshot) are replaced by polling on
  * native — see orderService.watchOrder / watchAllOrders. Cadence: 5s
@@ -24,8 +32,13 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
 import { getApps, initializeApp } from 'firebase/app';
-// @ts-ignore - getReactNativePersistence is exported but not in the public types
 import { getFunctions } from '@firebase/functions';
+// PR 8.1 — `@ts-ignore` was historically on the wrong line (above
+// `getFunctions`). `getReactNativePersistence` IS exported by
+// firebase/auth at runtime (the Web SDK ships it for RN consumers)
+// but not declared in the public .d.ts surface. Upstream issue:
+// https://github.com/firebase/firebase-js-sdk/issues/7615.
+// @ts-ignore — exported at runtime, missing from public types.
 import { getAuth, getReactNativePersistence, initializeAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';

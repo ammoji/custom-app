@@ -1,7 +1,26 @@
 {
+  // Across 8+ PRs Windsurf's TypeScript LSP has stripped imports as
+  // a side effect of source.organizeImports running on save. The
+  // previous setting was "explicit" — which despite the name means
+  // "fire on every Save command" in VSCode's codeActionsOnSave
+  // context. Turning it off is the primary fix; see
+  // .windsurf/code-discipline.md for the full story and the
+  // additional safety nets (audit script + agent discipline rules).
+  //
+  // If a future contributor wants to restore organize-imports as a
+  // manual command, the keybinding Shift+Alt+O still works on
+  // demand without auto-firing on save.
   "editor.codeActionsOnSave": {
-    "source.fixAll": "explicit",
-    "source.organizeImports": "explicit",
-    "source.sortMembers": "explicit"
-  }
+    "source.fixAll": "never",
+    "source.organizeImports": "never",
+    "source.removeUnusedImports": "never",
+    "source.addMissingImports": "never",
+    "source.sortMembers": "never"
+  },
+
+  // Belt-and-suspenders: some extensions hook willSaveTextDocument
+  // rather than codeActionsOnSave. Auto-save off forces explicit
+  // saves which makes any accidental strip easier to attribute and
+  // catch via git diff.
+  "files.autoSave": "off"
 }

@@ -208,16 +208,46 @@ export default function OrderDetailScreen() {
                     ? 'Failed'
                     : order.paymentStatus === 'expired'
                       ? 'Expired'
-                      : 'Processing…'
+                      : order.paymentStatus === 'refunded'
+                        ? 'Refunded ✓'
+                        : order.paymentStatus === 'refund_pending'
+                          ? 'Refund pending'
+                          : order.paymentStatus === 'refund_failed'
+                            ? 'Refund failed — contact support'
+                            : 'Processing…'
               }
               valueColor={
-                order.paymentStatus === 'paid'
+                order.paymentStatus === 'paid' ||
+                order.paymentStatus === 'refunded'
                   ? colors.success
-                  : order.paymentStatus === 'failed' || order.paymentStatus === 'expired'
+                  : order.paymentStatus === 'failed' ||
+                      order.paymentStatus === 'expired' ||
+                      order.paymentStatus === 'refund_failed'
                     ? colors.danger
                     : colors.textSecondary
               }
             />
+          )}
+          {/* PR 7 hotfix — refund state context lines. Before, all
+              three refund states fell through to "Processing…" which
+              left the user wondering what was happening. */}
+          {order.paymentMethod === 'online' && order.paymentStatus === 'refunded' && (
+            <Text style={styles.paymentNote}>
+              Refund of {formatRupees(order.total)} processed by Razorpay.
+              Funds typically reach your account in 5–7 business days.
+            </Text>
+          )}
+          {order.paymentMethod === 'online' && order.paymentStatus === 'refund_pending' && (
+            <Text style={styles.paymentNote}>
+              Refund of {formatRupees(order.total)} is being processed.
+              This page will update once Razorpay confirms.
+            </Text>
+          )}
+          {order.paymentMethod === 'online' && order.paymentStatus === 'refund_failed' && (
+            <Text style={styles.paymentNote}>
+              We couldn't process your refund automatically. Our team has
+              been notified and will reach out within 24 hours.
+            </Text>
           )}
           {order.paymentMethod === 'online' && order.paymentStatus === 'failed' && (
             <Text style={styles.paymentNote}>
@@ -247,13 +277,19 @@ export default function OrderDetailScreen() {
               After that you'll need to contact support.
             </Text>
             <View style={{ height: spacing.md }} />
+            {/* PR 7 hotfix — was variant="secondary" but the secondary
+                button's background (colors.primaryLight) is identical
+                to this card's background, so the button looked like
+                plain text. Switched to variant="primary" so the green
+                fill makes it unambiguously tappable. See Button.tsx —
+                secondary bg = colors.primaryLight = card bg. */}
             <Button
               title={
                 windowCancelling
                   ? 'Cancelling…'
                   : `Cancel order (${formatMmSs(remainingMs)} left)`
               }
-              variant="secondary"
+              variant="primary"
               onPress={handleWindowCancel}
               loading={windowCancelling}
               disabled={windowCancelling}

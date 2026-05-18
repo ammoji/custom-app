@@ -190,5 +190,18 @@ service cloud.firestore {
       allow create: if isOwner(uid);
       allow update, delete: if false;
     }
+
+    // PR 8 — Admin audit log. Writes are server-only via Admin SDK
+    // (writeAuditLog wrapper in functions/src/index.ts). Admin reads
+    // are gated by listRecentAuditEntries callable; the rule below
+    // additionally permits Firestore-console direct reads by admins
+    // for incident response. No non-admin reads — even shop owners
+    // can't see their own audit entries client-side; if a shop owner
+    // wants to see "what admin actions affected my shop", we'll
+    // build a redacted projection in a future PR.
+    match /auditLog/{entryId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
   }
 }

@@ -244,6 +244,18 @@ export default function HomeScreen() {
                 <Text style={styles.adminChevron}>›</Text>
               </Pressable>
             )}
+            {/* PR 8 Part A — admin audit log tile. */}
+            {isAdmin && (
+              <Pressable
+                style={styles.adminRow}
+                onPress={() => nav.navigate('AuditLog')}
+                accessibilityRole="button"
+                accessibilityLabel="Audit log"
+              >
+                <Text style={styles.adminText}>📜  Audit log</Text>
+                <Text style={styles.adminChevron}>›</Text>
+              </Pressable>
+            )}
           </>
         )}
 

@@ -11,5 +11,13 @@
   "include": [
     "**/*.ts",
     "**/*.tsx"
+  ],
+  "exclude": [
+    "node_modules",
+    "functions",
+    "babel.config.js",
+    "metro.config.js",
+    "_old",
+    "claude_files"
   ]
 }

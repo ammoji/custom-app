@@ -24,16 +24,24 @@ service firebase.storage {
       allow read: if true;
       allow write: if false;
     }
-    // PR 6 — menu item images, in-app shop owner uploads.
-    // Path: menu/{shopId}/{filename}. Only the matching shop owner
-    // can write; everyone (including anonymous customers) can read.
+    // PR 6.1 — menu item image writes now go through the
+    // `getMenuImageUploadUrl` callable, which returns a v4 signed
+    // PUT URL. Admin SDK signed URLs bypass Storage rules at
+    // request time (documented GCS pattern), so client writes are
+    // closed entirely here.
+    //
+    // Why the change from PR 6: the cross-SDK auth mismatch
+    // (Web SDK storage on native + RNFB auth) meant
+    // `request.auth` was always null in evaluations, so the
+    // claim check below could never pass. See
+    // docs/pr-6.1-signed-upload-url-hotfix-windsurf-prompt.md for
+    // the full root-cause writeup.
+    //
+    // Reads stay public — anonymous customer browse paths render
+    // these images directly.
     match /menu/{shopId}/{filename} {
       allow read: if true;
-      allow write: if request.auth != null
-        && request.auth.token.shopOwner == true
-        && request.auth.token.shopId == shopId
-        && request.resource.size < 5 * 1024 * 1024
-        && request.resource.contentType.matches('image/.*');
+      allow write: if false;
     }
     match /{allPaths=**} {
       allow read, write: if false;

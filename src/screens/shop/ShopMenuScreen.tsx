@@ -63,6 +63,13 @@ export default function ShopMenuScreen() {
   const [filter, setFilter] = useState<Filter>('all');
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // PR 8 Part B — multi-select state. `selectMode` flips the
+  // row press handler from "navigate to edit" to "toggle
+  // selection". `selectedIds` is a Set for O(1) toggle. Bulk
+  // action runs against `Array.from(selectedIds)`.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkSubmitting, setBulkSubmitting] = useState(false);
 
   const fetchOnce = useCallback(async () => {
     try {
@@ -146,6 +153,74 @@ export default function ShopMenuScreen() {
     return out;
   }, [visibleItems]);
 
+  // PR 8 Part B — toggle a single id's selection state.
+  // Don't recreate the Set on every render — only on toggle.
+  const toggleSelected = useCallback((id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const exitSelectMode = useCallback(() => {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  }, []);
+
+  // PR 8 Part B — bulk action handler. Server is the gate; we
+  // surface skippedCount in the success toast if non-zero so the
+  // owner notices stale ids.
+  const handleBulkSetAvailability = async (available: boolean) => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    const verb = available ? 'available' : 'unavailable';
+    Alert.alert(
+      `Mark ${ids.length} item${ids.length > 1 ? 's' : ''} ${verb}?`,
+      'This will update all selected items at once.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Confirm',
+          style: available ? 'default' : 'destructive',
+          onPress: async () => {
+            setBulkSubmitting(true);
+            try {
+              const r = await orderService.bulkUpdateMenuAvailability({
+                menuItemIds: ids,
+                available,
+              });
+              // Optimistically reflect locally before the refresh
+              // round-trip completes so the toggles flip immediately.
+              setItems(prev =>
+                prev.map(it =>
+                  selectedIds.has(it.id) ? { ...it, available } : it,
+                ),
+              );
+              exitSelectMode();
+              if (r.skippedCount > 0) {
+                Alert.alert(
+                  'Updated with skips',
+                  `${r.updatedCount} updated, ${r.skippedCount} skipped (item may no longer exist).`,
+                );
+              }
+              // Refresh from server so any drift surfaces.
+              fetchOnce();
+            } catch (e: any) {
+              Alert.alert(
+                'Bulk update failed',
+                e?.message ?? 'Please try again.',
+              );
+            } finally {
+              setBulkSubmitting(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
   const handleToggleAvailable = async (item: MenuItem) => {
     const next = !item.available;
     // Optimistic flip.
@@ -198,8 +273,26 @@ export default function ShopMenuScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <ScreenHeader
-        title={`Menu (${items.length})`}
-        onBack={() => nav.goBack()}
+        title={
+          selectMode
+            ? `${selectedIds.size} selected`
+            : `Menu (${items.length})`
+        }
+        onBack={() =>
+          selectMode ? exitSelectMode() : nav.goBack()
+        }
+        right={
+          selectMode ? (
+            <Pressable
+              onPress={exitSelectMode}
+              hitSlop={10}
+              accessibilityRole="button"
+              accessibilityLabel="Exit selection mode"
+            >
+              <Text style={styles.headerDone}>Done</Text>
+            </Pressable>
+          ) : undefined
+        }
       />
       {error && (
         <View style={styles.errorBanner}>
@@ -237,11 +330,30 @@ export default function ShopMenuScreen() {
           ))}
         </View>
         <View style={styles.addBtn}>
-          <Button
-            title="+ Add custom item"
-            onPress={() => nav.navigate('AddCustomMenuItem')}
-            variant="secondary"
-          />
+          {/* PR 8 Part B — Add + Select buttons share this row.
+              Select toggles selectMode; in selectMode the chips above
+              still work as filters but row presses toggle selection. */}
+          <View style={styles.actionRow}>
+            <View style={{ flex: 1 }}>
+              <Button
+                title="+ Add custom item"
+                onPress={() => nav.navigate('AddCustomMenuItem')}
+                variant="secondary"
+                disabled={selectMode}
+              />
+            </View>
+            <View style={{ width: spacing.sm }} />
+            <View style={{ flex: 1 }}>
+              <Button
+                title={selectMode ? 'Cancel selection' : 'Select'}
+                onPress={() => {
+                  if (selectMode) exitSelectMode();
+                  else setSelectMode(true);
+                }}
+                variant="secondary"
+              />
+            </View>
+          </View>
         </View>
       </View>
 
@@ -293,15 +405,39 @@ export default function ShopMenuScreen() {
             );
           }
           const item = row.item;
+          const isSelected = selectedIds.has(item.id);
           return (
             <Pressable
-              style={[styles.card, !item.available && styles.cardDisabled]}
-              onPress={() =>
-                nav.navigate('ShopMenuItemEdit', { menuItemId: item.id })
-              }
+              style={[
+                styles.card,
+                !item.available && styles.cardDisabled,
+                selectMode && isSelected && styles.cardSelected,
+              ]}
+              onPress={() => {
+                if (selectMode) {
+                  toggleSelected(item.id);
+                } else {
+                  nav.navigate('ShopMenuItemEdit', { menuItemId: item.id });
+                }
+              }}
               accessibilityRole="button"
-              accessibilityLabel={`Edit ${item.name}`}
+              accessibilityLabel={
+                selectMode
+                  ? `${isSelected ? 'Deselect' : 'Select'} ${item.name}`
+                  : `Edit ${item.name}`
+              }
             >
+              {/* PR 8 Part B — leading-edge checkbox in select mode. */}
+              {selectMode && (
+                <View
+                  style={[
+                    styles.checkbox,
+                    isSelected && styles.checkboxChecked,
+                  ]}
+                >
+                  {isSelected && <Text style={styles.checkmark}>✓</Text>}
+                </View>
+              )}
               <Image source={{ uri: item.imageUrl }} style={styles.image} />
               <View style={{ flex: 1 }}>
                 <View style={styles.headerRow}>
@@ -327,20 +463,51 @@ export default function ShopMenuScreen() {
                     : `Stock: ${item.stock}`}
                 </Text>
               </View>
-              <View style={styles.toggleColumn}>
-                <Switch
-                  value={item.available}
-                  onValueChange={() => handleToggleAvailable(item)}
-                  disabled={togglingId === item.id}
-                />
-                <Text style={styles.toggleLabel}>
-                  {item.available ? 'On' : 'Off'}
-                </Text>
-              </View>
+              {/* PR 8 Part B — hide the per-row Switch in select
+                  mode; the bulk action bar takes over. Keeps the
+                  card from accidentally toggling on a tap that's
+                  meant to select. */}
+              {!selectMode && (
+                <View style={styles.toggleColumn}>
+                  <Switch
+                    value={item.available}
+                    onValueChange={() => handleToggleAvailable(item)}
+                    disabled={togglingId === item.id}
+                  />
+                  <Text style={styles.toggleLabel}>
+                    {item.available ? 'On' : 'Off'}
+                  </Text>
+                </View>
+              )}
             </Pressable>
           );
         }}
       />
+      {/* PR 8 Part B — bottom sticky action bar. Visible only in
+          selectMode; disabled when 0 items selected. Both buttons
+          loading-disabled while a bulk request is in flight. */}
+      {selectMode && (
+        <View style={styles.bulkBar}>
+          <View style={{ flex: 1 }}>
+            <Button
+              title={`Mark ${selectedIds.size} unavailable`}
+              onPress={() => handleBulkSetAvailability(false)}
+              variant="secondary"
+              disabled={selectedIds.size === 0 || bulkSubmitting}
+              loading={bulkSubmitting}
+            />
+          </View>
+          <View style={{ width: spacing.sm }} />
+          <View style={{ flex: 1 }}>
+            <Button
+              title={`Mark ${selectedIds.size} available`}
+              onPress={() => handleBulkSetAvailability(true)}
+              disabled={selectedIds.size === 0 || bulkSubmitting}
+              loading={bulkSubmitting}
+            />
+          </View>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -465,4 +632,39 @@ const styles = StyleSheet.create({
     borderRadius: radii.sm,
   },
   retryText: { ...typography.bodyBold, color: '#fff' },
+  // PR 8 Part B — multi-select styles.
+  actionRow: { flexDirection: 'row', alignItems: 'center' },
+  cardSelected: {
+    borderColor: colors.primary,
+    borderWidth: 2,
+    backgroundColor: colors.primaryLight,
+  },
+  checkbox: {
+    width: 24,
+    height: 24,
+    borderRadius: radii.sm,
+    borderWidth: 2,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.bg,
+  },
+  checkboxChecked: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  checkmark: { color: '#fff', fontWeight: '700' },
+  headerDone: {
+    ...typography.bodyBold,
+    color: colors.primary,
+  },
+  bulkBar: {
+    flexDirection: 'row',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    backgroundColor: colors.surface,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    ...shadow.card,
+  },
 });

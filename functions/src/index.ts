@@ -1,6 +1,12 @@
 import { initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
+// PR 6.1 — DO NOT REMOVE. Used by `getMenuImageUploadUrl` callable.
+// Auto-formatter stripped this once during PR 6.1 development.
+import { getStorage } from 'firebase-admin/storage';
+// PR 6.1 — admin SDK Storage handle for signed-URL minting. Used
+// exclusively by `getMenuImageUploadUrl` below. Admin SDK signing
+// bypasses Storage rules entirely (the documented GCS pattern).
 import { defineSecret } from 'firebase-functions/params';
 import { setGlobalOptions } from 'firebase-functions/v2';
 import {
@@ -22,6 +28,25 @@ import { validateAllItemsInSameShop } from './cartIntegrityHelpers';
 // If tsc complains "Cannot find name 'canCustomerCancelPaidOrder'",
 // re-add this line.
 import { canCustomerCancelPaidOrder } from './customerCancelWindowHelpers';
+// PR 6.1 — DO NOT REMOVE. Used by `getMenuImageUploadUrl` callable.
+// Auto-formatter stripped this once during PR 6.1 development.
+import { validateGetUploadUrlInput } from './menuImageUploadHelpers';
+// PR 8 — DO NOT REMOVE (auto-formatter has eaten this once already
+// during PR 8 development). Used by writeAuditLog wrapper +
+// listRecentAuditEntries + bulkUpdateMenuAvailability callables. If
+// tsc complains "Cannot find name 'buildAuditLogEntry' / 'AuditLogInput'
+// / 'validateBulkMenuRequest'", re-add THESE TWO LINES below.
+import { AuditLogInput, buildAuditLogEntry } from './auditLogHelpers';
+import { validateBulkMenuRequest } from './bulkMenuHelpers';
+// PR 8 — DO NOT REMOVE. Used by writeAuditLog wrapper + the
+// listRecentAuditEntries + bulkUpdateMenuAvailability callables.
+// Auto-formatter has stripped helper imports in PRs 4, 5, 6, 6.1, 7;
+// these blocks are the canary against the same bug.
+// PR 8 — DO NOT REMOVE. Used by bulkUpdateMenuAvailability callable.
+// PR 6.1 — DO NOT REMOVE. Used by the new `getMenuImageUploadUrl`
+// callable below to validate shopOwner claim + mint the server-side
+// storage path. If tsc complains "Cannot find name
+// 'validateGetUploadUrlInput'", re-add this line.
 // PR 7 — DO NOT REMOVE. Used by the new `cancelMyRecentPaidOrder`
 // callable below for the customer self-service cancel window. If
 // tsc complains "Cannot find name 'canCustomerCancelPaidOrder'" /
@@ -431,8 +456,8 @@ type UpdateOrderStatusInput = {
 };
 
 export const updateOrderStatus = onCall<UpdateOrderStatusInput>(
-  // App Check disabled here so admin SDK / server callers (CLI dashboards)
-  // can invoke without holding a browser App Check token. Auth + admin
+  // App Check deferral is documented project-wide in PRELAUNCH_CHECKLIST
+  // ("App Check enforcement (intentionally deferred)"). Auth + admin
   // claim is the actual gate.
   { cors: true, enforceAppCheck: false },
   async request => {
@@ -512,6 +537,24 @@ export const updateOrderStatus = onCall<UpdateOrderStatusInput>(
         by: `${actorRole}:${auth.uid}`,
         ...(reason ? { reason } : {}),
       }),
+    });
+
+    // PR 8 — audit log (non-fatal). Manual status overrides are the
+    // operationally-riskiest action surface (admin can move an
+    // order through any state); a separate audit trail lets us
+    // catch policy drift quickly.
+    await writeAuditLog({
+      actorUid: auth.uid,
+      actorRole,
+      actionType: 'order.manual_status_update',
+      targetType: 'order',
+      targetId: orderId,
+      reason,
+      metadata: {
+        from: currentStatus,
+        to: newStatus,
+        shopId: order.shopId,
+      },
     });
 
     return { orderId, status: newStatus, changed: true };
@@ -944,6 +987,22 @@ export const cancelPaidOrder = onCall<{
         console.warn('[cancelPaidOrder] customer push failed:', e);
       }
 
+      // PR 8 — audit log (non-fatal). Refund flow is high-stakes;
+      // a single durable record per cancel-paid action.
+      await writeAuditLog({
+        actorUid: v.uid,
+        actorRole: v.role === 'shopOwner' ? 'shopOwner' : 'admin',
+        actionType: 'order.cancel_paid',
+        targetType: 'order',
+        targetId: orderId,
+        reason,
+        metadata: {
+          amount: orderData.total,
+          refundId: refund?.id ?? refundDocId,
+          shopId: orderData.shopId,
+        },
+      });
+
       return { ok: true, refundId: refund?.id ?? refundDocId };
     } catch (err: any) {
       const failureReason: string =
@@ -1118,6 +1177,22 @@ export const cancelMyRecentPaidOrder = onCall<{
         });
       });
 
+      // PR 8.1 — customer-initiated cancel within the 2-min window.
+      // 'customer' is a first-class audit role as of PR 8.1; the
+      // previous 'system' workaround + metadata.initiatedBy carrier
+      // is gone (initiatedBy was redundant with actorUid).
+      await writeAuditLog({
+        actorUid: auth!.uid,
+        actorRole: 'customer',
+        actionType: 'order.cancel_by_customer_window',
+        targetType: 'order',
+        targetId: orderId,
+        reason: (request.data as { reason?: string } | undefined)?.reason,
+        metadata: {
+          refundId: refund?.id ?? refundDocId,
+        },
+      });
+
       return { ok: true, refundId: refund?.id ?? refundDocId };
     } catch (err: any) {
       const failureReason: string =
@@ -1155,6 +1230,248 @@ export const cancelMyRecentPaidOrder = onCall<{
       );
       throw new HttpsError('internal', `Refund failed: ${failureReason}`);
     }
+  },
+);
+
+// PR 6.1 — Mint a v4 signed PUT URL for a menu image upload.
+//
+// Why this exists: PR 6 uploaded via the Firebase Web SDK on native,
+// which can't see the @react-native-firebase auth session — every
+// upload failed with storage/unauthorized. Instead of plumbing a
+// second auth SDK or mirroring tokens, we sidestep Storage rules
+// entirely: the admin SDK signs an URL that GCS honours without
+// rules evaluation. Storage rule for /menu/ is now write-deny
+// (storage.rules) and the only path to write a menu image is via
+// this callable. See docs/pr-6.1-signed-upload-url-hotfix-windsurf-prompt.md.
+//
+// Returns: { uploadUrl, downloadUrl, storagePath, expiresAt }.
+// Client PUTs the resized JPEG bytes to uploadUrl with header
+// Content-Type: image/jpeg (v4 signatures bind contentType, so the
+// header MUST match exactly), then saves downloadUrl on the
+// menu item doc.
+//
+// 15-min validity is enough wall-clock for resize + upload on slow
+// networks; short enough that a leaked URL goes stale before it can
+// be abused at scale.
+//
+export const getMenuImageUploadUrl = onCall(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    const check = validateGetUploadUrlInput(
+      {
+        auth: auth
+          ? {
+              uid: auth.uid,
+              token: auth.token as unknown as {
+                shopOwner?: unknown;
+                shopId?: unknown;
+              },
+            }
+          : null,
+      },
+      Date.now(),
+      () => Math.random().toString(36).slice(2, 8),
+    );
+    if (!check.ok) {
+      throw new HttpsError(check.code, check.message);
+    }
+    const { storagePath } = check;
+
+    const bucket = getStorage().bucket();
+    const file = bucket.file(storagePath);
+    const expiresAt = Date.now() + 15 * 60 * 1000; // 15 min
+
+    const [uploadUrl] = await file.getSignedUrl({
+      version: 'v4',
+      action: 'write',
+      expires: expiresAt,
+      // contentType is bound into the signature in v4; the client
+      // MUST send `Content-Type: image/jpeg` on the PUT or GCS
+      // rejects with a signature mismatch. Resized output from
+      // expo-image-manipulator is always JPEG, so this holds.
+      contentType: 'image/jpeg',
+    });
+
+    // Public download URL — Storage rule for /menu/ is `read: if true`,
+    // so this URL works without an auth token. Format matches Firebase
+    // Storage's standard public URL pattern, served by the same CDN as
+    // images uploaded via the Web SDK.
+    const downloadUrl =
+      `https://firebasestorage.googleapis.com/v0/b/${bucket.name}` +
+      `/o/${encodeURIComponent(storagePath)}?alt=media`;
+
+    return {
+      uploadUrl,
+      downloadUrl,
+      storagePath,
+      expiresAt,
+    };
+  },
+);
+
+// ---------------------------------------------------------------------
+// PR 8 Part A — Admin audit log
+// ---------------------------------------------------------------------
+// Writes are intentionally non-fatal. A Firestore outage during the
+// audit-log write should NOT break the user-visible action that
+// triggered it — worst case is a gap in audit history, which is
+// acceptable for MVP (revisit if compliance requires hard guarantees).
+// All admin callables `await writeAuditLog(...)` at the end of their
+// success path; the catch block here swallows errors.
+//
+// actionType strings are part of the audit's stable contract — treat
+// like an API. New action types are fine; do not rename existing ones
+// or historical search breaks.
+async function writeAuditLog(input: AuditLogInput): Promise<void> {
+  try {
+    const { id, doc } = buildAuditLogEntry(input);
+    await db.collection('auditLog').doc(id).set(doc);
+  } catch (e) {
+    console.warn('[auditLog] write failed (non-fatal):', e);
+  }
+}
+
+// PR 8 Part A — admin-only paginated audit-log reader.
+//
+// Cursor pagination via `before` (millisecond timestamp). The query
+// is `orderBy timestamp desc, where timestamp < before, limit`.
+// Single-field index on `timestamp` is auto-created by Firestore;
+// no firestore.indexes.json entry needed.
+//
+// Note: this list endpoint MAY return metadata containing
+// user-identifying info (phone numbers, addresses) if a wiring site
+// stuffs it into the metadata blob. Future contributors: keep the
+// audit log itself complete, but if any field becomes sensitive,
+// add a redacted-summary projection here. For PR 8 nothing in
+// metadata is especially sensitive; revisit when wiring something
+// like KYC documents.
+export const listRecentAuditEntries = onCall<{
+  limit?: number;
+  before?: number;
+}>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    if (!auth) {
+      throw new HttpsError('unauthenticated', 'Sign in required');
+    }
+    if ((auth.token as { admin?: unknown })?.admin !== true) {
+      throw new HttpsError('permission-denied', 'Admin role required');
+    }
+    const limitRaw = request.data?.limit;
+    const limit =
+      typeof limitRaw === 'number' && limitRaw > 0 && limitRaw <= 100
+        ? Math.floor(limitRaw)
+        : 50;
+    const before = request.data?.before;
+
+    let q = db
+      .collection('auditLog')
+      .orderBy('timestamp', 'desc')
+      .limit(limit);
+    if (typeof before === 'number' && Number.isFinite(before)) {
+      q = q.where('timestamp', '<', before).orderBy('timestamp', 'desc').limit(limit);
+    }
+    const snap = await q.get();
+    return {
+      entries: snap.docs.map(d => d.data()),
+      hasMore: snap.docs.length === limit,
+    };
+  },
+);
+
+// PR 8 Part B — Bulk menu availability toggle for shop owners.
+//
+// Auth: shopOwner with matching shopId claim. Server re-derives shopId
+// from claims (client-supplied shopId would be a confused-deputy hole).
+// Per-id we additionally verify `shopId == claims.shopId` to prevent
+// owner from toggling another shop's items even if they know the ids.
+//
+// Returns { updatedCount, skippedCount } where skipped = ids that
+// didn't exist OR didn't belong to the caller's shop. UX surfaces
+// the skip count when non-zero so the owner notices stale ids.
+//
+// Audit log entry is written at the end (actorRole=shopOwner,
+// actionType=shop.bulk_menu_availability) so "did the shop accidentally
+// mark everything unavailable at 3am?" is answerable.
+export const bulkUpdateMenuAvailability = onCall<{
+  menuItemIds: string[];
+  available: boolean;
+}>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    const check = validateBulkMenuRequest({
+      auth: auth
+        ? {
+            uid: auth.uid,
+            token: auth.token as unknown as {
+              shopOwner?: unknown;
+              shopId?: unknown;
+            },
+          }
+        : null,
+      menuItemIds: request.data?.menuItemIds,
+      available: request.data?.available,
+    });
+    if (!check.ok) {
+      throw new HttpsError(check.code, check.message);
+    }
+    const { shopId, validIds, available } = check;
+
+    // Read all candidate docs first; filter by shopId + existence;
+    // batch-write only those that match. Firestore `in` query is
+    // limited to 30 ids per batch in v9+, so we chunk if needed —
+    // BULK_MENU_MAX_IDS = 100 ⇒ at most 4 chunks.
+    const CHUNK = 30;
+    const matchedIds: string[] = [];
+    for (let i = 0; i < validIds.length; i += CHUNK) {
+      const chunk = validIds.slice(i, i + CHUNK);
+      const snap = await db
+        .collection('menuItems')
+        .where('__name__', 'in', chunk)
+        .get();
+      for (const doc of snap.docs) {
+        const data = doc.data() as { shopId?: unknown };
+        if (data.shopId === shopId) {
+          matchedIds.push(doc.id);
+        }
+      }
+    }
+
+    // Batch write. Firestore batches are capped at 500 ops; 100 ids
+    // fits comfortably in a single batch.
+    if (matchedIds.length > 0) {
+      const batch = db.batch();
+      for (const id of matchedIds) {
+        batch.update(db.collection('menuItems').doc(id), {
+          available,
+          updatedAt: Date.now(),
+        });
+      }
+      await batch.commit();
+    }
+
+    const updatedCount = matchedIds.length;
+    const skippedCount = validIds.length - matchedIds.length;
+
+    // Best-effort audit log; non-fatal.
+    await writeAuditLog({
+      actorUid: auth!.uid,
+      actorRole: 'shopOwner',
+      actionType: 'shop.bulk_menu_availability',
+      targetType: 'shop',
+      targetId: shopId,
+      metadata: {
+        requestedCount: validIds.length,
+        updatedCount,
+        skippedCount,
+        available,
+      },
+    });
+
+    return { updatedCount, skippedCount };
   },
 );
 
@@ -1713,6 +2030,22 @@ export const cleanupAbandonedOrders = onSchedule(
       console.log(
         `  → cancelling ${doc.id} (created ${new Date(createdMs).toISOString()})`,
       );
+
+      // PR 8 — audit log per-cancel (non-fatal). actorRole=system,
+      // actorUid is the canonical job name so dashboards can filter
+      // "what did the cleanup job do today?".
+      await writeAuditLog({
+        actorUid: 'cleanupAbandonedOrders',
+        actorRole: 'system',
+        actionType: 'order.cancel_abandoned',
+        targetType: 'order',
+        targetId: doc.id,
+        reason: `Payment not completed within ${ABANDONED_THRESHOLD_HOURS}h`,
+        metadata: {
+          createdAt: createdMs,
+          shopId: (doc.data() as { shopId?: string }).shopId,
+        },
+      });
     }
 
     console.log(
@@ -2586,6 +2919,17 @@ export const approveShop = onCall<{ shopId: string }>(
       { shopId, type: 'shop_approved' },
     ).catch(e => console.warn('[approveShop] pushToOwner failed:', e));
 
+    // PR 8 — audit log (non-fatal).
+    await writeAuditLog({
+      actorUid: auth.uid,
+      actorRole: 'admin',
+      actionType: 'shop.approve',
+      targetType: 'shop',
+      targetId: shopId,
+      targetSummary: shop.name,
+      metadata: { ownerUid: shop.ownerUid },
+    });
+
     return { ok: true };
   },
 );
@@ -2641,6 +2985,18 @@ export const rejectShop = onCall<{ shopId: string; reason: string }>(
       `${shop.name}: ${reason}`,
       { shopId, type: 'shop_rejected' },
     ).catch(e => console.warn('[rejectShop] pushToOwner failed:', e));
+
+    // PR 8 — audit log (non-fatal).
+    await writeAuditLog({
+      actorUid: auth.uid,
+      actorRole: 'admin',
+      actionType: 'shop.reject',
+      targetType: 'shop',
+      targetId: shopId,
+      targetSummary: shop.name,
+      reason,
+      metadata: { ownerUid: shop.ownerUid },
+    });
 
     return { ok: true };
   },
@@ -2854,6 +3210,15 @@ export const approveDeliveryRole = onCall<{ uid: string }>(
       console.warn('[approveDeliveryRole] pushToUser failed:', e),
     );
 
+    // PR 8 — audit log (non-fatal).
+    await writeAuditLog({
+      actorUid: result.adminUid,
+      actorRole: 'admin',
+      actionType: 'delivery_request.approve',
+      targetType: 'delivery_request',
+      targetId: result.targetUid,
+    });
+
     return { ok: true };
   },
 );
@@ -2897,6 +3262,16 @@ export const rejectDeliveryRole = onCall<{ uid: string; reason: string }>(
     ).catch(e =>
       console.warn('[rejectDeliveryRole] pushToUser failed:', e),
     );
+
+    // PR 8 — audit log (non-fatal).
+    await writeAuditLog({
+      actorUid: result.adminUid,
+      actorRole: 'admin',
+      actionType: 'delivery_request.reject',
+      targetType: 'delivery_request',
+      targetId: result.targetUid,
+      reason: result.reason,
+    });
 
     return { ok: true };
   },
@@ -3065,6 +3440,18 @@ export const revokeShopOwner = onCall<{ uid: string; reason?: string }>(
       { type: 'role_revoked', role: 'shopOwner' },
     ).catch(e => console.warn('[revokeShopOwner] pushToUser failed:', e));
 
+    // PR 8 — audit log (non-fatal). Promotes the console.log
+    // statusHistory to a queryable Firestore collection.
+    await writeAuditLog({
+      actorUid: auth.uid,
+      actorRole: 'admin',
+      actionType: 'user.revoke_shop_owner',
+      targetType: 'user',
+      targetId: uid,
+      reason,
+      metadata: { shopIdAffected: shopId ?? null },
+    });
+
     return { ok: true };
   },
 );
@@ -3159,6 +3546,17 @@ export const revokeDelivery = onCall<{ uid: string; reason?: string }>(
       { type: 'role_revoked', role: 'delivery' },
     ).catch(e => console.warn('[revokeDelivery] pushToUser failed:', e));
 
+    // PR 8 — audit log (non-fatal).
+    await writeAuditLog({
+      actorUid: auth.uid,
+      actorRole: 'admin',
+      actionType: 'user.revoke_delivery',
+      targetType: 'user',
+      targetId: uid,
+      reason,
+      metadata: { reassignedOrders: reassignedOrderIds.length },
+    });
+
     return { ok: true, reassignedOrders: reassignedOrderIds.length };
   },
 );
@@ -3227,6 +3625,18 @@ export const suspendShop = onCall<{ shopId: string; reason: string }>(
       ).catch(e => console.warn('[suspendShop] pushToUser failed:', e));
     }
 
+    // PR 8 — audit log (non-fatal).
+    await writeAuditLog({
+      actorUid: auth.uid,
+      actorRole: 'admin',
+      actionType: 'shop.suspend',
+      targetType: 'shop',
+      targetId: shopId,
+      targetSummary: shop.name,
+      reason,
+      metadata: { ownerUid: shop.ownerUid ?? null },
+    });
+
     return { ok: true };
   },
 );
@@ -3285,6 +3695,17 @@ export const unsuspendShop = onCall<{ shopId: string }>(
         { type: 'shop_unsuspended', shopId },
       ).catch(e => console.warn('[unsuspendShop] pushToUser failed:', e));
     }
+
+    // PR 8 — audit log (non-fatal).
+    await writeAuditLog({
+      actorUid: auth.uid,
+      actorRole: 'admin',
+      actionType: 'shop.unsuspend',
+      targetType: 'shop',
+      targetId: shopId,
+      targetSummary: shop.name,
+      metadata: { ownerUid: shop.ownerUid ?? null },
+    });
 
     return { ok: true };
   },
@@ -3654,10 +4075,40 @@ export const updateShopSettings = onCall<{
     // is the claim's shopId (request body shopId is ignored), for
     // admin callers it's the validated request body shopId. The helper
     // enforces both branches; this wrapper trusts the validated result.
+    // Read the BEFORE state so the audit log can record what
+    // changed. This is one extra read per call which is fine —
+    // settings updates are rare. If this gets noisy, batch with
+    // the update via runTransaction.
+    const beforeSnap = await db.doc(`shops/${shopId}`).get();
+    const beforeData = beforeSnap.data() as
+      | { deliveryFee?: number; minOrder?: number; name?: string }
+      | undefined;
+    const before = {
+      deliveryFee: beforeData?.deliveryFee,
+      minOrder: beforeData?.minOrder,
+    };
+
     await db.doc(`shops/${shopId}`).update({
       ...updates,
       updatedAt: Date.now(),
     });
+
+    // PR 8 — audit log (non-fatal). Both admin and shopOwner
+    // branches write. validateShopSettings doesn't expose role on
+    // its `ok: true` shape, so we derive it from the same claim
+    // check used by the helper. (Future refactor: have the helper
+    // surface role explicitly.)
+    const isAdmin = request.auth?.token?.admin === true;
+    await writeAuditLog({
+      actorUid: request.auth!.uid,
+      actorRole: isAdmin ? 'admin' : 'shopOwner',
+      actionType: 'shop.update_settings',
+      targetType: 'shop',
+      targetId: shopId,
+      targetSummary: beforeData?.name,
+      metadata: { before, after: updates },
+    });
+
     return { ok: true, shopId, updates };
   },
 );

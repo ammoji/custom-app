@@ -14,7 +14,10 @@ import SearchScreen from '../screens/SearchScreen';
 import ShopDetailScreen from '../screens/ShopDetailScreen';
 import ShopListScreen from '../screens/ShopListScreen';
 import AdminOrdersScreen from '../screens/admin/AdminOrdersScreen';
-// PR 1 — security hardening admin screens.
+// PR 8 Part A — DO NOT REMOVE. Auto-formatter has stripped helper +
+// screen imports across PRs 4–8; this comment + import survives the
+// pattern. Used by the AuditLog Stack.Screen registration below.
+import AuditLogScreen from '../screens/admin/AuditLogScreen';
 import DeliveryRequestDetailScreen from '../screens/admin/DeliveryRequestDetailScreen';
 import PendingDeliveryRequestsScreen from '../screens/admin/PendingDeliveryRequestsScreen';
 import PendingShopsScreen from '../screens/admin/PendingShopsScreen';
@@ -48,6 +51,9 @@ export type RootStackParamList = {
   OrderDetail: { orderId: string };
   Search: { query?: string; category?: CategoryId } | undefined;
   AdminOrders: undefined;
+  // PR 8 Part A — DO NOT REMOVE (formatter stripped this once
+  // already during PR 8). The AuditLog route renders AuditLogScreen.
+  AuditLog: undefined;
   // Phase 12a-v2-i: BecomeShopOwner is now an alias for the registration
   // form. The route name is preserved so existing HomeScreen nav targets
   // and any deep-link references keep resolving without churn; the screen
@@ -128,6 +134,7 @@ export default function AppNavigator() {
       <Stack.Screen name="OrderDetail" component={OrderDetailScreen} />
       <Stack.Screen name="Search" component={SearchScreen} />
       <Stack.Screen name="AdminOrders" component={AdminOrdersScreen} />
+      <Stack.Screen name="AuditLog" component={AuditLogScreen} />
       {/*
         BecomeShopOwner now points at the registration form. We keep the
         old route name as an alias for backward compat with HomeScreen.
