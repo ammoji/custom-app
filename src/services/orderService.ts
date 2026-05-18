@@ -709,6 +709,28 @@ export const orderService = {
     return result.data as { ok: boolean; refundId?: string };
   },
 
+  // PR 7 — Customer self-service cancel-window callable. Triggers the
+  // same Razorpay refund flow as cancelPaidOrder but with a customer
+  // auth path and a 2-min eligibility window enforced server-side via
+  // canCustomerCancelPaidOrder. UI shows a live countdown (see
+  // OrderDetailScreen) but the server is the source of truth — calls
+  // arriving past the window get a `failed-precondition` error.
+  async cancelMyRecentPaidOrder(args: {
+    orderId: string;
+    reason?: string;
+  }): Promise<{ ok: boolean; refundId?: string }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'cancelMyRecentPaidOrder',
+      );
+      const result = await fn(args);
+      return result.data as { ok: boolean; refundId?: string };
+    }
+    const fn = httpsCallable(functions, 'cancelMyRecentPaidOrder');
+    const result = await fn(args);
+    return result.data as { ok: boolean; refundId?: string };
+  },
+
   // Returns shops with no current owner (ownerUid null/missing).
   // Powers the BecomeShopOwner picker.
   async listAvailableShops(): Promise<

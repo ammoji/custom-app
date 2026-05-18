@@ -53,6 +53,13 @@ export default function OrderDetailScreen() {
   const [loading, setLoading] = useState(true);
   const [paying, setPaying] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  // PR 7 — DO NOT REMOVE. Auto-formatter stripped this once during
+  // PR 7 development. windowCancelling drives the in-window cancel
+  // button's loading state; nowMs ticks once per second to drive the
+  // countdown display. If lint complains "nowMs not used / not
+  // defined", re-add both lines.
+  const [windowCancelling, setWindowCancelling] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -100,6 +107,23 @@ export default function OrderDetailScreen() {
   }
 
   const minutesLeft = Math.max(0, Math.round((order.estimatedDeliveryAt - Date.now()) / 60_000));
+
+  // PR 7 — eligibility for the in-window cancel button. Mirrors the
+  // server's canCustomerCancelPaidOrder rules (kept in sync; server
+  // is still the gate on actual call). The constant must match
+  // CUSTOMER_CANCEL_WINDOW_MS in functions/src/customerCancelWindowHelpers.ts;
+  // changing one requires changing the other.
+  const cancelWindowMs = 2 * 60 * 1000;
+  const cancelEligibleNow =
+    order.paymentMethod === 'online' &&
+    order.paymentStatus === 'paid' &&
+    order.status === 'pending' &&
+    typeof order.paidAt === 'number' &&
+    Number.isFinite(order.paidAt);
+  const remainingMs = cancelEligibleNow
+    ? Math.max(0, (order.paidAt as number) + cancelWindowMs - nowMs)
+    : 0;
+  const inWindow = cancelEligibleNow && remainingMs > 0;
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -207,6 +231,46 @@ export default function OrderDetailScreen() {
             </Text>
           )}
         </View>
+
+        {/* PR 7 — Customer in-window cancel for paid orders. Visible
+            ONLY when the order is paid + still pending + within the
+            2-min window. Server is the gate (canCustomerCancelPaidOrder)
+            but we mirror the eligibility check here for an honest UI:
+            no point showing a button that's about to fail. The
+            countdown re-renders every second via the nowMs interval. */}
+        {cancelEligibleNow && inWindow && (
+          <View style={styles.cancelWindowCard}>
+            <Text style={styles.cancelWindowTitle}>Changed your mind?</Text>
+            <Text style={styles.cancelWindowSubtitle}>
+              Cancel within {formatMmSs(remainingMs)} for an automatic refund of {formatRupees(order.total)}.
+              {'\n'}
+              After that you'll need to contact support.
+            </Text>
+            <View style={{ height: spacing.md }} />
+            <Button
+              title={
+                windowCancelling
+                  ? 'Cancelling…'
+                  : `Cancel order (${formatMmSs(remainingMs)} left)`
+              }
+              variant="secondary"
+              onPress={handleWindowCancel}
+              loading={windowCancelling}
+              disabled={windowCancelling}
+              fullWidth
+            />
+          </View>
+        )}
+        {cancelEligibleNow && !inWindow && order.status === 'pending' && (
+          <View style={styles.cancelWindowCardExpired}>
+            <Text style={styles.cancelWindowTitleExpired}>
+              Cancellation window expired
+            </Text>
+            <Text style={styles.cancelWindowSubtitle}>
+              Contact support if you still need to cancel this order.
+            </Text>
+          </View>
+        )}
 
         {/* Stuck-payment recovery: if the customer dismissed Razorpay
             without paying, the order sits in paymentStatus='pending'
@@ -333,6 +397,52 @@ export default function OrderDetailScreen() {
       'Cancel order',
     );
   }
+
+  // PR 7 — In-window paid-order cancel handler. Server is the gate;
+  // we just optimistically reflect the refund_pending state so the
+  // UI doesn't briefly show the countdown card again before the
+  // watcher repolls. On error, leave the card in place so the user
+  // can retry.
+  function handleWindowCancel() {
+    if (!order) return;
+    confirmAlert(
+      'Cancel this order?',
+      `You'll be refunded ${formatRupees(order.total)} to your original payment method (5–7 business days).`,
+      async () => {
+        setWindowCancelling(true);
+        try {
+          await orderService.cancelMyRecentPaidOrder({
+            orderId: order.id,
+          });
+          // Optimistic local update — the watcher will overwrite
+          // with the server's canonical doc within 5s.
+          setOrder({
+            ...order,
+            status: 'cancelled',
+            paymentStatus: 'refund_pending',
+          });
+        } catch (err: any) {
+          showAlert(
+            'Could not cancel',
+            err?.message ?? 'Please try again.',
+          );
+        } finally {
+          setWindowCancelling(false);
+        }
+      },
+      'Cancel & refund',
+    );
+  }
+}
+
+// PR 7 — pure formatter for the live countdown. `1:23` style. Kept
+// inline (not in utils/format) because it's specific to the cancel
+// window's mm:ss display; if a second use site appears, promote it.
+function formatMmSs(ms: number): string {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
 function Row({
@@ -412,4 +522,32 @@ const styles = StyleSheet.create({
     borderRadius: radii.md,
   },
   errorText: { ...typography.body, color: colors.danger },
+  // PR 7 — in-window cancel card styles. Distinct from the
+  // recoveryCard (which is danger-colored for "payment incomplete")
+  // — this one is informational/primary-tinted because the customer
+  // is on the happy path and just exercising a self-service option.
+  cancelWindowCard: {
+    backgroundColor: colors.primaryLight,
+    borderRadius: radii.md,
+    padding: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.primary,
+  },
+  cancelWindowTitle: { ...typography.h3, color: colors.primaryDark },
+  cancelWindowSubtitle: {
+    ...typography.body,
+    color: colors.textSecondary,
+    marginTop: spacing.xs,
+  },
+  cancelWindowCardExpired: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    padding: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  cancelWindowTitleExpired: {
+    ...typography.bodyBold,
+    color: colors.textSecondary,
+  },
 });

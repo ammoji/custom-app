@@ -2,6 +2,7 @@ import { useNavigation } from '@react-navigation/native';
 import React, { useState } from 'react';
 import {
     Alert,
+    Image,
     Pressable,
     ScrollView,
     StyleSheet,
@@ -17,9 +18,13 @@ import { CATEGORIES, CategoryId } from '../../constants/categories';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
 import { orderService } from '../../services/orderService';
 // PR 6 — image upload pipeline. DO NOT REMOVE: auto-formatter has
-// stripped these in past PRs (1, 2, 4, 5, 6) and once already during
-// PR 6 itself. If tsc complains about useAuthStore /
-// pickAndResizeImage / uploadMenuImage, re-add these three lines.
+// stripped these in past PRs (1, 2, 4, 5, 6) AND once already during
+// PR 6 itself. The whole picker section below depends on these
+// imports — if you see the picker UI replaced with the old URL text
+// input, this block got eaten. Restore it before deploying.
+import { uploadMenuImage } from '../../services/storage';
+import { useAuthStore } from '../../store/useAuthStore';
+import { pickAndResizeImage } from '../../utils/imageUpload';
 
 /**
  * Form to add a new CUSTOM menu item to the shop owner's menu.
@@ -28,9 +33,10 @@ import { orderService } from '../../services/orderService';
  * checks so the user doesn't have to round-trip for obvious errors
  * like empty name or mrp < price.
  *
- * Image upload is URL-only in MVP — the prelaunch checklist tracks the
- * follow-up to wire Firebase Storage and an in-app camera/gallery
- * picker.
+ * PR 6: image entry is now via in-app camera/gallery picker that
+ * uploads to Firebase Storage and returns a URL. The old URL text
+ * input is gone — server's validateMenuImageUrl rejects external URLs,
+ * so the picker is the only path to set an image.
  */
 export default function AddCustomMenuItemScreen() {
   const nav = useNavigation<any>();
@@ -43,6 +49,36 @@ export default function AddCustomMenuItemScreen() {
   const [stockUnlimited, setStockUnlimited] = useState(true);
   const [stockStr, setStockStr] = useState('');
   const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const shopId = useAuthStore(s => s.shopId);
+
+  // PR 6 — image picker handler. Mirrors ShopMenuItemEditScreen
+  // exactly. Cancelled picks are silent (don't show an error);
+  // permission denies + unknown errors surface via Alert.
+  const handlePick = async (source: 'camera' | 'gallery') => {
+    if (!shopId) {
+      Alert.alert(
+        'Not signed in as shop owner',
+        'Sign out and back in, then try again.',
+      );
+      return;
+    }
+    const picked = await pickAndResizeImage(source);
+    if (!picked.ok) {
+      if (picked.reason === 'cancelled') return;
+      Alert.alert('Could not pick image', picked.message ?? picked.reason);
+      return;
+    }
+    setUploading(true);
+    try {
+      const url = await uploadMenuImage({ shopId, localUri: picked.uri });
+      setImageUrl(url);
+    } catch (e: any) {
+      Alert.alert('Upload failed', e?.message ?? 'Please try again.');
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const handleSave = async () => {
     const trimmedName = name.trim();
@@ -120,16 +156,43 @@ export default function AddCustomMenuItemScreen() {
               placeholderTextColor={colors.textSecondary}
             />
           </Field>
-          <Field label="Image URL (optional)">
-            <TextInput
-              value={imageUrl}
-              onChangeText={setImageUrl}
-              placeholder="https://… (placeholder used if blank)"
-              style={styles.input}
-              placeholderTextColor={colors.textSecondary}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
+          {/* PR 6 — image picker replaces URL text input. Server
+              rejects external URLs via validateMenuImageUrl, so the
+              picker is the only path to set an image. Mirrors the
+              edit screen's affordance exactly. */}
+          <Field label="Image (optional)">
+            {imageUrl ? (
+              <Image
+                source={{ uri: imageUrl }}
+                style={styles.imagePreview}
+                accessibilityLabel="Selected menu item image"
+              />
+            ) : (
+              <View
+                style={[styles.imagePreview, styles.imagePlaceholder]}
+              >
+                <Text style={styles.placeholderText}>No image</Text>
+              </View>
+            )}
+            <View style={styles.imageButtonsRow}>
+              <View style={styles.imageButtonCell}>
+                <Button
+                  title="📷 Take photo"
+                  variant="secondary"
+                  onPress={() => handlePick('camera')}
+                  disabled={uploading || saving}
+                  loading={uploading}
+                />
+              </View>
+              <View style={styles.imageButtonCell}>
+                <Button
+                  title="🖼️ Gallery"
+                  variant="secondary"
+                  onPress={() => handlePick('gallery')}
+                  disabled={uploading || saving}
+                />
+              </View>
+            </View>
           </Field>
           <Field label="Category *">
             <View style={styles.categoryGrid}>

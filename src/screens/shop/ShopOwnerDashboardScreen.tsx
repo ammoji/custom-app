@@ -1,6 +1,6 @@
 import { useNavigation } from '@react-navigation/native';
 import React, { useEffect, useMemo, useState } from 'react';
-import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import EmptyState from '../../components/common/EmptyState';
 import Loader from '../../components/common/Loader';
@@ -83,6 +83,12 @@ export default function ShopOwnerDashboardScreen() {
   // watcher is the right thing to do here — calling its own poll
   // again from outside would race the existing interval.
   const [retryNonce, setRetryNonce] = useState(0);
+  // PR 7 — pull-to-refresh state. Mirrors AdminOrdersScreen's
+  // pattern: bump retryNonce to force the watcher useEffect to
+  // re-run (which fetches immediately on mount); clear `refreshing`
+  // in the watcher callback below so the spinner clears exactly
+  // when fresh data arrives, not on a fixed timeout.
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
     if (!isShopOwner || !shopId) {
@@ -110,6 +116,12 @@ export default function ShopOwnerDashboardScreen() {
       // success/failure — the whole reason for the watcher contract
       // refactor (post-loader-spin hotfix).
       setLoading(false);
+      // PR 7 — pull-to-refresh: clear the spinner on the first
+      // callback after a refresh trigger, regardless of
+      // success/error. The flag is only set by the pull-down
+      // gesture; a normal poll-cycle callback finds it already
+      // false.
+      setRefreshing(false);
     });
     return unsubscribe;
   }, [isShopOwner, shopId, retryNonce]);
@@ -177,6 +189,19 @@ export default function ShopOwnerDashboardScreen() {
         keyExtractor={o => o.id}
         contentContainerStyle={styles.list}
         ItemSeparatorComponent={() => <View style={{ height: spacing.md }} />}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => {
+              // PR 7 — same posture as AdminOrdersScreen's pull.
+              // Bumping retryNonce re-runs the watcher useEffect
+              // (which fetches immediately on mount). Spinner
+              // clears in the watcher callback above.
+              setRefreshing(true);
+              setRetryNonce(n => n + 1);
+            }}
+          />
+        }
         ListHeaderComponent={
           <View>
             <View style={styles.statsCard}>
@@ -272,6 +297,41 @@ export default function ShopOwnerDashboardScreen() {
                 📞 {item.deliveryAddress?.phone || '—'}
               </Text>
               <PaymentStatusBanner paymentStatus={item.paymentStatus} />
+              {/* PR 7 — delivery substate timeline. The macro
+                  `status` field only goes through pending →
+                  accepted → preparing → out_for_delivery →
+                  delivered. The delivery partner's interim states
+                  live in `deliveryPersonId` and `pickedUpAt`. Show
+                  them so an order doesn't appear to jump from
+                  "Out for Delivery" to "Delivered" with no
+                  intermediate visibility. Same shape as
+                  AdminOrdersScreen — pinned by inspection. */}
+              {(item.status === 'out_for_delivery' ||
+                item.status === 'delivered') && (
+                <View style={styles.deliveryFlow}>
+                  {!item.deliveryPersonId &&
+                    item.status === 'out_for_delivery' && (
+                      <Text style={styles.flowStepPending}>
+                        ⏳ Awaiting delivery partner
+                      </Text>
+                    )}
+                  {item.deliveryPersonId && (
+                    <Text style={styles.flowStepDone}>
+                      🛵 Claimed by partner
+                    </Text>
+                  )}
+                  {item.pickedUpAt && (
+                    <Text style={styles.flowStepDone}>
+                      📦 Picked up · {formatOrderTime(item.pickedUpAt)}
+                    </Text>
+                  )}
+                  {item.deliveredAt && (
+                    <Text style={styles.flowStepDone}>
+                      ✅ Delivered · {formatOrderTime(item.deliveredAt)}
+                    </Text>
+                  )}
+                </View>
+              )}
               <Text style={styles.tapHint}>Tap to view items & take action</Text>
             </Pressable>
           );
@@ -414,4 +474,26 @@ const styles = StyleSheet.create({
     borderRadius: radii.sm,
   },
   retryText: { ...typography.bodyBold, color: '#fff' },
+  // PR 7 — delivery substate timeline. Style values copied verbatim
+  // from AdminOrdersScreen so the two surfaces look identical when
+  // an admin and a shop owner side-by-side compare an order's
+  // progress. Don't extract to a shared module — explicit
+  // duplication makes the cross-screen consistency obvious to
+  // reviewers (per the same convention as SHOP_OWNER_ALLOWED_ACTIONS).
+  deliveryFlow: {
+    marginTop: spacing.sm,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    gap: 4,
+  },
+  flowStepPending: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontStyle: 'italic',
+  },
+  flowStepDone: {
+    ...typography.caption,
+    color: colors.textPrimary,
+  },
 });

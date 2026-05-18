@@ -2382,6 +2382,96 @@ a real device. If the picker fails to launch (typical symptom: app
 crashes or shows a "Module not found" red-box), a fresh `eas build`
 is required before family testing can continue.
 
+### PR 7 — Customer cancel window + ShopOwnerDashboard UX mirror — ✅ SHIPPED May 17 2026
+
+Two unrelated-but-coherent items bundled. **Part 1**: customers can
+self-serve cancel a paid online order within 2 minutes of payment;
+auto-refund via the existing Razorpay flow. After 2 min they must
+escalate to admin. **Part 2**: pull-to-refresh + delivery substate
+timeline on `ShopOwnerDashboardScreen`, mirroring the
+AdminOrdersScreen hotfix from PR 5.
+
+- [x] **`canCustomerCancelPaidOrder` helper + 20 tests.** Pure
+      helper in `functions/src/customerCancelWindowHelpers.ts:1-174`
+      gates on auth, ownership, paymentMethod=online,
+      paymentStatus=paid, status=pending, paidAt finite + non-future,
+      and `elapsed <= CUSTOMER_CANCEL_WINDOW_MS` (2 min). Strict
+      equality on payment fields per the codebase's posture (truthy
+      checks have bitten us in PRs 5/6). Constant pinned by its own
+      test so an accidental tightening to e.g. 30s gets caught.
+      `tests/functions/customerCancelWindowHelpers.test.ts:1-225`
+      covers all rejection branches + the inclusive boundary
+      (exactly 2:00 is in-window).
+- [x] **`cancelMyRecentPaidOrder` callable.** New callable in
+      `functions/src/index.ts:999-1154` runs the same Razorpay
+      refund flow as `cancelPaidOrder`. Records `initiatedRole:
+      'customer'` on the refund doc so admin tooling can
+      distinguish customer-initiated vs admin-initiated refunds.
+      Failure path flips paymentStatus → `refund_failed` and
+      pushes to admins for manual reconciliation (same posture as
+      cancelPaidOrder).
+- [x] **`orderService.cancelMyRecentPaidOrder` client method.**
+      Standard dual-dispatch in
+      `src/services/orderService.ts:712-732`. Returns `{ ok,
+      refundId? }` shape matching cancelPaidOrder for symmetry.
+- [x] **OrderDetailScreen UI: countdown + cancel button.**
+      `src/screens/OrderDetailScreen.tsx`: new `nowMs` ticker
+      (1s interval, top-level useEffect for stable hook ordering),
+      `cancelEligibleNow` / `inWindow` / `remainingMs` derivations,
+      a "Changed your mind?" card with mm:ss countdown
+      ("Cancel order (1:23 left)"), and an "expired" replacement
+      card after the window closes. New pure formatter `formatMmSs`
+      kept inline (single use site). Optimistic local update on
+      success; the watcher overwrites within 5s.
+- [x] **ShopOwnerDashboard UX mirror.**
+      `src/screens/shop/ShopOwnerDashboardScreen.tsx`: imported
+      `RefreshControl`; added `refreshing` state + pull handler
+      that bumps `retryNonce` (same pattern as AdminOrdersScreen
+      hotfix); cleared `refreshing` in the watcher callback. Added
+      delivery substate timeline (⏳ Awaiting / 🛵 Claimed / 📦
+      Picked up · TIME / ✅ Delivered · TIME) with styles copied
+      verbatim from AdminOrdersScreen. The "Mark Delivered"
+      filter requirement was already satisfied: shop-owner action
+      buttons live on `ShopOrderDetailScreen` and the existing
+      `SHOP_OWNER_ALLOWED_ACTIONS` constant
+      (`@/src/screens/shop/ShopOrderDetailScreen.tsx:52-56`)
+      already excludes `'delivered'`.
+
+Verification:
+- `npm test`: 45 suites, 440 tests (was 420 → +20 new in
+  `customerCancelWindowHelpers.test.ts`).
+- `npx tsc --noEmit` (functions): clean.
+- `npx tsc --noEmit` (root): 3 baseline errors only — `firebase.ts`
+  + 2 in `useOrderStore.ts` — all pre-existing, unrelated.
+- `npm run audit:indexes`: 24 chains / 8 composite / 0 missing.
+- Deliberate-break demo: replaced the window-expiry branch in
+  `canCustomerCancelPaidOrder` with `return { ok: true }`. The test
+  `canCustomerCancelPaidOrder — paidAt + window math › rejects
+  orders past the 2-minute window (canonical guard)` went red.
+  Reverted; all green.
+
+NOTE: auto-formatter foot-gun continued (PRs 1, 2, 4, 5, 6, 7):
+- `canCustomerCancelPaidOrder` stripped from
+  `functions/src/index.ts` once on save.
+- `nowMs` / `setNowMs` state line stripped from
+  `OrderDetailScreen.tsx` once on save.
+- DO-NOT-REMOVE comment blocks left above each. Also: an orphan
+  comment block remains in `functions/src/index.ts` near the helper
+  imports (the formatter ate the import twice and we re-added it
+  with a fresh comment); harmless but ugly.
+
+- [ ] **DEFERRED — Extract `executeRefund` shared helper.** PR 7
+      prompt called for extracting the Razorpay-call + post-refund
+      Firestore writes from `cancelPaidOrder` into a shared helper
+      that both `cancelPaidOrder` and `cancelMyRecentPaidOrder`
+      would consume. Skipped for risk: the admin flow has push
+      notifications + admin alerts on failure that the customer
+      flow doesn't need, and the divergent ergonomics make a
+      shared abstraction leakier than the duplication. Revisit
+      post-launch if a third refund initiator (e.g. shop-owner
+      self-cancel of a paid order) appears. Documented inline in
+      `functions/src/index.ts:980-998`.
+
 ### Tag-along items (ride with whichever PR fits)
 
 - [ ] **Enable App Check on every callable.** Currently

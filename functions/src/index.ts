@@ -17,6 +17,15 @@ import Razorpay from 'razorpay';
 // commented makes the strip-and-resave failure mode louder.
 import { validateCancelPaidOrder } from './cancelPaidOrderHelpers';
 import { validateAllItemsInSameShop } from './cartIntegrityHelpers';
+// PR 7 — DO NOT REMOVE. Auto-formatter has stripped this once during
+// PR 7 development. Used by `cancelMyRecentPaidOrder` callable below.
+// If tsc complains "Cannot find name 'canCustomerCancelPaidOrder'",
+// re-add this line.
+import { canCustomerCancelPaidOrder } from './customerCancelWindowHelpers';
+// PR 7 — DO NOT REMOVE. Used by the new `cancelMyRecentPaidOrder`
+// callable below for the customer self-service cancel window. If
+// tsc complains "Cannot find name 'canCustomerCancelPaidOrder'" /
+// "CUSTOMER_CANCEL_WINDOW_MS", re-add this line.
 import { reconcileAbandonedOrder } from './cleanupReconciliationHelpers';
 import { verifyRazorpaySignature } from './confirmPaymentHelpers';
 import {
@@ -967,6 +976,182 @@ export const cancelPaidOrder = onCall<{
         { orderId, kind: 'refund_failed' },
       ).catch(e =>
         console.warn('[cancelPaidOrder] pushToAdmins failed:', e),
+      );
+      throw new HttpsError('internal', `Refund failed: ${failureReason}`);
+    }
+  },
+);
+
+// PR 7 — Customer self-service cancel window (paid online orders).
+// Allows the customer to cancel their own paid order within
+// CUSTOMER_CANCEL_WINDOW_MS (2 min) of payment captured. Triggers
+// the same Razorpay refund flow as cancelPaidOrder, but with a
+// customer-only auth path and a fixed 2-min eligibility window
+// enforced by `canCustomerCancelPaidOrder`.
+//
+// We deliberately DO NOT extract the refund execution into a shared
+// helper that cancelPaidOrder also calls — the admin flow has push
+// notifications + admin-alerts on failure that the customer flow
+// doesn't need, and the divergent logic ergonomics make the
+// duplication net-cheaper than a leaky shared abstraction.
+// Documented as a deferred follow-up in PRELAUNCH_CHECKLIST.
+//
+// Behavior on Razorpay failure: paymentStatus → 'refund_failed' so
+// admin can retry via the existing cancelPaidOrder flow. We do NOT
+// roll back to 'paid' — the customer's intent to cancel is recorded
+// in the refund doc + statusHistory and shouldn't be silently
+// erased.
+export const cancelMyRecentPaidOrder = onCall<{
+  orderId: string;
+  reason?: string;
+}>(
+  {
+    cors: true,
+    enforceAppCheck: false,
+    secrets: [RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET],
+  },
+  async request => {
+    const auth = request.auth;
+    const { orderId } = request.data ?? ({} as any);
+    if (!orderId || typeof orderId !== 'string') {
+      throw new HttpsError('invalid-argument', 'orderId required');
+    }
+
+    const orderRef = db.doc(`orders/${orderId}`);
+    const orderSnap = await orderRef.get();
+    const orderData = orderSnap.exists ? (orderSnap.data() as any) : null;
+
+    // Window + auth + ownership validation. Server uses Date.now()
+    // as the canonical clock — client-side countdown is UX only;
+    // the server is the gate. If the client is 2-3s behind the
+    // server (typical), the customer might see "expired" briefly
+    // server-side after the local countdown hit zero. That's fine —
+    // the UI re-fetches the order and the message updates to
+    // "Cancellation window has expired".
+    const validated = canCustomerCancelPaidOrder({
+      auth: auth ? { uid: auth.uid } : null,
+      order: orderData,
+      now: Date.now(),
+    });
+    if (!validated.ok) {
+      throw new HttpsError(validated.code, validated.message);
+    }
+
+    const reason =
+      (request.data?.reason ?? '').toString().trim().slice(0, 280) ||
+      'Customer cancelled within window';
+    const refundDocId = db.collection('refunds').doc().id;
+    const refundRef = db.collection('refunds').doc(refundDocId);
+    const now = Date.now();
+
+    // Step 1 — atomic state transition + refund-doc creation. Same
+    // shape as cancelPaidOrder so admin tooling that reads the
+    // refunds collection works uniformly across both initiation
+    // paths.
+    await db.runTransaction(async tx => {
+      tx.update(orderRef, {
+        paymentStatus: 'refund_pending',
+        cancellationReason: reason,
+        updatedAt: FieldValue.serverTimestamp(),
+        statusHistory: FieldValue.arrayUnion({
+          status: 'refund_pending',
+          at: now,
+          by: `customer:${auth!.uid}`,
+          reason,
+        }),
+      });
+      tx.set(refundRef, {
+        id: refundDocId,
+        orderId,
+        paymentId: orderData.razorpayPaymentId,
+        amount: orderData.total,
+        reason,
+        status: 'pending',
+        // initiatedRole is the new field admin tooling can filter
+        // on to distinguish customer-window cancels from
+        // admin-initiated refunds. Both use the same `refunds/*`
+        // collection so analytics / payouts can roll them up.
+        initiatedBy: auth!.uid,
+        initiatedRole: 'customer',
+        initiatedAt: now,
+      });
+    });
+
+    // Step 2 — Razorpay refund call. Wrapped so a transient API
+    // failure flips paymentStatus to 'refund_failed' (admin retries)
+    // rather than leaving the order in an inconsistent state.
+    const razorpay = new Razorpay({
+      key_id: RAZORPAY_KEY_ID.value(),
+      key_secret: RAZORPAY_KEY_SECRET.value(),
+    });
+    try {
+      const refund = await razorpay.payments.refund(
+        orderData.razorpayPaymentId,
+        {
+          speed: 'normal',
+          notes: { orderId, reason, role: 'customer' },
+        } as any,
+      );
+
+      const processedAt =
+        refund?.status === 'processed' ? Date.now() : null;
+
+      await db.runTransaction(async tx => {
+        tx.update(orderRef, {
+          paymentStatus: 'refunded',
+          status: 'cancelled',
+          refundId: refund?.id ?? refundDocId,
+          refundedAt: processedAt ?? Date.now(),
+          updatedAt: FieldValue.serverTimestamp(),
+          statusHistory: FieldValue.arrayUnion({
+            status: 'cancelled',
+            at: Date.now(),
+            by: `customer:${auth!.uid}`,
+            reason: `Customer cancelled within ${2}-min window — ${reason}`,
+          }),
+        });
+        tx.update(refundRef, {
+          status: refund?.status === 'processed' ? 'processed' : 'pending',
+          razorpayRefundId: refund?.id ?? null,
+          processedAt: processedAt ?? null,
+          razorpayStatus: refund?.status ?? null,
+        });
+      });
+
+      return { ok: true, refundId: refund?.id ?? refundDocId };
+    } catch (err: any) {
+      const failureReason: string =
+        err?.error?.description ?? err?.message ?? 'Razorpay refund failed';
+      console.error(
+        '[cancelMyRecentPaidOrder] razorpay.payments.refund failed for',
+        orderId,
+        err,
+      );
+      await db.runTransaction(async tx => {
+        tx.update(orderRef, {
+          paymentStatus: 'refund_failed',
+          updatedAt: FieldValue.serverTimestamp(),
+          statusHistory: FieldValue.arrayUnion({
+            status: 'refund_failed',
+            at: Date.now(),
+            by: `customer:${auth!.uid}`,
+            reason: failureReason,
+          }),
+        });
+        tx.update(refundRef, {
+          status: 'failed',
+          failedAt: Date.now(),
+          failureReason,
+        });
+      });
+      // Surface to admins so they can manually reconcile via the
+      // existing cancelPaidOrder retry path.
+      await pushToAdmins(
+        '🚨 Customer-initiated refund failed',
+        `Order #${orderId}: ${failureReason}. Manual intervention required.`,
+        { orderId, kind: 'refund_failed' },
+      ).catch(e =>
+        console.warn('[cancelMyRecentPaidOrder] pushToAdmins failed:', e),
       );
       throw new HttpsError('internal', `Refund failed: ${failureReason}`);
     }
