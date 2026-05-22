@@ -14,6 +14,7 @@ import { orderService } from '../services/orderService';
 import { Sentry } from '../services/sentry';
 import { shopService } from '../services/shopService';
 import type { Order, Shop } from '../types';
+import { usePressGuard } from '../hooks/usePressGuard';
 import { formatOrderTime, formatRupees } from '../utils/format';
 import { openRazorpayCheckout } from '../utils/razorpay';
 
@@ -28,24 +29,43 @@ const showAlert = (title: string, message: string) => {
   }
 };
 
-const confirmAlert = (
+// PR 27 — Promise-returning confirm dialog. The original
+// `confirmAlert` (callback shape) is preserved below for any
+// non-guarded call sites; the cancel/refund/retry handlers now go
+// through `confirmAlertAsync` so the wrapped handler can `await`
+// the user's choice and `usePressGuard` can hold its busy flag for
+// the full lifetime of the operation (not just until the dialog
+// pops up).
+const confirmAlertAsync = (
   title: string,
   message: string,
-  onConfirm: () => void,
   confirmLabel = 'Confirm',
-) => {
-  if (Platform.OS === 'web' && typeof window !== 'undefined') {
-    // eslint-disable-next-line no-alert
-    if (window.confirm(`${title}\n\n${message}`)) onConfirm();
-  } else {
+): Promise<boolean> =>
+  new Promise(resolve => {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      // eslint-disable-next-line no-alert
+      resolve(window.confirm(`${title}\n\n${message}`));
+      return;
+    }
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { Alert } = require('react-native');
-    Alert.alert(title, message, [
-      { text: 'Keep order', style: 'cancel' },
-      { text: confirmLabel, style: 'destructive', onPress: onConfirm },
-    ]);
-  }
-};
+    Alert.alert(
+      title,
+      message,
+      [
+        { text: 'Keep order', style: 'cancel', onPress: () => resolve(false) },
+        {
+          text: confirmLabel,
+          style: 'destructive',
+          onPress: () => resolve(true),
+        },
+      ],
+      // Android back-button / outside-tap dismissal also resolves
+      // false. iOS ignores onDismiss but always routes through one
+      // of the two button onPress callbacks, so it's safe.
+      { cancelable: true, onDismiss: () => resolve(false) },
+    );
+  });
 
 export default function OrderDetailScreen() {
   const nav = useNavigation<any>();
@@ -189,6 +209,20 @@ export default function OrderDetailScreen() {
       );
     });
   }, [shop?.registrationData?.phone]);
+
+  // PR 27 — Re-entrancy guards for the order-flow buttons. Each
+  // hook returns a wrapper that swallows a re-entrant call while
+  // its handler is still in-flight, closing the
+  // double-tap-creates-duplicate-Razorpay race. The handlers
+  // themselves are hoisted `async function` declarations below the
+  // JSX `return`, so they're in scope here despite appearing later
+  // in the source. Each `usePressGuard` allocates its OWN ref, so
+  // the cancel and retry-pay guards do NOT share state — pressing
+  // Cancel then Pay-Now in quick succession remains possible (the
+  // server-side handler rejects the impossible second one).
+  const guardedRetryPayment = usePressGuard(handleRetryPayment);
+  const guardedCancel = usePressGuard(handleCancel);
+  const guardedWindowCancel = usePressGuard(handleWindowCancel);
 
   if (loading && !order) {
     return (
@@ -470,7 +504,7 @@ export default function OrderDetailScreen() {
                   : `Cancel order (${formatMmSs(remainingMs)} left)`
               }
               variant="primary"
-              onPress={handleWindowCancel}
+              onPress={guardedWindowCancel}
               loading={windowCancelling}
               disabled={windowCancelling}
               fullWidth
@@ -510,7 +544,7 @@ export default function OrderDetailScreen() {
                     ? 'Opening payment…'
                     : `Pay ${formatRupees(order.total)} now`
                 }
-                onPress={handleRetryPayment}
+                onPress={guardedRetryPayment}
                 loading={paying}
                 disabled={paying || cancelling}
                 fullWidth
@@ -518,7 +552,7 @@ export default function OrderDetailScreen() {
               <View style={{ height: spacing.sm }} />
               <Button
                 title="Cancel order"
-                onPress={handleCancel}
+                onPress={guardedCancel}
                 variant="secondary"
                 loading={cancelling}
                 disabled={paying || cancelling}
@@ -543,7 +577,7 @@ export default function OrderDetailScreen() {
             <View style={{ height: spacing.md }} />
             <Button
               title={cancelling ? 'Cancelling…' : 'Cancel order'}
-              onPress={handleCancel}
+              onPress={guardedCancel}
               variant="secondary"
               loading={cancelling}
               disabled={cancelling}
@@ -610,13 +644,18 @@ export default function OrderDetailScreen() {
     </SafeAreaView>
   );
 
-  function handleRetryPayment() {
+  // PR 27 — Async + Promise-returning so `usePressGuard` can hold
+  // its busy flag for the entire Razorpay round-trip. The Promise
+  // resolves when Razorpay's `handler` / `ondismiss` / `onError`
+  // fires, so a re-entrant tap on "Pay X now" while the overlay is
+  // open is a guaranteed no-op.
+  async function handleRetryPayment(): Promise<void> {
     if (!order) return;
     setPaying(true);
-    (async () => {
-      try {
-        const session = await orderService.retryPayment(order.id);
-        await openRazorpayCheckout({
+    try {
+      const session = await orderService.retryPayment(order.id);
+      await new Promise<void>(resolve => {
+        openRazorpayCheckout({
           key: session.razorpayKeyId,
           order_id: session.razorpayOrderId,
           amount: Math.round(session.total * 100),
@@ -636,6 +675,7 @@ export default function OrderDetailScreen() {
               value: session.total,
             });
             setPaying(false);
+            resolve();
           },
           modal: {
             ondismiss: () => {
@@ -644,6 +684,7 @@ export default function OrderDetailScreen() {
                 'Payment cancelled',
                 'Your order is still pending. You can retry any time before it expires.',
               );
+              resolve();
             },
           },
           onError: (err: any) => {
@@ -659,39 +700,40 @@ export default function OrderDetailScreen() {
               'Payment failed',
               reason === 'unknown' ? 'Please try again.' : reason,
             );
+            resolve();
           },
         });
-      } catch (err: any) {
-        setPaying(false);
-        showAlert(
-          'Could not retry payment',
-          err?.message ?? 'Try again in a moment.',
-        );
-      }
-    })();
+      });
+    } catch (err: any) {
+      setPaying(false);
+      showAlert(
+        'Could not retry payment',
+        err?.message ?? 'Try again in a moment.',
+      );
+    }
   }
 
-  function handleCancel() {
+  // PR 27 — Async so `usePressGuard` holds across the confirm
+  // dialog AND the cancel callable. Returns early (`ok=false`) if
+  // the user dismisses; the guard then clears via `finally` and
+  // the button is tappable again.
+  async function handleCancel(): Promise<void> {
     if (!order) return;
-    confirmAlert(
+    const ok = await confirmAlertAsync(
       'Cancel this order?',
       'This will release the order. You can place a new one anytime.',
-      async () => {
-        setCancelling(true);
-        try {
-          await orderService.cancelMyPendingOrder(order.id);
-          // watchOrder snapshot/poll will reflect status='cancelled'.
-        } catch (err: any) {
-          showAlert(
-            'Could not cancel',
-            err?.message ?? 'Please try again.',
-          );
-        } finally {
-          setCancelling(false);
-        }
-      },
       'Cancel order',
     );
+    if (!ok) return;
+    setCancelling(true);
+    try {
+      await orderService.cancelMyPendingOrder(order.id);
+      // watchOrder snapshot/poll will reflect status='cancelled'.
+    } catch (err: any) {
+      showAlert('Could not cancel', err?.message ?? 'Please try again.');
+    } finally {
+      setCancelling(false);
+    }
   }
 
   // PR 7 — In-window paid-order cancel handler. Server is the gate;
@@ -699,35 +741,29 @@ export default function OrderDetailScreen() {
   // UI doesn't briefly show the countdown card again before the
   // watcher repolls. On error, leave the card in place so the user
   // can retry.
-  function handleWindowCancel() {
+  async function handleWindowCancel(): Promise<void> {
     if (!order) return;
-    confirmAlert(
+    const ok = await confirmAlertAsync(
       'Cancel this order?',
       `You'll be refunded ${formatRupees(order.total)} to your original payment method (5–7 business days).`,
-      async () => {
-        setWindowCancelling(true);
-        try {
-          await orderService.cancelMyRecentPaidOrder({
-            orderId: order.id,
-          });
-          // Optimistic local update — the watcher will overwrite
-          // with the server's canonical doc within 5s.
-          setOrder({
-            ...order,
-            status: 'cancelled',
-            paymentStatus: 'refund_pending',
-          });
-        } catch (err: any) {
-          showAlert(
-            'Could not cancel',
-            err?.message ?? 'Please try again.',
-          );
-        } finally {
-          setWindowCancelling(false);
-        }
-      },
       'Cancel & refund',
     );
+    if (!ok) return;
+    setWindowCancelling(true);
+    try {
+      await orderService.cancelMyRecentPaidOrder({ orderId: order.id });
+      // Optimistic local update — the watcher will overwrite with
+      // the server's canonical doc within 5s.
+      setOrder({
+        ...order,
+        status: 'cancelled',
+        paymentStatus: 'refund_pending',
+      });
+    } catch (err: any) {
+      showAlert('Could not cancel', err?.message ?? 'Please try again.');
+    } finally {
+      setWindowCancelling(false);
+    }
   }
 }
 

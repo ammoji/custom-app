@@ -19,6 +19,7 @@ import type { Address, PaymentMethod, SavedAddress, SubstitutionPreference, User
 import { deriveCheckoutEmail } from '../utils/checkoutEmail';
 import { formatRupees } from '../utils/format';
 import { openRazorpayCheckout } from '../utils/razorpay';
+import { usePressGuard } from '../hooks/usePressGuard';
 
 type Errors = Partial<Record<'name' | 'line1' | 'city' | 'pincode' | 'phone', string>>;
 
@@ -452,6 +453,14 @@ export default function CheckoutScreen() {
     }
   };
 
+  // PR 27 — Re-entrancy guard for the Place Order / Pay button. The
+  // existing `disabled={placing}` is paint-time defense only; a
+  // double-tap fired BEFORE React re-renders the disabled state can
+  // create two Razorpay sessions. usePressGuard flips a ref
+  // synchronously inside the handler so the second tap is a
+  // guaranteed no-op while the first is in-flight.
+  const guardedPlaceOrder = usePressGuard(placeOrder);
+
   if (items.length === 0) {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
@@ -734,7 +743,7 @@ export default function CheckoutScreen() {
                   ? `Place Order · ${formatRupees(total)}`
                   : `Pay ${formatRupees(total)}`
             }
-            onPress={placeOrder}
+            onPress={guardedPlaceOrder}
             loading={placing}
             fullWidth
           />
