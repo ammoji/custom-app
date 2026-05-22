@@ -19,6 +19,7 @@
     "update-order": "tsx scripts/update-order.ts",
     "import-images": "tsx scripts/import-from-openfoodfacts.ts",
     "generate-branding": "tsx scripts/generate-branding.ts",
+    "build-legal": "tsx scripts/build-legal-html.ts",
     "audit": "node scripts/audit-integrity.js",
     "audit:indexes": "tsx scripts/audit-firestore-indexes.ts",
     "test:rules": "firebase emulators:exec --only firestore,auth --project grocery-mvp-test \"jest --config tests/jest.config.js\"",

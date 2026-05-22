@@ -5,7 +5,11 @@ node_modules/
 
 # Expo
 .expo/
-dist/
+dist/*
+# PR 25 — keep the hosted legal HTML pages committed so
+# `firebase deploy --only hosting` always has them to upload.
+!dist/privacy.html
+!dist/terms.html
 web-build/
 expo-env.d.ts
 

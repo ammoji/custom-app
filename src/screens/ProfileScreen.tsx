@@ -37,7 +37,9 @@ import ScreenHeader from '../components/common/ScreenHeader';
 import { colors, radii, spacing, typography } from '../constants/theme';
 import { authService } from '../services/authService';
 import { profileService } from '../services/profileService';
+import { pushService } from '../services/pushService';
 import { signOutAndClearLocalState } from '../services/signOutAndClearLocalState';
+import { openPrivacy, openTerms } from '../utils/openLegal';
 import { useAuthStore } from '../store/useAuthStore';
 import { useCartStore } from '../store/useCartStore';
 import type { SavedAddress, UserProfile } from '../types';
@@ -201,6 +203,7 @@ export default function ProfileScreen() {
     try {
       await signOutAndClearLocalState({
         signOut: () => authService.signOut(),
+        unregisterPushToken: () => pushService.unregisterPushToken(), // PR 24
         clearCart: () => clearCart(),
         resetNavigation: () =>
           nav.reset({ index: 0, routes: [{ name: 'Home' }] }),
@@ -335,6 +338,32 @@ export default function ProfileScreen() {
           />
         </View>
 
+        {/* PR 25 — Legal section. Sits above Account so the user
+            can read the policy before deciding to sign out / delete
+            their account. Both rows open the hosted URL in the
+            in-app browser tab. */}
+        <Text style={[styles.sectionTitle, { marginTop: spacing.xl }]}>
+          Legal
+        </Text>
+        <Pressable
+          style={styles.legalRow}
+          onPress={openTerms}
+          accessibilityRole="link"
+          accessibilityLabel="View Terms of Service"
+        >
+          <Text style={styles.legalRowText}>Terms of Service</Text>
+          <Text style={styles.chevron}>›</Text>
+        </Pressable>
+        <Pressable
+          style={styles.legalRow}
+          onPress={openPrivacy}
+          accessibilityRole="link"
+          accessibilityLabel="View Privacy Policy"
+        >
+          <Text style={styles.legalRowText}>Privacy Policy</Text>
+          <Text style={styles.chevron}>›</Text>
+        </Pressable>
+
         <Text style={[styles.sectionTitle, { marginTop: spacing.xl }]}>
           Account
         </Text>
@@ -404,6 +433,20 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   chevron: { ...typography.h2, color: colors.textSecondary },
+  // PR 25 — Legal section rows (Terms of Service / Privacy Policy).
+  legalRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  legalRowText: {
+    ...typography.body,
+    color: colors.textPrimary,
+  },
   inlineError: {
     marginTop: spacing.sm,
     backgroundColor: '#FEE2E2',

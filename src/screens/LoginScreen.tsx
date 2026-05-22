@@ -10,6 +10,7 @@ import { colors, radii, spacing, typography } from '../constants/theme';
 import type { ConfirmationResult } from '../services/authService';
 import { authService } from '../services/authService';
 import { useAuthStore } from '../store/useAuthStore';
+import { openPrivacy, openTerms } from '../utils/openLegal';
 
 type Phase = 'enter_phone' | 'enter_otp' | 'verifying';
 
@@ -175,6 +176,23 @@ export default function LoginScreen() {
               onPress={onSendOtp}
               disabled={phone.length !== 10}
             />
+            {/* PR 25 — legal footer. Only shown on the enter_phone
+                phase; once the user taps Send OTP they have already
+                accepted (per Terms of Service §2). Keeping it off the
+                OTP screen avoids visual clutter while typing. */}
+            <View style={styles.legalFooter}>
+              <Text style={styles.legalText}>
+                By continuing, you agree to our{' '}
+                <Text style={styles.legalLink} onPress={openTerms}>
+                  Terms of Service
+                </Text>
+                {' '}and{' '}
+                <Text style={styles.legalLink} onPress={openPrivacy}>
+                  Privacy Policy
+                </Text>
+                .
+              </Text>
+            </View>
           </>
         )}
 
@@ -261,5 +279,23 @@ const styles = StyleSheet.create({
   },
   linkDisabled: {
     color: colors.textSecondary,
+  },
+  // PR 25 — legal footer (Terms / Privacy links) on the enter_phone phase.
+  legalFooter: {
+    marginTop: spacing.lg,
+    alignItems: 'center',
+    paddingHorizontal: spacing.md,
+  },
+  legalText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  legalLink: {
+    ...typography.caption,
+    color: colors.primary,
+    fontWeight: '600',
+    textDecorationLine: 'underline',
   },
 });
