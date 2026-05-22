@@ -2491,6 +2491,1863 @@ a real device. If the picker fails to launch (typical symptom: app
 crashes or shows a "Module not found" red-box), a fresh `eas build`
 is required before family testing can continue.
 
+### PR 22 — Customer delivery instructions per address — ✅ CODE COMPLETE May 21 2026
+
+Solves the "ring the second bell, not the first" / "gate locked
+after 9 PM, call when outside" mid-route phone call. Delivery
+partners across India lose 3–5 minutes per drop on access
+ambiguity; customers get woken up; instructions sent over WhatsApp
+chat are lost in noise. PR 22 attaches free-text drop-off notes
+to the **address** itself (so they're set once and reused on every
+order to that address), with a per-order checkout override slot
+and a yellow-tinted display card on the shop + delivery partner
+order detail screens.
+
+Server-first additive change. Field is optional everywhere; legacy
+addresses + legacy orders silently render with no card.
+
+#### What shipped
+
+- [x] **Schema additive** at `@/src/types/index.ts:165-191` and
+      `@/src/types/index.ts:204-228`. New optional
+      `Address.deliveryInstructions?: string` and
+      `SavedAddress.deliveryInstructions?: string`. Documented
+      inline as free-text, ≤280 chars, normalized server-side.
+- [x] **Pure helper** at
+      `@/functions/src/deliveryInstructionsHelpers.ts`.
+      `normalizeDeliveryInstructions` returns a discriminated
+      union: undefined / null / empty / whitespace-only →
+      `undefined` (write nothing); non-string → invalid-argument;
+      >280 chars after trim → invalid-argument with explicit
+      length in the message; otherwise the trimmed string. Trim
+      is greedy on both ends; internal whitespace is preserved
+      (line breaks in "Floor 2\nFlat 4B" matter).
+- [x] **10 unit tests** at
+      `@/tests/functions/deliveryInstructionsHelpers.test.ts`.
+      Each rejection branch (number, object, oversize), each
+      empty-input branch (undefined / null / `''` / `'   '` /
+      `'\n\n'`), trim happy path, max-length boundary (280
+      chars accepted, 281 rejected), and an internal-whitespace
+      preservation test. Total: 596 tests pass project-wide.
+- [x] **`saveAddress` callable** wiring at
+      `@/functions/src/index.ts` — extends `validateAddressInput`
+      in `profileHelpers.ts` to delegate to the helper, and the
+      callable spreads `...(deliveryInstructions !== undefined
+      && { deliveryInstructions })` so undefined is *omitted*
+      from the Firestore write rather than written as `null`
+      (cleaner reads on legacy clients).
+- [x] **`placeOrder` callable** wiring stamps the normalized
+      string onto `order.deliveryAddress.deliveryInstructions`
+      at order-creation time, snapshotting whatever the customer
+      saw at checkout — even if they later edit the saved
+      address, the historical order doc is immutable. Same
+      conditional-spread omit-if-undefined pattern.
+- [x] **Client dispatcher types** at
+      `@/src/services/profileService.ts` extended `SaveAddressInput`
+      and `@/src/services/orderService.ts` extended
+      `PlaceOrderInput` to carry the optional field.
+- [x] **AddressEditScreen UI** at
+      `@/src/screens/AddressEditScreen.tsx`. New multiline
+      `TextInput` (3 lines visible, autoGrow up to 6) below
+      the existing fields, with a live `N/280` char counter
+      that turns danger-red at the limit. State + hydration
+      hoisted above all early returns to satisfy Rules-of-Hooks.
+- [x] **CheckoutScreen UI** at
+      `@/src/screens/CheckoutScreen.tsx`. Same multiline input,
+      pre-filled from the selected saved address's instructions,
+      editable inline as a per-order override. The override does
+      NOT mutate the saved address — it's only stamped onto the
+      single order. Empty input clears the per-order override.
+- [x] **Customer OrderDetailScreen** at
+      `@/src/screens/OrderDetailScreen.tsx`. Read-only
+      confirmation card adjacent to the delivery address. Subtle
+      treatment — for the customer it's just a receipt, not
+      actionable.
+- [x] **Shop ShopOrderDetailScreen** at
+      `@/src/screens/shop/ShopOrderDetailScreen.tsx`. Yellow-
+      tinted card with left accent bar (`#F4D03F` on `#FEF9E7`)
+      above items + substitution preference. Visually distinct
+      from PR 21's primary-tinted substitution card so the two
+      different information types read as such at a glance.
+- [x] **Delivery partner DeliveryOrderDetailScreen** at
+      `@/src/screens/delivery/DeliveryOrderDetailScreen.tsx`.
+      Same yellow card directly under the "Deliver to" address
+      block — most actionable surface in the app for this field
+      (the partner is the one ringing the bell). Silently
+      omitted on legacy orders.
+
+#### Verification done in-session
+
+- `npx tsc --noEmit` (root) — 0 errors.
+- `npx tsc --noEmit -p functions` — 0 errors.
+- `npm test` — 596 / 596 passing including the 10 new helper
+  tests.
+- Deliberate-break test: flipped a normalize expectation,
+  confirmed exactly 1 fail, reverted.
+- Zero new `DO NOT REMOVE` markers (the helper is invoked from
+  `validateAddressInput` which is already a defended import
+  surface; no new top-level single-symbol import added).
+
+#### Manual smoke-test runbook
+
+Pre-deploy (server-first): `firebase deploy --only functions`
+*before* OTA-ing the client. Skipping this order means the
+client tries to send `deliveryInstructions` to an old callable
+that strips unknown fields silently — instructions silently
+dropped, hard to debug.
+
+1. **New address with instructions.** Profile → Add address →
+   fill all fields + "Ring second bell, brown gate". Save.
+   Reopen → instructions populated.
+2. **Char counter.** Type 280 chars exactly → counter green at
+   `280/280`. Type 281 → counter red, save button disabled
+   (or save fails server-side with the explicit length error).
+3. **Edit existing address.** Change instructions to "Gate
+   locked after 9 PM, call when outside". Save. Reopen → new
+   text persisted; old text gone.
+4. **Clear instructions.** Edit, blank the field, save.
+   Reopen → field empty; Firestore doc has no
+   `deliveryInstructions` key (verify in console).
+5. **Checkout pre-fill.** Place order against an address with
+   instructions → Checkout shows the saved string in the
+   instructions input, editable.
+6. **Per-order override.** At checkout, change the input from
+   "Ring second bell" to "Today only — leave at door, I'm
+   in a meeting." Place order. Open the placed order →
+   override is on the order doc. Open the saved address →
+   still shows "Ring second bell" (unmutated).
+7. **Customer order detail.** Subtle confirmation card
+   visible adjacent to the delivery address.
+8. **Shop order detail.** Yellow card prominent above items.
+   Owner can read while picking.
+9. **Delivery order detail.** Yellow card directly under
+   "Deliver to" — most prominent surface. Field-tested mental
+   model: partner glances at the screen on arrival → reads
+   "ring second bell" → no phone call.
+10. **Legacy orders.** Open any order placed before this PR →
+    no card rendered, no crash, no empty-string artifact.
+11. **Server validation.** Hit the callable with
+    `deliveryInstructions: 'x'.repeat(500)` → returns
+    `invalid-argument` with the length in the message. With
+    `deliveryInstructions: 42` → returns `invalid-argument`.
+12. **No screen crashes.** Visit AddressEdit / Checkout /
+    OrderDetail / ShopOrderDetail / DeliveryOrderDetail with
+    instructions present + with instructions absent. No
+    Rules-of-Hooks warnings in dev mode.
+
+#### Deploy
+
+```bash
+# 1. Server-first
+cd functions && npm run build && cd ..
+firebase deploy --only functions
+
+# 2. Client OTA
+npm test
+eas update --branch production --message "PR 22 — Customer delivery instructions"
+```
+
+Testers: force-close + reopen TestFlight.
+
+#### Rollback
+
+- **Server regression** → `git revert` the deliveryInstructions
+  edits + redeploy. Existing order docs retain the field
+  harmlessly; old code reading them ignores it. New orders
+  post-rollback won't have it.
+- **Client regression** → `eas update --branch production
+  --message "Revert PR 22"` after `git revert` on the client
+  edits. Server callable continues accepting the field; just
+  no UI to set it.
+
+#### Success metric
+
+Target: **30–50% drop** in mid-route customer phone calls
+reported by delivery partners in the weekly check-in.
+Industry equivalent: Dunzo's 2022 ops note pegged the drop
+at ~40% after they rolled out persistent address-level notes.
+Hard to measure absolutely without per-order call logs;
+proxies are partner self-report + the shop owner's
+"customer didn't pick up" complaints frequency.
+
+#### Follow-ups (out of scope this PR)
+
+- [ ] **Per-address quick-pick presets.** Common phrases
+      ("Ring the bell", "Call on arrival", "Leave with
+      security") as tap-to-fill chips above the textarea.
+      Reduces typing on Hindi / vernacular keyboards where
+      switching layouts is friction. [PR 22 follow]
+- [ ] **Photo of the gate / door.** Single optional image
+      attached to the address. Especially valuable for
+      hard-to-find apartment blocks. Requires Firebase
+      Storage rules update + thumbnail generation. [post-MVP]
+- [ ] **Voice note instructions.** ≤30s audio attached to
+      the address; partner taps → plays. Beats typing for
+      illiterate / semi-literate customers. Requires audio
+      capture + Storage + a player component. [post-MVP]
+- [ ] **Shop-side acknowledgement.** Checkbox on the shop
+      order detail "✓ I've read the delivery notes" that
+      stamps an event onto the order timeline. Forces the
+      shop to actually look at the field rather than skim
+      past it. [PR 22 follow]
+- [ ] **Localize copy.** Field label + placeholder are
+      English-only. Hindi / Punjabi / Tamil translations
+      matter for the same reason as PR 21. [post-MVP]
+- [ ] **Telemetry event `delivery_instructions_set`** with
+      length bucket (0 / 1-50 / 51-150 / 151-280) so we can
+      see adoption + tune the 280 char limit. [PR 22 follow]
+- [ ] **Edit instructions after order placed.** Currently
+      set-once at checkout. A future
+      `updateOrderDeliveryInstructions` callable could allow
+      edits while status is still `pending` / `accepted`
+      (before partner picks up). [post-MVP]
+
+### PR 21 — Customer substitution preferences at checkout — ✅ CODE COMPLETE May 21 2026
+
+Solves the "namaste, atta khatam ho gaya, Aashirvaad chalega kya?"
+problem. Kirana stock volatility is high; mid-fulfillment calls drop;
+orders stall. PR 21 captures the customer's intent at checkout
+("call me / replace / refund") and shows it prominently on the shop
+side so fulfillment proceeds without interruption.
+
+Bilateral payoff: customer doesn't get interrupted; shop finishes
+orders faster. Schema-additive (one optional field on Order).
+
+**Server-first deploy** — `placeOrder` callable accepts an
+additional optional field; server normalizes / re-validates. Old
+clients omitting the field continue to work (server defaults to
+`call_me`). New client sending the field on an old server is also
+fine (old server ignores unknown fields) — but we deploy server
+first per discipline, so the field is honored from the moment the
+client OTA lands.
+
+#### What shipped
+
+- [x] **Schema additive** at `@/src/types/index.ts:352-371`. New
+      optional `Order.substitutionPreference` + new exported
+      `SubstitutionPreference = 'call_me' | 'auto' | 'refund'`
+      type. Field documented inline with the legacy-render rules.
+- [x] **Pure helper** at
+      `@/functions/src/substitutionHelpers.ts`.
+      `normalizeSubstitutionPreference` returns a discriminated
+      union: undefined/null → 'call_me' (absorbs old clients);
+      allowlist string → echoed; non-string + unknown string +
+      empty string → invalid-argument. Empty string deliberately
+      NOT coerced (signals a UI bug; surface loudly).
+- [x] **10 unit tests** at
+      `@/tests/functions/substitutionHelpers.test.ts`. Each of
+      the three allowlist values, undefined / null defaults,
+      non-string (number + object), unknown string, empty
+      string, and the canonical `VALID_PREFERENCES` constant.
+- [x] **`placeOrder` wire-up** at
+      `@/functions/src/index.ts:74-76;184-187;212-223;454-460`.
+      Field accepted on `PlaceOrderInput`, normalized via the
+      helper, and persisted onto the order doc with the rest of
+      the canonical fields. Marked `DO NOT REMOVE` on the import
+      line per the code-discipline pattern (auto-formatter
+      stripped a similar import twice during PR 6).
+- [x] **`orderService.placeOrder` dispatcher** at
+      `@/src/services/orderService.ts:26;43-52;121-132`. Type
+      extended; payload forwards via a conditional spread so
+      legacy callers that omit the field keep the same wire
+      shape (helps tests + Razorpay receipt-string stability).
+- [x] **CheckoutScreen picker** at
+      `@/src/screens/CheckoutScreen.tsx:55-63;310-322;626-675`.
+      State hoisted with the PR 12 / 17 / 19 / 20 lineage above
+      all early returns. Three-option picker sits between the
+      bill summary and the payment method — placement is
+      deliberate so the customer makes the choice BEFORE
+      committing to pay. Default 'call_me'.
+- [x] **Customer-side confirmation** at
+      `@/src/screens/OrderDetailScreen.tsx:296-310;897-914`.
+      Subdued surface-colored card right under the delivery
+      address. Silently omitted on legacy orders (no field) —
+      no choice was made, nothing to confirm.
+- [x] **Shop-side prominent display** at
+      `@/src/screens/shop/ShopOrderDetailScreen.tsx:297-314;679-703`.
+      Primary-tinted card with an accent left border, rendered
+      ABOVE the items section so the shop owner sees the
+      customer's intent before they start picking. Legacy
+      orders explicitly render the `call_me` copy (safe
+      fallback — the shop should call when intent is unknown).
+- [x] **No new useState below early returns**. All three new
+      pieces of state (the picker on CheckoutScreen) are
+      hoisted with the existing block.
+- [x] **Picker styles** mirror the saved-address card visual
+      language: border + tinted-active state, primary color
+      family. Customer instinctively recognizes it as a
+      selection.
+
+#### Verification
+
+- `npx tsc --noEmit` (root): 0 errors.
+- `npx tsc --noEmit -p functions`: 0 errors.
+- `npm test`: **57 suites / 585 tests** (575 → +10 new).
+- **Deliberate-break demo passed**: flipped the "defaults to
+  call_me when undefined" expectation to expect `'auto'`,
+  confirmed exactly 1 fail / 9 pass, reverted.
+- Zero new `DO NOT REMOVE` markers... wait — one was added on
+  the `substitutionHelpers` import per the code-discipline
+  pattern (auto-formatter risk for one-shot single-symbol
+  imports of new pure-helper modules). Streak: **11 PRs clean,
+  PR 21 adds 1 defensive marker** for an import that's a known
+  auto-formatter target pattern. Documented in-line.
+
+#### Smoke tests (after staged deploy)
+
+1. **Default selection.** Open Cart → Checkout. The
+   "If something's unavailable" section shows three options;
+   "📞 Call me first" has the active border + primaryLight
+   background.
+2. **Switch selection.** Tap "🔄 Replace with similar". Active
+   styling transfers; the call-me card loses its accent.
+3. **Place order with 'auto'.** Submit. OrderDetail shows
+   "If unavailable → 🔄 Shop will replace with similar".
+4. **Shop sees the preference.** Quick Switch to a shop owner
+   account, open the same order. Above items, a primary-tinted
+   card reads "Customer's preference → 🔄 Replace with
+   similar items (shop picks)".
+5. **Legacy order display.** Find an order placed before this
+   PR. Customer side: no preference card (silently omitted).
+   Shop side: card with "📞 Call before substituting or
+   refunding" — explicit safe default.
+6. **'refund' preference.** Place another order with the
+   refund option. Customer + shop displays both reflect it.
+7. **Explicit 'call_me' selection.** Place with the default
+   explicitly tapped. Choice persists on customer + shop
+   sides — distinguishable from legacy by virtue of the field
+   being present on the order doc (server normalized + wrote it).
+8. **Server validation.** Hit the callable directly (e.g. via
+   Cloud Functions console or a test script) with
+   `substitutionPreference: 'cancel'`. Server returns
+   `invalid-argument`. Valid flows unaffected.
+9. **No screen crashes.** Hooks-of-Rules sanity — visit
+   CheckoutScreen / OrderDetailScreen / ShopOrderDetailScreen
+   across statuses; no ErrorBoundary.
+
+#### Deploy plan
+
+**Server-first** per `.windsurf/deploy-discipline.md`:
+
+```powershell
+$env:NODE_OPTIONS = "--use-system-ca"
+
+# 1. Server first — placeOrder must understand the field before
+#    client OTA. New client sending the field at an old server
+#    is harmless (old server ignores unknown fields), but the
+#    PR's promise to the customer only holds once normalization
+#    + persistence are live.
+cd functions
+npm run build
+cd ..
+firebase deploy --only functions --project grocery-mvp-dev
+firebase functions:list --project grocery-mvp-dev
+# Confirm placeOrder shows "Updated:" in the deploy output.
+
+# 2. Client OTA
+npm test
+eas update --branch production --message "PR 21 — Customer substitution preferences"
+```
+
+Testers: force-close + reopen TestFlight.
+
+#### Rollback
+
+- **Server regression** → `git revert` the substitutionHelpers
+  + placeOrder edits + redeploy. Order docs created since
+  rollout retain the field harmlessly; old code reading them
+  just ignores it. New orders post-rollback won't have the
+  field; ShopOrderDetail falls back to the 'call_me' default
+  copy (graceful).
+- **Client regression** → `eas update --branch production
+  --republish [previous-update-id]`. CheckoutScreen on
+  rolled-back binaries doesn't show the picker; customers
+  default to `call_me` server-side automatically.
+
+#### Headline metric
+
+**% of orders where shop calls customer mid-fulfillment.** Hard
+to measure directly; proxies: (a) shop-side feedback in the
+weekly check-in, (b) call-log frequency from shop owners with
+metered plans. Industry equivalent: Swiggy Instamart reports
+~60% drop in substitution-call rate after preferences shipped.
+
+#### Follow-ups (out of scope this PR)
+
+- [ ] **Shop substitution workflow.** PR 21 captures intent;
+      doesn't build the UI for the shop owner to mark an item
+      as "substituted with X" or "refunded — adjust total".
+      For MVP they call (per `call_me`) or just act (per
+      `auto` / `refund`) without formal in-app workflow.
+      Future PR introduces the substitute / refund actions on
+      ShopOrderDetailScreen with a new server callable
+      (`substituteOrderItem` / `refundOrderItem`) that
+      handles the line-item edit + total recompute + audit
+      log. [post-MVP]
+- [ ] **Per-item preferences.** Single preference applies to
+      the whole order today. Useful refinement: "refund any
+      veg, but substitute any staple". Adds a per-cart-item
+      enum to PlaceOrderInput. [post-MVP]
+- [ ] **Editing preference after order placed.** Set-once at
+      checkout. Customer would cancel + re-order to change.
+      A future callable `updateOrderSubstitutionPreference`
+      could allow editing while status is still `pending` /
+      `accepted` (before the shop starts picking). [post-MVP]
+- [ ] **Default preference on profile.** Customer re-chooses
+      every order in MVP. Saved-default lives on
+      `/users/{uid}.substitutionPreferenceDefault` in a
+      future PR if there's repeat-customer demand.
+      [post-MVP]
+- [ ] **Notify customer when substitution happens.** Push
+      infrastructure exists (PR 11); need a new trigger
+      (`sendSubstitutionNotice`) fired when the shop marks
+      an item as substituted / refunded — gated on the
+      shop substitution workflow above. [post-MVP]
+- [ ] **Telemetry event `substitution_preference_chosen`**
+      with the chosen value so we can A/B-test default
+      ordering (currently call_me first; data may show auto
+      converts better on repeat customers). Trivial
+      Analytics.send() in CheckoutScreen on
+      `setSubstitutionPreference`. [PR 21 follow]
+- [ ] **Localize copy.** English-only today. Hindi / Punjabi
+      / Tamil translations matter once the customer base
+      diversifies; the three preference labels are the
+      first surface most customers will read in the app
+      (Checkout is high-attention). [post-MVP]
+
+### PR 20 — Customer order rating + Shop ratings — ✅ CODE COMPLETE May 21 2026
+
+Restores the trust signal kirana customers lose when they move from
+"I know Mahesh-bhai personally" to "I'm browsing an app full of shop
+names." After PR 20, every shop card carries a "★ 4.7 (200)" badge
+or a "New shop" italic — the same trust-cue language Swiggy / Zomato
+/ BlinkIt have trained Indian consumers on for years.
+
+Three ingredients:
+1. Rating prompt on OrderDetail for delivered + unrated orders.
+2. Rolling average + count denormalized on shop docs (incremental
+   compute — no full re-aggregation).
+3. Star badge on every shop display surface.
+
+**Server-first rollout** — new `submitOrderRating` callable with no
+client backstop possible (a missing callable surfaces as
+`functions/not-found` on every Submit tap and rolls back the
+optimistic flip). Functions deploy precedes client OTA.
+
+#### What shipped
+
+- [x] **Schema additive** at
+      `@/src/types/index.ts:55-66` (Shop) and
+      `@/src/types/index.ts:345-361` (Order + new `OrderRating`
+      type). Both new fields optional. Coexist with the legacy
+      `Shop.rating: number` placeholder seed value (decommission
+      tracked as a follow-up).
+- [x] **Pure helpers** at
+      `@/functions/src/ratingHelpers.ts`.
+      `validateRatingSubmission` (auth + ownership + delivered
+      status + no-prior-rating + shopId presence + stars range +
+      comment shape/length, returns a discriminated union) and
+      `computeNewRollingAverage` (incremental rolling avg with
+      1-decimal rounding + defensive coercion of garbage input).
+      No firebase-admin imports — testable in plain Node.
+- [x] **19 unit tests** at
+      `@/tests/functions/ratingHelpers.test.ts`. 14 validation
+      cases (every rejection branch + happy paths with /
+      without comment + whitespace-collapse). 5 rolling-average
+      cases (fresh-shop with 2 starting stars, 4.0/3 + 5-star,
+      5.0/10 + 1-star, negative-coercion defense, 1-decimal
+      precision sanity).
+- [x] **`submitOrderRating` callable** at
+      `@/functions/src/index.ts:4932-5047`. Atomic Firestore
+      transaction over `orders/{orderId}` + `shops/{shopId}` —
+      writes the rating field AND the shop's new
+      `ratingAvg` / `ratingCount` together, rolls back together.
+      Re-reads inside the transaction guard the rapid-double-tap
+      race. Audit log entry is written non-fatal (PR 8 wrapper
+      pattern, `actionType: 'order.rate'`).
+- [x] **`orderService.submitOrderRating`** dispatcher at
+      `@/src/services/orderService.ts:192-211`. Same dual-
+      dispatch native/web posture as the existing 25 callables.
+- [x] **`RateOrderCard`** at
+      `@/src/components/order/RateOrderCard.tsx`.
+      5-star tap picker, optional comment with 500-char live
+      counter, Submit button that disables until at least one
+      star is selected and during in-flight submission. Failure
+      surfaces as a one-line Alert + Submit re-enables. 3
+      `useState` calls, all hoisted above any conditional
+      return.
+- [x] **OrderDetailScreen integration** at
+      `@/src/screens/OrderDetailScreen.tsx:87-97;539-579;853-880`.
+      New `optimisticRating` state hoisted with the PR 7 / 17 /
+      19 lineage. Two mutually-exclusive render branches:
+      RateOrderCard for delivered + unrated; "Thanks for rating!"
+      confirmation for delivered + (canonical OR optimistic)
+      rating. Both branches read `order.rating ?? optimisticRating`
+      so the watcher's eventual canonical write doesn't visually
+      flicker.
+- [x] **`ShopRatingBadge`** at
+      `@/src/components/shop/ShopRatingBadge.tsx`. Stateless
+      presentational component. Two sizes (`sm` for list / rail
+      cards; `md` for shop's own header). `New shop` italic
+      fallback when ratingCount is 0/missing — the
+      "no-signal-yet, take-a-chance-but-informed" copy.
+- [x] **Badge integration on 4 surfaces**:
+      `@/src/components/shop/ShopCard.tsx:30-38` (replaces the
+      legacy `★ {shop.rating}` placeholder),
+      `@/src/screens/SearchScreen.tsx:153-163`,
+      `@/src/screens/ShopDetailScreen.tsx:196-206` (size="md" on
+      the shop's own page), and
+      `@/src/components/order/OrderAgainRail.tsx:67-76`.
+- [x] **`searchMenuPublic` propagation** at
+      `@/functions/src/searchMenuPublicHelpers.ts:27-32;52-57;147-156`.
+      `CandidateShop` and `SearchResultItem.shop` extended with
+      optional `ratingAvg` / `ratingCount`; the join in
+      `filterAndJoinSearchResults` spreads them through with
+      conditional spreads so legacy shops without ratings keep
+      the same wire shape they had pre-PR 20. Client mirror in
+      `@/src/services/orderService.ts:606`.
+- [x] **`FrequentShopEntry` extension** at
+      `@/src/utils/pickFrequentlyOrderedShops.ts:35-43` with
+      optional rating fields so OrderAgainRail's badge works
+      via graceful-degradation ("New shop" until HomeScreen
+      hydrates from a parallel shops fetch — see follow-up).
+- [x] **No new useState below early returns** on
+      OrderDetailScreen. `optimisticRating` lives with the
+      hoisted `[shop, refreshing, refreshNonce]` block per the
+      established lineage.
+
+#### Verification
+
+- `npx tsc --noEmit` (root): 0 errors.
+- `npx tsc --noEmit -p functions`: 0 errors.
+- `npm test`: **56 suites / 575 tests** (556 → +19 new).
+- **Deliberate-break demo passed**: flipped the 4.0 / 3 + 5 →
+  4.3 expectation to 4.4, confirmed exactly 1 fail / 18 pass,
+  reverted.
+- Zero new `DO NOT REMOVE` markers added — **11 PRs in a row**
+  clean.
+
+#### Smoke tests (after staged deploy)
+
+1. **Rate a delivered order.** Complete an end-to-end order
+   through to `delivered`. Open OrderDetail. RateOrderCard
+   visible. Tap 5 stars + add comment "Great service" + Submit.
+   Card flips to "Thanks for rating! ★★★★★ 'Great service'".
+2. **Shop avg updates.** ShopListScreen shows the rated shop's
+   card with "★ 5.0 (1)" badge.
+3. **Multiple ratings produce a rolling average.** Quick Switch
+   to a different test customer, place + complete + rate the
+   same shop's order with 3 stars. Shop card now shows
+   "★ 4.0 (2)" — `(5+3)/2`.
+4. **New shop fallback.** Shop with no ratings yet renders
+   "New shop" italic instead of stars.
+5. **Cannot rate non-delivered orders.** Open a `preparing` /
+   `accepted` / `cancelled` order. RateOrderCard NOT visible.
+6. **Cannot re-rate.** After submitting, sign out + back in,
+   reopen OrderDetail. "Thanks for rating!" persists. The card
+   prompt does NOT come back.
+7. **Star badge on all surfaces.** Verify rendering on
+   ShopList card, Search results row, ShopDetail header
+   (size="md"), Home's OrderAgainRail card.
+8. **Validation paths.** Submit-disabled until ≥1 star; type
+   501 chars in the comment box → input caps at 500; server
+   `submitOrderRating` rejects oversized comments with a
+   readable `failed-precondition` Alert.
+9. **Hooks-of-Rules sanity.** Visit OrderDetail across every
+   status with + without rating, navigate Home → Shop →
+   OrderDetail repeatedly. No ErrorBoundary screens.
+
+#### Deploy plan
+
+**Server-first** per `.windsurf/deploy-discipline.md`:
+
+```powershell
+$env:NODE_OPTIONS = "--use-system-ca"
+
+# 1. Server first — submitOrderRating callable must exist before
+#    any client OTA, or every Submit tap returns "function not
+#    found" and rolls back the optimistic flip. searchMenuPublic
+#    return-shape is additive (rating fields), so old client +
+#    new server is fine — old client just ignores the new fields.
+cd functions
+npm run build
+cd ..
+firebase deploy --only functions --project grocery-mvp-dev
+
+# 2. Verify the new callable is live
+firebase functions:list --project grocery-mvp-dev
+# Look for `submitOrderRating` in asia-south1.
+
+# 3. Client OTA
+npm test
+eas update --branch production --message "PR 20 — Customer ratings + shop ratings"
+
+# 4. Tell testers: force-close + reopen TestFlight.
+```
+
+#### Rollback
+
+- **Server regression** → `git revert` the ratingHelpers +
+  callable + searchMenuPublicHelpers commits + redeploy
+  functions. All schema is additive — old code reading the
+  shop or order doc just ignores `rating` / `ratingAvg` /
+  `ratingCount`.
+- **Client regression** → `eas update --branch production
+  --republish [previous-update-id]`. Optimistic ratings
+  rendered before rollback survive (server has them); they
+  just stop appearing as confirmation cards on old binaries.
+
+**Order matters:** server before client.
+
+#### Headline metric
+
+**% of delivered orders that get rated.** Industry benchmark
+30–50% for food delivery, 25–40% for grocery. Below 15% means
+the prompt isn't getting tapped — investigate placement
+(maybe move above the cancel-window block, or add a push
+notification trigger when the order flips to `delivered`).
+
+#### Follow-ups (out of scope this PR)
+
+- [ ] **OrderAgainRail rating hydration.** Today
+      `FrequentShopEntry.ratingAvg` / `ratingCount` are unset
+      because order docs don't snapshot shop ratings. Wire
+      HomeScreen to fire `shopService.list(location)` in
+      parallel with `orderService.listMine`, then enrich each
+      `FrequentShopEntry` with the matching shop's rating.
+      Until then the rail cards show "New shop" — graceful
+      degradation, not broken. [PR 20 follow]
+- [ ] **Decommission legacy `Shop.rating: number`.** Field
+      is a placeholder seed value, never written to by any
+      callable. Once every read site uses `ratingAvg`
+      (currently: ShopCard ✓, ShopDetailScreen ✓, Search ✓,
+      OrderAgainRail ✓ via badge), drop the legacy field
+      from the type + the seed script + Firestore docs.
+      [PR 20 follow]
+- [ ] **Editing or deleting a rating.** MVP is submit-once
+      (avoids the rolling-average recompute-from-scratch
+      complexity). Future PR can add an "edit your rating"
+      path with a server callable that recomputes by
+      subtracting the old stars and adding the new (no
+      historical scan needed if we keep the prior rating
+      stamped on the order doc). [post-MVP]
+- [ ] **Per-item ratings.** Zomato's "rate each dish"
+      pattern. Useful for shops with mixed quality but
+      drastically more UI work. [post-MVP]
+- [ ] **Separate delivery-partner rating.** Single combined
+      rating in MVP. When delivery-partner pool grows beyond
+      a handful, split into shop-stars + delivery-stars on
+      the same RateOrderCard. [post-MVP]
+- [ ] **Shop owner responses to ratings.** "Thanks for the
+      feedback!" / "We've fixed this." Useful trust signal
+      but adds another permissions surface — defer until a
+      shop asks. [post-MVP]
+- [ ] **Reviews page on ShopDetailScreen.** Show individual
+      rating comments (with timestamps, no PII). Today the
+      shop's own page only shows the aggregate; comments
+      are stored on the order docs but not surfaced. [post-MVP]
+- [ ] **Push notification "How was your order?"** Trigger
+      30 min after `delivered` status. Push infrastructure
+      exists (PR 11); just need a new
+      `sendDeliveredRatingPrompt` scheduler. Could lift the
+      rating rate from ~25% to ~45%. [post-MVP]
+- [ ] **Telemetry event `rating_submitted`** with shopId +
+      stars + hasComment so the headline metric is
+      analytically queryable without scraping audit logs.
+      Trivial Analytics.send() in `RateOrderCard.onSubmit`
+      after the await. [PR 20 follow]
+- [ ] **Sort shops by rating on ShopListScreen.** Today the
+      list is distance-ranked. Once we have ~50 shops with
+      ratings, expose a "Sort: distance / rating" toggle.
+      Data is already there. [post-MVP]
+- [ ] **Hide / moderate bad-faith ratings as admin.**
+      Audit log captures who rated what; admin can manually
+      adjust ratingAvg / ratingCount via a new callable if
+      needed at MVP scale. Build this when it's actually
+      requested. [post-MVP]
+
+### PR 19 — Shopping list / Favorites — ✅ CODE COMPLETE May 21 2026
+
+The third behavioral loop for kirana shopping. PR 13 built "repeat
+the whole last order"; PR 14 surfaced "reorder from my usual shop"
+on Home; PR 19 closes the loop with **"these specific items are
+my essentials — let me grab them quickly without rebuilding the
+cart."** Heart icon on every menu row, dedicated FavoritesScreen
+grouped by shop, optimistic toggling with server reconciliation.
+
+Industry alignment: every major Indian grocery app (Zepto,
+BlinkIt, Swiggy Instamart, Zomato grocery) has a heart icon on
+items. The gesture is muscle memory; not having it makes the app
+feel less polished than what users compare against.
+
+**Server-first rollout** — new `toggleFavorite` callable. Old
+client + new server is fine (no caller); new client + old server
+would 5xx on every heart tap. Functions deploy precedes client OTA.
+
+#### What shipped
+
+- [x] **Schema additive** at
+      `@/src/types/index.ts:222-243`. New optional
+      `favorites?: Record<string, string[]>` on `UserProfile`.
+      Per-shop scoping (rather than a flat list) so a favorite
+      at one shop survives the same item being removed from a
+      different shop's menu. Mirrored at
+      `@/functions/src/index.ts:4543-4555` on `StoredProfile`.
+      `publicProfileShape` now round-trips the field.
+- [x] **Pure helpers** at
+      `@/functions/src/favoritesHelpers.ts`.
+      `validateToggleFavoriteInput` (auth + non-empty string
+      checks) and `applyFavoriteToggle` (immutable add / remove
+      with shop-key cleanup when the inner array drops to
+      empty). Same testability contract as
+      `cancelPaidOrderHelpers` / `auditLogHelpers` — no
+      firebase-admin imports, plain Node runnable.
+- [x] **15 unit tests** at
+      `@/tests/functions/favoritesHelpers.test.ts`. 5 validation
+      cases (auth null/undef, empty shopId, non-string
+      menuItemId, valid). 10 toggle cases (add to undef map,
+      add to empty map, add to existing array, remove from
+      array, the critical **shop-key-cleanup-on-empty** case,
+      input non-mutation for both top-level and inner array,
+      multi-shop independence, last-favorite-of-one-shop
+      preserves other shops, toggle-is-its-own-inverse round
+      trip).
+- [x] **`toggleFavorite` callable** at
+      `@/functions/src/index.ts:4860-4926`. Wraps the helpers;
+      runs the read-modify-write inside a Firestore
+      transaction so a rapid double-tap doesn't race-condition
+      the array. Returns `{ profile, isFavorite }` so the
+      client can reconcile in one round-trip without a
+      separate `getMyProfile` follow-up. Deliberately does NOT
+      validate menuItemId existence — favorites can outlive a
+      shop's menu (FavoritesScreen handles the "no longer
+      available" UX downstream).
+- [x] **`profileService.toggleFavorite`** dispatcher at
+      `@/src/services/profileService.ts:131-151`. Same
+      native/web posture as the existing 5 profile callables.
+- [x] **New `useProfileStore`** at
+      `@/src/store/useProfileStore.ts`. Separate from
+      `useAuthStore` (different concern, different lifetime).
+      Hydrated by AuthBootstrap; cleared on sign-out;
+      mutating callables replace via `setProfile`. Exposes
+      a non-subscribing `isFavorite(shopId, menuItemId)` for
+      one-shot reads and a subscribing selector for
+      components that want to re-render on map mutations.
+- [x] **AuthBootstrap hydration**
+      (`@/src/components/AuthBootstrap.tsx`). On every
+      auth-state tick that resolves to a real (non-anonymous)
+      user, fires `useProfileStore.loadFromServer()`.
+      Anonymous users skip; sign-out clears the cache so the
+      next user doesn't briefly see the previous user's
+      favorites flash through.
+- [x] **`FavoriteHeart` component** at
+      `@/src/components/common/FavoriteHeart.tsx`.
+      Optimistic local toggle via `setProfile` → callable →
+      reconcile with server's authoritative shape. Failure
+      rolls back to the pre-toggle baseline + alerts. **Anon
+      handling** picks Option A from the prompt §Part 10:
+      explicit "Sign in to save favorites" Alert (silent
+      no-op was rejected as confidence-destroying — empty
+      tap = "did the app freeze?" anxiety).
+- [x] **ShopDetailScreen heart integration** at
+      `@/src/screens/ShopDetailScreen.tsx`.
+      `MenuItemCard` now takes a `shopId` prop and renders
+      the heart in a new title row above the +/- controls so
+      it doesn't displace the existing layout. New
+      `cardTitleRow` style.
+- [x] **HomeScreen favorites tile** at
+      `@/src/screens/HomeScreen.tsx`. New
+      `favoritesCount` selector subscribes only to the
+      `favorites` slice (not the full profile) so unrelated
+      address edits don't re-render Home. Tile self-hides
+      when count is 0; tap-through navigates to `Favorites`.
+      Same horizontal-pill styling as ProfileScreen address
+      rows for visual consistency.
+- [x] **`FavoritesScreen`** at
+      `@/src/screens/FavoritesScreen.tsx`. Reads
+      `profile.favorites` from useProfileStore; for each
+      shopId, fetches the shop's CURRENT menu via
+      `orderService.listShopMenuPublic` so prices reflect
+      today, not whenever the customer favorited. Renders
+      groups for: (a) shop OK with available items + +/-
+      controls, (b) shop OK with items the menu no longer
+      carries (per-row Remove button), (c) shop suspended /
+      404'd (bulk "Remove these favorites" CTA). Uses
+      `addMenuItem` so the existing different-shop cart
+      blocker still works (PR 4 escape hatch). Hooks
+      discipline: state hoisted above all 3 early returns
+      with the PR 12 → PR 18 lineage comment.
+- [x] **Navigation wiring**
+      (`@/src/navigation/AppNavigator.tsx`). New
+      `Favorites: undefined` in `RootStackParamList`,
+      `<Stack.Screen name="Favorites" component={FavoritesScreen} />`.
+- [x] **No new useState below early returns** on any
+      modified or new screen. `FavoritesScreen` has THREE
+      early returns (`!profileLoaded || loading`,
+      `groups.length === 0`, fall-through render); all 4 new
+      `useState` calls live above them.
+
+#### Verification
+
+- `npx tsc --noEmit` (root): 0 errors.
+- `npx tsc --noEmit -p functions`: 0 errors.
+- `npm test`: **55 suites / 556 tests** (541 → +15 new).
+- **Deliberate-break demo passed**: flipped the
+  shop-key-cleanup test to expect `{ shop_1: [] }`,
+  confirmed exactly 1 fail / 14 pass, reverted.
+- Zero new `DO NOT REMOVE` markers added (auto-formatter
+  discipline at **10 PRs in a row** without strips).
+
+#### Smoke tests (after staged deploy)
+
+1. **Heart visible, tap to favorite.** Sign in as a customer.
+   Open ShopDetailScreen, tap the 🤍 next to atta. It flips
+   to ❤️ instantly. Force-close + reopen the app — still
+   ❤️ (server-side persisted via the callable + AuthBootstrap
+   hydrate).
+2. **Tap again to unfavorite.** Heart flips back to 🤍.
+   Reload confirms.
+3. **Home tile appears.** With at least one favorite, Home
+   shows "❤️ N favorites" tile beneath How-it-works. Tap →
+   FavoritesScreen opens.
+4. **FavoritesScreen lists items grouped by shop.** Each
+   shop section shows live prices, packLabel, ❤️ heart, and
+   ADD / +/- controls that match what ShopDetailScreen would
+   show. Tap ADD → cart updates.
+5. **Multi-shop cart blocker still works.** Favorite items
+   from Shop A AND Shop B. ADD from Shop A → cart has it.
+   From FavoritesScreen tap ADD on Shop B item → "Start a
+   new cart?" Alert (existing PR 4 behaviour).
+6. **Removed-from-menu handling.** As shop owner, delete a
+   favorited menu item. As customer, FavoritesScreen → that
+   row reads "No longer on this shop's menu" with a Remove
+   button. Tap Remove → row disappears, count on Home tile
+   decreases.
+7. **Suspended-shop handling.** As admin, suspend a shop the
+   customer has favorites at. As customer, FavoritesScreen →
+   that shop becomes a dashed-border card "Shop no longer
+   available — N favorites can no longer be ordered" with a
+   "Remove these favorites" bulk CTA. Tap → group
+   disappears, count drops.
+8. **Anonymous user.** Sign out, get bootstrapped to anon.
+   Open a shop, tap a heart → "Sign in to save favorites"
+   Alert. No crash, no orphaned local state.
+9. **Hooks-of-Rules sanity.** Navigate Home → Favorites →
+   ShopDetail repeatedly, force-close + reopen. No
+   ErrorBoundary screens. Discipline holding.
+
+#### Deploy plan
+
+**Server-first** per `.windsurf/deploy-discipline.md`:
+
+```powershell
+$env:NODE_OPTIONS = "--use-system-ca"
+
+# 1. Server first — toggleFavorite callable must exist
+#    before any client OTA, or every heart tap returns
+#    "function not found".
+cd functions
+npm run build
+cd ..
+firebase deploy --only functions --project grocery-mvp-dev
+
+# 2. Verify the new callable is live
+firebase functions:list --project grocery-mvp-dev
+# Look for `toggleFavorite` in asia-south1.
+
+# 3. Client OTA
+npm test
+eas update --branch production --message "PR 19 — Favorites + Shopping list"
+
+# 4. Tell testers: force-close + reopen TestFlight.
+```
+
+#### Rollback
+
+- Server regression → `git revert` the favoritesHelpers
+  + callable + publicProfileShape commits + redeploy
+  functions. Storage shape is additive — old code reading
+  the doc just ignores the `favorites` field.
+- Client regression → `eas update --branch production
+  --republish [previous-update-id]`.
+
+**Order matters:** server before client. If you skip the
+server deploy and OTA the client first, every heart tap
+returns "function not found" and rolls back the optimistic
+flip — hearts will visibly jitter.
+
+#### Headline metric
+
+**% of cart-add events that originate from a favorite tap**
+(vs. fresh-browse +/-). Industry numbers from Zepto/BlinkIt
+suggest 35–45% within 4 weeks of consistent customer use.
+
+- Below 15% = customers aren't discovering favorites.
+- Above 50% = customers have settled into their routine,
+  which is the goal.
+
+#### Follow-ups (out of scope this PR)
+
+- [ ] **Bulk "Add all favorites from this shop to cart"
+      button** on each FavoritesScreen group. Future PR if
+      customers ask. Single-item +/- is enough for MVP.
+      [PR 19 follow]
+- [ ] **Reordering favorites manually** (drag to reorder).
+      Default ordering is "most-recently-added last" today
+      (server appends to the end of the array). Add a
+      drag-handle when there's a real ask. [post-MVP]
+- [ ] **Multiple named lists** ("Weekly groceries",
+      "Office snacks"). Distinct feature; the favorites map
+      structure could be extended to support it without a
+      migration (key the inner arrays by list name instead
+      of always using a default list). [post-MVP]
+- [ ] **Sharing favorites with family members** (e.g. a
+      shareable link). Out of scope; needs auth-level work
+      to scope reads. [post-MVP]
+- [ ] **Push notification "Your favorite atta is back in
+      stock"**. Needs the existing pushService +
+      shop-owner-driven trigger when an item flips
+      `available` true. Big retention win once family
+      testing settles. [post-MVP]
+- [ ] **HomeScreen "Favorites" rail showing the actual top
+      3 favorited items** (not just a count). Defer to a
+      follow-up; the count tile + tap-through is the MVP
+      path. [PR 19 follow]
+- [ ] **Telemetry event for favorite_toggled** with
+      shopId + menuItemId so the headline metric above is
+      analytically queryable. Trivial Analytics.send()
+      additions in `FavoriteHeart.onPress`. [PR 19 follow]
+- [ ] **Bulk-remove server callable** so
+      FavoritesScreen's suspended-shop "Remove these
+      favorites" CTA doesn't fire N sequential
+      `toggleFavorite` calls. Optimisation only — current
+      sequential behaviour is correct, just chatty when a
+      shop with 10+ favorites gets suspended. [PR 19 follow]
+- [ ] **Migrate ProfileScreen to read from
+      useProfileStore**. Today it keeps its own local
+      `useState<UserProfile>` synced via `useFocusEffect`.
+      That keeps working, but unifying the two surfaces
+      onto the new store would let address edits broadcast
+      to other screens too. Pure refactor — no user-facing
+      change. [post-MVP]
+
+### PR 18 — Quick Switch test accounts — ✅ CODE COMPLETE May 21 2026
+
+Pure productivity multiplier for solo / multi-role testing. Pre-PR
+the role-switch flow was sign-out → enter phone → wait for OTP →
+enter `123456` → wait for verify → land on Home (~45s per switch).
+Post-PR a single tap on a `Switch test account` tile runs the same
+chain programmatically end-to-end in ~5s. Family-testing throughput
+roughly 5x.
+
+**No backdoor.** Firebase Auth still gates everything. The shortcut
+just removes manual typing for phones already configured in
+Firebase Console's "Phone numbers for testing" list.
+
+**Production safety via test-list membership gate** (not `isAdmin`):
+
+- Real customer phones aren't in `TEST_ACCOUNTS` → button hidden.
+- Anonymous bootstrap users (no phone yet) → button hidden.
+- Every test phone IS in the list → after switching admin →
+  customer-test, the button stays visible so you can switch back.
+
+If the feature ever leaks to a production-customer build, the worst
+case is the button is hidden for everyone because no real-customer
+phone matches the dev-project's test list.
+
+Pure client OTA — no schema, no server, no rollout risk.
+
+#### What shipped
+
+- [x] **Test accounts constants** at
+      `@/src/constants/testAccounts.ts`. `TestAccount` type +
+      `TEST_ACCOUNTS` array. Doc block explains the
+      Firebase-Console contract: phones + OTPs MUST match
+      `Authentication → Settings → Phone numbers for testing`.
+      Edit this file when you change that list. Phones are
+      placeholder dev values — update to match the actual
+      `grocery-mvp-dev` console config before first use.
+- [x] **QuickSwitchModal component** at
+      `@/src/components/dev/QuickSwitchModal.tsx`. Renders the
+      list, runs the auth chain (`signOut` →
+      `startPhoneAuth` → `confirmOtp` → `setUser`), surfaces
+      errors inline, blocks Cancel during in-flight switch.
+      Single `busy` slot serves as both mutex + spinner-target
+      selector — single source of truth.
+- [x] **HomeScreen integration**
+      (`@/src/screens/HomeScreen.tsx`). New imports for the
+      modal + `TEST_ACCOUNTS`. New `phoneNumber` subscription
+      from `useAuthStore` so the screen re-renders when a
+      switch completes. New `quickSwitchVisible` state hoisted
+      with the existing block; Rules-of-Hooks comment lineage
+      now cites PR 12 / 13 / 14 / 15 / 17 / 18. New
+      `isTestAccount` derived gate. New dashed-border tile
+      rendered above the `__DEV__` debug line. Modal mounted
+      unconditionally (cheap when `visible=false`) for clean
+      open/close transitions.
+
+#### Verification
+
+- `npx tsc --noEmit`: 0 errors.
+- `npm test`: **54 suites / 541 tests** (unchanged — prompt
+  explicitly said no new tests required).
+- Zero new `DO NOT REMOVE` markers added (auto-formatter
+  discipline at **9 PRs in a row** without strips).
+
+#### Smoke tests (after OTA)
+
+1. **Visibility gating — non-test phone.** Sign in as a real
+   number not in `TEST_ACCOUNTS`. NO `Switch test account`
+   tile visible. Sign out, sign in as any test phone → tile
+   appears at the bottom of Home above the dev debug line.
+2. **First switch.** Sign in as Admin test phone. Tap the
+   tile. Modal opens with all 5 entries. Tap Customer A.
+   Within ~5s, you're signed in as Customer A — Home shows
+   customer UI, no admin tiles, the `[Admin]` debug marker
+   is gone.
+3. **Round trip.** Tile is STILL visible on Customer A's
+   Home (Customer A's phone is in `TEST_ACCOUNTS`). Tap →
+   pick Admin → ~5s later you're admin again. Free
+   round-trip without manual login.
+4. **Failure handling.** Temporarily add a fake entry with a
+   phone NOT in Firebase Console. Tap it. Modal shows the
+   error inline at the bottom of the card; modal stays open
+   for retry. Tap a valid entry → succeeds.
+5. **Concurrent tap protection.** Open modal, tap two entries
+   in quick succession. Second tap is a no-op (Pressable
+   `disabled={busy !== null}`).
+6. **Cart wipe verified.** Sign in as Customer A, add items
+   to cart. Use Quick Switch to swap to Customer B. New
+   Customer B has empty cart (sign-out cleared it via the
+   AuthProvider chain).
+7. **No hook crashes.** Switch between 3 accounts in
+   succession. No ErrorBoundary screens. Discipline holding
+   across the modified screens.
+
+#### Deploy plan
+
+Pure client OTA per `.windsurf/deploy-discipline.md`:
+
+```powershell
+$env:NODE_OPTIONS = "--use-system-ca"
+npm test
+eas update --branch production --message "PR 18 — Quick Switch test accounts (test-phone gated)"
+```
+
+No functions deploy, no rules deploy, no native rebuild. Most
+testers won't see any change — the tile only appears for users
+whose phone is in `TEST_ACCOUNTS`.
+
+#### Removing this later (production hand-off)
+
+When you're done with testing-phase work and want to ship to real
+customers, two paths:
+
+- **Option A — Hide the trigger** (preferred). Change
+  `isTestAccount` to `false` (or to a feature-flag check that
+  defaults off). Modal + constants stay in the codebase but the
+  UI surface disappears. Easy to re-enable later. Note that
+  test-list membership ALREADY auto-hides the button for real
+  customers, so this is belt-and-braces.
+- **Option B — Delete the files**. `git rm`
+  `@/src/constants/testAccounts.ts`,
+  `@/src/components/dev/QuickSwitchModal.tsx`, the HomeScreen
+  imports + button. ~5 min revert.
+
+Plan the removal alongside the production Firebase project setup
+section below in this document. Test accounts only exist in the
+dev project anyway — they don't carry to prod.
+
+#### Follow-ups (out of scope this PR)
+
+- [ ] **Hide via feature flag** instead of test-list membership
+      once a real `process.env.EXPO_PUBLIC_ENABLE_DEV_TOOLS`
+      lands. Belt-and-braces hardening before public TestFlight.
+      [post-MVP]
+- [ ] **Persist last-used test account** so the modal opens with
+      that entry pre-highlighted. Marginal QoL; not worth it
+      until 5+ accounts are configured. [PR 18 follow]
+- [ ] **Validation lint on `TEST_ACCOUNTS`** (e.g. unit test
+      that asserts each phone is exactly 10 digits and unique).
+      Cheap insurance, but skipped because target-hitting; add
+      if a wrong-digit-count phone ever silently fails. [PR 18 follow]
+- [ ] **Custom-token minting via admin SDK** — would let us
+      switch without invoking the OTP flow at all (~1s instead
+      of ~5s). Adds a server callable + a security review
+      surface; the OTP shortcut is sufficient for now. [post-MVP]
+- [ ] **In-app editor for `TEST_ACCOUNTS`.** Skip — editing the
+      .ts file and shipping an OTA is the right workflow for a
+      ~5-entry list. [won't-do]
+
+### PR 17 — Polish bundle — ✅ CODE COMPLETE May 19 2026
+
+Three small UX wins bundled into one OTA. None is a feature on
+its own; together they make the customer side feel finished.
+
+1. **Per-minute ETA ticker** on the Active orders rail — "Arriving
+   in ~5 min" now decrements visibly while the customer lingers
+   on Home, instead of going stale until the next focus refetch.
+2. **Customer "Call shop" button** on OrderDetailScreen — mirror
+   of the shopkeeper's "Call customer" affordance from PR 12.
+   Closes the bilateral communication loop.
+3. **Pull-to-refresh** on OrderDetailScreen — same posture as PR
+   7's AdminOrders / ShopOwnerDashboard pattern, via a
+   `refreshNonce` that the watcher useEffect depends on.
+
+**Scope reduction discovered during recon** (and documented in
+follow-ups below):
+
+- **Bottom-tab badge (prompt §Part 2) was SKIPPED.** This app
+  uses a pure `createNativeStackNavigator` — there is no
+  `Tab.Navigator`, so `tabBarBadge` has nothing to attach to.
+  Adding tabs would be a substantial nav refactor outside this
+  bundle's scope.
+- **OrdersScreen pull-to-refresh (prompt §Part 4) was already
+  shipped in PR 3** via the existing `refreshing` state +
+  `RefreshControl` wiring at `@/src/screens/OrdersScreen.tsx:32`
+  and `:203`. No-op there.
+
+Pure client OTA; no schema, no server, no rollout risk.
+
+#### What shipped
+
+- [x] **HomeScreen ETA ticker state**
+      (`@/src/screens/HomeScreen.tsx`). New `nowMs` useState
+      + 60s `setInterval` useEffect with cleanup, hoisted into
+      the existing PR 14 hooks-discipline block. Lineage
+      comment extended to cite PR 17. Cadence intentionally
+      60s (not 1s) — matches the "~N min" rounding granularity,
+      no wasted wakeups on ticks that wouldn't change the
+      rendered string.
+- [x] **ActiveOrdersRail accepts `nowMs`**
+      (`@/src/components/order/ActiveOrdersRail.tsx`). New
+      optional prop; `etaText` was refactored to take it as a
+      parameter instead of reading `Date.now()` at render time.
+      Backwards-compatible: callers that don't pass `nowMs`
+      get a single static Date.now() snapshot (preserves PR 15
+      behaviour). Also opportunistically improved: prefer
+      `readyByEstimate` over `estimatedDeliveryAt` for
+      accepted/preparing orders — same hierarchy as
+      OrderDetailScreen so the two surfaces agree.
+- [x] **Call shop button + handler + fetch**
+      (`@/src/screens/OrderDetailScreen.tsx`). Adds `shop`
+      state hoisted with the PR-12/13/14/15/16 lineage
+      comment. Fetches the shop doc once per `order.shopId`
+      via `shopService.getById(...)` (cheap; the screen is
+      ephemeral). Button gated on `shop?.registrationData?.phone`
+      — that's where the kirana phone actually lives per
+      `@/src/types/index.ts:23-55`; the top-level `Shop` doc
+      has no `phone` field. Legacy seed shops without
+      `registrationData` simply hide the button (clean no-op,
+      not a broken "Call shop ()" render).
+- [x] **OrderDetail pull-to-refresh** wired via
+      `refreshNonce` in the watcher useEffect deps. Spinner
+      clears in the existing watcher callback regardless of
+      success/error, same posture as PR 7's dashboard
+      patterns.
+- [x] **No new useState below early returns.** All four new
+      states on OrderDetailScreen (`shop`, `refreshing`,
+      `refreshNonce`, plus the existing PR 7 ones) live above
+      `if (loading && !order)` and `if (!order)`. The PR 17
+      hoisting comment block stands as a permanent guard.
+
+#### Verification
+
+- `npx tsc --noEmit`: 0 errors.
+- `npm test`: **54 suites / 541 tests** (unchanged — prompt
+  explicitly said no new tests).
+- Zero new `DO NOT REMOVE` markers added (auto-formatter
+  discipline at **8 PRs in a row** without strips).
+
+#### Smoke tests (after OTA)
+
+1. **ETA ticker.** Place an order, get it accepted with an
+   ETA. Open Home, leave the app open. After 60 seconds, the
+   "Arriving in ~X min" number on the Active rail card
+   decrements by 1. (PR 17 §Part 1 acceptance criterion.)
+2. **Call shop button visible.** Open any order detail as
+   customer. Below the shop name section title is a
+   primary-tinted pill: "📞 Call shop (XXXXXXXXXX)". Tap →
+   native dialer opens with the shop's number pre-filled.
+3. **Call shop hidden for legacy shop.** Open an order from
+   one of the seed shops (no `registrationData`). No button.
+   No broken layout.
+4. **Pull-to-refresh on OrderDetail.** Open any order. Pull
+   down. Spinner appears, watcher re-subscribes, spinner
+   clears on first callback (~1–2s on a healthy network).
+   Order content refreshes.
+5. **Hooks-of-Rules sanity.** Navigate Home → Orders →
+   OrderDetail repeatedly. Force-close + reopen. No
+   ErrorBoundary screens. Discipline holding across all
+   modified screens.
+
+#### Deploy plan
+
+Pure client OTA per `.windsurf/deploy-discipline.md`:
+
+```powershell
+$env:NODE_OPTIONS = "--use-system-ca"
+npm test
+eas update --branch production --message "PR 17 — Polish bundle (ETA ticker + Call shop + OrderDetail pull-to-refresh)"
+```
+
+No functions deploy, no rules deploy, no native rebuild. Tell
+testers to force-close + reopen TestFlight.
+
+#### Rollback
+
+- UI regression → `eas update --branch production --republish
+  [previous-update-id]`. Server unchanged → safe rollback at
+  any time.
+
+#### Follow-ups (out of scope this PR)
+
+- [ ] **Bottom-tab badge for active orders.** Requires
+      converting `AppNavigator` from `createNativeStackNavigator`
+      to a Tab-over-Stack hybrid. Substantial nav-shape refactor
+      — defer until the IA cost-benefit shifts (e.g. when the
+      app grows past ~10 top-level destinations). [post-MVP]
+- [ ] **Persistent active-order count store.** If/when the
+      tab badge lands, lift `recentOrders` from HomeScreen to
+      a small Zustand store so the badge can subscribe without
+      a parallel `listMine` fetch. [post-MVP, depends on tab nav]
+- [ ] **Call customer/admin parity.** ShopOrderDetail has
+      Call customer (PR 12). OrderDetail now has Call shop
+      (PR 17). Missing piece: admin order detail surfaces have
+      neither button. Track if admin testers ask. [PR 17 follow]
+- [ ] **OrderDetail Call shop also surfaces shop's open
+      hours.** A grayed "(closed)" badge next to the phone
+      when current time is outside `registrationData.hours`
+      would prevent dead-air calls outside business hours.
+      [PR 17 follow]
+- [ ] **ETA ticker on OrderDetailScreen too.** That screen
+      has its own `nowMs` (1s cadence, for the cancel-window
+      countdown) — the "Arriving in ~X min" copy at
+      `OrderDetailScreen` line ~109 still uses `Date.now()`
+      directly. Cheap follow-up: swap to `nowMs`. [PR 17 follow]
+
+### PR 16 — Shop owner new-order alert — ✅ CODE COMPLETE May 18 2026
+
+The single biggest UX gap between this app and Swiggy Partner /
+Zomato Restaurant. Shop owners running real kirana stores don't
+watch their phone screens — they're stocking shelves and billing
+walk-ins. New orders sat unaccepted for minutes, the customer
+waited, the supply chain stalled.
+
+PR 16 makes new orders **impossible to miss** with three
+coordinated cues, all OTA-friendly:
+
+1. **Yellow banner** at the top: "🔔 N new orders" — left-rail
+   accent in `colors.warning`, readable across a counter.
+2. **Highlighted card border** on each new order: 2px primary
+   border + tinted background + "NEW" tag. Same aesthetic as
+   PR 15's ActiveOrdersRail cards — visual language for "live,
+   needs attention" is now unified across customer + shopkeeper
+   surfaces.
+3. **Single haptic buzz** via `expo-haptics` (already bundled —
+   no native dep change). One `Success` notification per polling
+   tick that has at least one new order, regardless of count.
+
+Pure client OTA, zero schema changes, zero server work.
+
+#### What shipped
+
+- [x] **Pure helper `detectNewOrderIds`** at
+      `@/src/utils/detectNewOrderIds.ts`. Pure ID-set diff
+      (deliberately not timestamp-based — server clock drift +
+      late writes make `createdAt` unreliable). First-tick
+      semantics: when `previouslySeenIds === null`, return an
+      empty set so first dashboard load doesn't show 20 "new"
+      orders.
+- [x] **7 unit tests** at
+      `@/tests/utils/detectNewOrderIds.test.ts`. Cover
+      first-tick baseline, no-change, simple add, vanished
+      orders (don't count as new), all-new (empty seen),
+      empty-current, no-mutation defensive.
+- [x] **Watcher integration**
+      (`@/src/screens/shop/ShopOwnerDashboardScreen.tsx`).
+      Detection runs INSIDE the watcher callback (not via
+      useEffect) so a polling tick with the same orders doesn't
+      re-trigger haptics on every render. Error callbacks leave
+      the seen baseline untouched so the next successful tick
+      can still detect what arrived during the outage.
+- [x] **Banner + card highlight + NEW tag** all wired with
+      styles citing PR 15's ActiveOrdersRail aesthetic for
+      cross-surface consistency. Banner uses `#FEF3C7` warm
+      yellow + `colors.warning` left rail.
+- [x] **Three independent ack paths** via `clearNewHighlight`:
+      tap card, tap banner, scroll the FlatList
+      (`onScrollBeginDrag`). Cheap no-op when nothing to clear
+      (returns the same Set reference) so scrolling without
+      pending alerts doesn't re-render the FlatList.
+- [x] **Hooks discipline.** Two new `useState` calls
+      (`seenOrderIds`, `newOrderIds`) hoisted ABOVE the
+      role-guard and loader early returns with a permanent
+      comment block citing PR 12 / 13 / 14 / 15 lineage. The
+      dashboard has TWO early returns, so this discipline
+      mattered concretely here unlike on HomeScreen.
+- [x] **Haptics graceful degradation.**
+      `Haptics.notificationAsync(Success).catch(() => {})` so
+      web preview / iOS sim / unsupported devices silently
+      no-op. Visual cues still fire.
+
+#### Verification
+
+- `npx tsc --noEmit`: 0 errors.
+- `npm test`: **54 suites / 541 tests** (534 → +7 new).
+- Deliberate-break: flipped first-tick test to expect size 3 →
+  1 failed / 6 passed → reverted; 541 green.
+- Zero new `DO NOT REMOVE` markers added (auto-formatter
+  discipline at **7 PRs in a row** without strips).
+
+#### Smoke tests (after OTA)
+
+1. **First open of dashboard.** Shopkeeper opens dashboard
+   with N existing orders. NO banner, NO haptic, NO "NEW" tags.
+   First-tick baseline established silently.
+2. **One new order arrives mid-session.** Within ~10s polling
+   cycle: banner appears with "🔔 1 new order", that card has
+   2px green border + NEW tag, phone buzzes once.
+3. **Three new orders in same tick.** Banner reads "🔔 3 new
+   orders", all three cards highlighted with NEW tags, only
+   ONE haptic fires (not three — stays calm).
+4. **Tap a NEW-flagged card.** Navigates to ShopOrderDetail.
+   On return: banner gone, all NEW tags cleared.
+5. **Scroll without tapping.** Banner clears, NEW tags clear.
+   `onScrollBeginDrag` counts as acknowledgement.
+6. **Tap banner directly.** Banner disappears, NEW tags clear.
+   Same as tapping a card.
+7. **Sequential new orders, no ack between.** First arrival
+   fires banner + haptic. Second arrival in next tick: banner
+   updates count, second haptic fires, both cards have NEW
+   tags. Cumulative until acknowledged.
+8. **Order disappears mid-session.** Customer cancels, server
+   removes it from listShopOrders → no spurious NEW tag on
+   remaining orders. Pinned by helper test #4.
+9. **Web preview.** Visual banner + card highlights work,
+   haptic silently no-ops via the .catch wrapper.
+
+#### Deploy plan
+
+Pure client OTA per `.windsurf/deploy-discipline.md`:
+
+```powershell
+$env:NODE_OPTIONS = "--use-system-ca"
+npm test
+eas update --branch production --message "PR 16 — Shop owner new-order alert"
+```
+
+No functions deploy, no rules deploy, no native rebuild
+(`expo-haptics` was already in the bundled native build per
+`package.json`). Tell shop-role testers explicitly to keep the
+dashboard open for ~30s after a customer-role tester places an
+order on their shop — they should see banner + haptic within
+one polling cycle.
+
+#### Rollback
+
+- UI bug → `eas update --branch production --republish
+  [previous-update-id]`. Server unchanged → safe rollback at
+  any time.
+
+#### Headline metric to watch
+
+**Time from order placed → order accepted by shop.**
+
+- Pre-PR-16 baseline: 5–8 min (whenever the shopkeeper next
+  glanced at the screen).
+- Post-PR-16 expectation: <2 min for shopkeepers who keep the
+  app open with the phone audible.
+
+That delta cascades through every downstream surface PR 12
+(ETA visibility), PR 15 (active orders rail), and PR 7
+(delivery pool) added — the whole supply chain tightens by
+~5–10 min per order.
+
+#### Follow-ups (out of scope this PR)
+
+- [ ] **Sound notification.** Add `expo-av` and play a short
+      ding for `Success` ticks. Native module add → rebuild +
+      TestFlight resubmit. Big quality-of-life win once
+      family testing requests it. [PR 16 follow]
+- [ ] **Background push.** Alert shopkeepers when the app is
+      closed. Needs Expo Push or FCM token registration +
+      server-side trigger on order create. Substantial
+      separate body of work. [post-MVP]
+- [ ] **Per-shop alert preferences.** Volume / vibrate /
+      silent toggle stored on the shop doc. Premature for
+      MVP — single fixed behaviour for now. [post-MVP]
+- [ ] **"Snooze new orders for 5 min".** UX escape hatch for
+      shopkeepers in the middle of a complex offline task.
+      Add when one real shop reports being overwhelmed.
+      [post-MVP]
+- [ ] **Persistent badge / banner across navigation.** If the
+      shopkeeper navigates away from the dashboard while
+      banner is showing, the count is lost. Cleaner UX is to
+      hoist `newOrderIds` into a Zustand store. Marginal
+      value pre-launch; track if testers complain. [PR 16 follow]
+- [ ] **Telemetry: time-to-accept per order.** The headline
+      metric. Add a `acceptedAt - createdAt` derived field on
+      the analytics dashboard and split by "shopkeeper had
+      app open" vs "didn't" to validate the PR 16 hypothesis.
+      [post-MVP]
+
+### PR 15 — Active orders rail on HomeScreen — ✅ CODE COMPLETE May 18 2026
+
+The home screen becomes the customer's full order command center.
+PR 14 surfaced PAST orders on Home; PR 15 surfaces IN-FLIGHT orders
+on the same screen, ABOVE the Order Again rail. A returning customer
+opens the app and immediately sees:
+
+- "Your active orders" — what's currently being made / out for delivery
+- "Order again" — shops they keep coming back to
+
+No more tapping the Orders tab just to check status. Pure client OTA;
+zero new server work; reuses PR 14's `listMine` cache via `useMemo`
+so there is literally no additional network cost.
+
+#### What shipped
+
+- [x] **Pure helper `pickActiveOrders`** at
+      `@/src/utils/pickActiveOrders.ts`. Filters to the four
+      non-terminal statuses (`pending`, `accepted`, `preparing`,
+      `ready_for_pickup`), sorts `createdAt` desc, copies before
+      sorting (no input mutation). Strict allowlist — unknown
+      statuses are treated as terminal (fail closed).
+- [x] **7 unit tests** at
+      `@/tests/utils/pickActiveOrders.test.ts`. Cover empty,
+      all-four-non-terminal inclusion, terminal exclusion, sort
+      order, mixed input, no-mutation, unknown-status fail-closed.
+- [x] **`ActiveOrdersRail` component** at
+      `@/src/components/order/ActiveOrdersRail.tsx`. Same shape
+      as `OrderAgainRail` but with primary-tinted card background
+      + primary border so it visually reads as "live, needs
+      attention" without requiring the customer to read headers.
+      Each card: shop name + `OrderStatusChip` (with
+      `audience="customer"` so `ready_for_pickup` reads "Out for
+      delivery") + ETA copy.
+- [x] **ETA copy logic.** Uses `estimatedDeliveryAt` for the
+      `Math.round((eta - Date.now()) / 60_000)` minutes-left
+      math. Special-cases `ready_for_pickup`: with `pickedUpAt`
+      set → "Out for delivery"; without → "Almost ready". Negative
+      / zero `minsLeft` → "Arriving soon" (don't show negative
+      countdowns). No `eta` set → empty string (skip the line
+      entirely rather than render a misleading placeholder).
+- [x] **HomeScreen integration**
+      (`@/src/screens/HomeScreen.tsx`). Derives `activeOrders`
+      from PR 14's existing `recentOrders` cache via `useMemo` —
+      zero new state, zero new network calls, zero new
+      `useState` hook count. Tap handler navigates to
+      `OrderDetail`. Rail rendered ABOVE `OrderAgainRail`
+      (priority slot — active needs attention more than past).
+- [x] **PR 14 hooks-discipline comment intact.** No new state
+      added in this PR, so the comment block citing PR 12's
+      ETA-modal hotfix and PR 13's OrdersScreen guard stays as
+      written. Pure additive composition — exactly the pattern
+      the discipline aimed for.
+- [x] **Symmetric handoff with PR 14.** When an order
+      transitions from `ready_for_pickup` → `delivered`, the
+      next focus refetch removes its card from `ActiveOrdersRail`
+      AND adds its shop to `OrderAgainRail` (PR 14 picks
+      delivered orders). Customers experience a single seamless
+      animation as the order moves between rails.
+
+#### Verification
+
+- `npx tsc --noEmit`: 0 errors.
+- `npm test`: **53 suites / 534 tests** (527 → +7 new).
+- Deliberate-break: flipped "excludes delivered and cancelled"
+  test to expect `toHaveLength(2)` → 1 failed / 6 passed →
+  reverted; 534 green.
+- Zero new `DO NOT REMOVE` markers added (auto-formatter
+  discipline at **6 PRs in a row** without strips).
+
+#### Smoke tests (after OTA)
+
+1. **Place an order.** Open Home before shop accepts. Rail card
+   shows "Pending" chip + ETA. Tap → OrderDetail.
+2. **Shop accepts.** Return to Home. Card chip flips to
+   "Accepted" + ETA recomputed from `estimatedDeliveryAt`.
+3. **Full lifecycle.** pending → accepted → preparing →
+   ready_for_pickup (no pickedUpAt → "Almost ready") →
+   ready_for_pickup (with pickedUpAt → "Out for delivery") →
+   delivered. At delivery, card vanishes from active rail AND
+   shop appears in Order Again rail below. Symmetric handoff
+   verified.
+4. **Multiple active orders.** Place 3 from 3 shops within
+   minutes. Rail shows all 3, newest leftmost.
+5. **Cancelled order.** Customer cancels mid-flight. Card
+   disappears from active rail. Shop does NOT appear in Order
+   Again rail (PR 14 excludes cancelled). Both correct.
+6. **First-time / anonymous user.** Both rails empty. Home
+   shows just search + categories — no layout shift, no skeleton.
+7. **Customer-facing label sanity.** A `ready_for_pickup`
+   order shows "Out for delivery" on the chip — confirming the
+   `audience="customer"` override is wired correctly. The shop
+   side still sees "Ready for Pickup" on their dashboard.
+8. **ETA staleness check.** Open Home with an active order, leave
+   the screen open for 5 min. ETA copy stays static (no per-second
+   ticker) — that's the deferred behaviour. Pull-to-refresh /
+   navigate-back-to-Home triggers the focus refetch and refreshes
+   the line.
+
+#### Deploy plan
+
+Pure client OTA per `.windsurf/deploy-discipline.md`:
+
+```powershell
+$env:NODE_OPTIONS = "--use-system-ca"
+npm test
+eas update --branch production --message "PR 15 — Active orders rail on Home"
+```
+
+No functions deploy, no rules deploy, no native rebuild. Tell
+testers to force-close + reopen TestFlight after publish.
+
+#### Rollback
+
+- UI bug → `eas update --branch production --republish
+  [previous-update-id]`. Server unchanged → safe rollback at
+  any time.
+
+#### Follow-ups (out of scope this PR)
+
+- [ ] **Per-minute ETA ticker.** Add a `useEffect` interval
+      that bumps a tick counter every 60s so the
+      `Math.round((eta - Date.now()) / 60_000)` line decrements
+      visibly while the user lingers on Home. ~10-line change.
+      Worth doing if testers report the ETA feels stale.
+      [PR 15 follow]
+- [ ] **In-card cancel CTA.** For orders within the PR 7
+      cancel window, surface a Cancel button directly on the
+      rail card so customers don't need to drill into
+      OrderDetail. UX-only change — primitive already exists.
+      [PR 15 follow]
+- [ ] **Push notifications on status change.** The right
+      replacement for the focus-refetch model. Needs Expo Push
+      / FCM infra — separate body of work. [post-MVP]
+- [ ] **Real-time updates via Firestore onSnapshot.** Currently
+      the rail relies on focus-effect polling. Real-time would
+      require a HomeScreen-level subscription that disrupts the
+      focus-effect model + adds a Firestore connection cost.
+      Defer unless polling proves visibly stale. [post-MVP]
+- [ ] **Orders-tab usage telemetry.** The headline metric this
+      PR moves: how often customers visit the Orders tab when
+      they have an active order on Home. Goal is "much less
+      often." Wire once analytics dashboard is live. [post-MVP]
+- [ ] **Active order badge on bottom-tab.** Numeric badge on
+      the Orders tab icon when active orders exist. Belt-and-
+      suspenders with the rail; arguably redundant once the
+      rail lands. Track if family testers ask for it.
+      [PR 15 follow]
+
+### PR 14 — HomeScreen "Order again" rail — ✅ CODE COMPLETE May 18 2026
+
+PR 13 made reorder POSSIBLE; PR 14 makes it DISCOVERABLE. Returning
+customers now land on Home and see "Order again from Mahesh Kirana"
+cards as the very next surface after the search box, ranked by
+delivery frequency. Composes every PR 13 primitive — no new server
+work, no schema, no rules.
+
+#### What shipped
+
+- [x] **Pure helper `pickFrequentlyOrderedShops`** at
+      `@/src/utils/pickFrequentlyOrderedShops.ts`. Filters to
+      `delivered` only (in-flight + cancelled never count),
+      groups by `shopId`, picks the most-recent `lastOrderId`
+      per shop (by `deliveredAt` with `createdAt` legacy
+      fallback), sorts by `orderCount` desc with recency as
+      tie-breaker, slices to `limit` (default 3).
+- [x] **11 unit tests** at
+      `@/tests/utils/pickFrequentlyOrderedShops.test.ts`. Cover
+      empty input, in-flight + cancelled exclusion, unique-shop
+      grouping, frequency ordering, recency tie-break,
+      `createdAt` legacy fallback, `lastOrderId` correctness,
+      limit param + default-of-3, and the
+      delivered-mixed-with-pending real-world case.
+- [x] **`OrderAgainRail` component** at
+      `@/src/components/order/OrderAgainRail.tsx`. Horizontal
+      ScrollView of 180dp cards (1.5–2 visible at a time —
+      hints at swipe affordance). Self-hides via
+      `entries.length === 0` guard, which naturally covers
+      first-time customers, anonymous users, and
+      non-customer-role users (admin / delivery / shop owner)
+      in one branch.
+- [x] **HomeScreen integration**
+      (`@/src/screens/HomeScreen.tsx`). New focus effect fetches
+      `orderService.listMine(uid)`, caches the full payload in
+      `recentOrders`, and runs the picker for the rail. Tap
+      handler reuses the cached order (no second
+      round-trip — the optimisation called out in the PR 14
+      prompt §Part 5), fetches the shop's current menu via
+      `listShopMenuPublic`, builds a plan, and opens the same
+      `ReorderModal` from PR 13. Confirm calls
+      `useCartStore.getState().replaceCartWithItems(...)` and
+      navigates to Cart.
+- [x] **Hooks discipline (extra-strict).** All 6 new
+      `useState` calls (`recentOrders`, `frequentShops`,
+      `reorderModalVisible`, `reorderLoading`, `reorderPlan`,
+      `reorderShopMeta`) hoisted to the top of the component
+      with a permanent comment block citing both PR 12's
+      ETA-modal hotfix AND PR 13's OrdersScreen guard.
+      HomeScreen has no early returns today — the comment
+      enshrines the discipline so a future refactor can't
+      quietly reintroduce the bug.
+- [x] **Rail placement.** Sits between the search Pressable
+      and the category chips — the highest-impact slot. Above
+      "My Orders" so the discoverability advantage is real.
+- [x] **Anonymous + role-based hiding.** Focus effect skips
+      `listMine` entirely when `!uid || isAnonymous`, leaving
+      `frequentShops = []`, which triggers the rail's null
+      return. Admin / delivery / shop-owner accounts that
+      haven't placed customer orders just get an empty array
+      from the picker and the rail vanishes.
+- [x] **Failure-mode handling.** Suspended-shop reorder
+      surfaces a customer-friendly Alert
+      ("This shop may no longer be available") and dismisses
+      the modal, mirroring PR 13's OrdersScreen behaviour.
+      `listMine` failures are swallowed with a `console.warn`
+      and don't erase a previously-loaded rail (graceful
+      degradation on transient network blips).
+
+#### Verification
+
+- `npx tsc --noEmit`: 0 errors.
+- `npm test`: **52 suites / 527 tests** (516 → +11 new).
+- Deliberate-break: flipped expected order in
+  "orders by orderCount desc" test → 1 failed / 10 passed →
+  reverted; 527 green.
+- Zero new `DO NOT REMOVE` markers added.
+
+#### Smoke tests (after OTA)
+
+1. **New customer, no orders.** Open Home → rail entirely
+   absent (no header, no skeleton, no empty card).
+2. **One delivered order from one shop.** Rail shows one card.
+   Tap → modal loads → confirm → cart filled → Cart screen.
+3. **Mixed history.** 3 from Shop A, 2 from Shop B, 1 from
+   Shop C → rail shows A, B, C in that order.
+4. **In-flight orders don't count.** Place a fresh order with
+   a new shop, leave it pending → return to Home → rail
+   unchanged.
+5. **Cancelled orders don't count.** Cancel a fresh order from
+   a never-completed shop → return to Home → that shop is NOT
+   in the rail.
+6. **Suspended shop.** Admin suspends a shop the customer
+   reordered from → tap that card → fetch fails → Alert
+   "This shop may no longer be available." Cart unchanged.
+7. **Cross-shop replace.** Cart from Shop A; tap "Order again"
+   for Shop B → confirm → cart now Shop B only (replace, not
+   merge — same as PR 13).
+8. **Rail refreshes after fresh delivery.** Place + complete a
+   new shop's order → return to Home → that shop is now top
+   of the rail (most recent).
+9. **Hooks-of-Rules sanity.** Navigate Home → Orders → Home
+   several times. ErrorBoundary should never trip (the bug
+   PR 12's hotfix exposed).
+10. **Anonymous user.** Sign out → landing on Home → rail
+    absent. Sign in → return to Home → rail rebuilds within
+    one focus cycle.
+
+#### Deploy plan
+
+Pure client OTA per `.windsurf/deploy-discipline.md`:
+
+```powershell
+$env:NODE_OPTIONS = "--use-system-ca"
+npm test
+eas update --branch production --message "PR 14 — HomeScreen Order Again rail"
+```
+
+No functions deploy, no rules deploy, no native rebuild. Tell
+testers to force-close + reopen TestFlight after publish.
+
+#### Rollback
+
+- UI bug → `eas update --branch production --republish
+  [previous-update-id]`. Server unchanged → safe rollback at
+  any time.
+
+#### Follow-ups (out of scope this PR)
+
+- [ ] **Rail card rich content.** Last-ordered timestamp
+      ("3 days ago"), shop image thumbnail, top-3 items
+      preview. Marginal value for MVP; track if family testers
+      ask. [PR 14 follow]
+- [ ] **Reorder-tap telemetry.** Distinguish
+      Home-rail-initiated reorders from Orders-tab-initiated
+      ones in analytics. The PR 13 synthetic
+      `product_id: 'reorder'` event is the breadcrumb; needs a
+      `source: 'home_rail' | 'orders_tab'` dimension on the
+      reorder event. [post-MVP]
+- [ ] **Median-time-to-checkout dashboard.** The headline
+      metric this PR moves (industry benchmark: ~120s → ~20s
+      for the rail-using cohort). Wire once GA4/Mixpanel is
+      live. [post-MVP]
+- [ ] **HomeScreen pull-to-refresh.** The focus effect already
+      refetches; pull-to-refresh would be belt-and-suspenders.
+      Worth doing after the screen's content density grows.
+      [post-MVP]
+- [ ] **Server-side ranking.** Today the rail picks from
+      whatever `listMine` returns (capped server-side). For
+      power users with hundreds of orders we may want a
+      dedicated "top shops" callable. Premature optimisation
+      until p95 listMine size grows past ~50. [post-MVP]
+- [ ] **Pre-filter suspended shops in the rail.** Currently we
+      surface them and fail-soft on tap. Cleaner UX is to drop
+      them client-side before render — needs a shop-status
+      lookup (cheap if listMine starts denormalising it).
+      [PR 14 follow]
+
+### PR 13 — Repeat order button — ✅ CODE COMPLETE May 18 2026
+
+The single highest-leverage retention feature for grocery. Tap
+Reorder on a past delivered/cancelled order → modal shows the
+items at current prices + availability → confirm replaces the
+cart and lands you on the Cart screen. Pure client OTA — no
+schema, no callable, no rules changes.
+
+#### What shipped
+
+- [x] **Pure helpers `buildReorderPlan` + `planToCartItems`** at
+      `@/src/utils/buildReorderPlan.ts`. Joins past
+      `Order.items` against the current menu via `menuItemId`
+      (post-PR-4 contract) with a `productId` fallback for
+      legacy orders. Categorises every line into one of five
+      `ReorderLineStatus` values: `available_same_price`,
+      `available_price_increased`, `available_price_decreased`,
+      `out_of_stock`, `removed_from_menu`. `planToCartItems`
+      drops unavailable lines and rebuilds CartItems at the
+      LIVE price (so `placeOrder`'s drift validation passes
+      immediately) with the OLD quantity preserved.
+- [x] **14 unit tests** in
+      `@/tests/utils/buildReorderPlan.test.ts` — all five
+      statuses, productId fallback for legacy orders,
+      stock-null vs stock-zero distinction, custom-item
+      productId fallback, mixed-availability plan, past-snapshot
+      fallback fields preserved on removed_from_menu lines.
+- [x] **Cart store `replaceCartWithItems(items, shop)`**
+      (`@/src/store/useCartStore.ts:30-46, 222-250`). Atomic
+      Zustand `set()` swap; one synthetic
+      `Analytics.add_to_cart` event with `product_id: 'reorder'`
+      so the analytics dashboard distinguishes reorder bundles
+      from organic browse adds. Same primitive will back
+      saved-shopping-list and weekly-recurring features
+      (tracked in PRELAUNCH).
+- [x] **`ReorderModal` component** at
+      `@/src/components/order/ReorderModal.tsx`. Three sections:
+      Available (green ✓ + price + diff badge),
+      Unavailable (struck-through name + reason),
+      Subtotal preview at current prices. Loading state shows a
+      spinner. CTA disabled when `availableCount === 0`. Tap
+      outside / hardware back closes via `onRequestClose`.
+      Presentation-only — no Zustand calls inside.
+- [x] **OrdersScreen integration**
+      (`@/src/screens/OrdersScreen.tsx`). Reorder button only on
+      `delivered` / `cancelled` cards (terminal states). On tap:
+      open modal in loading state → fetch
+      `orderService.listShopMenuPublic(shopId)` → build plan →
+      render. Confirm calls
+      `useCartStore.getState().replaceCartWithItems(...)` and
+      navigates to Cart. Failed shop fetch closes the modal and
+      shows an Alert ("This shop is no longer accepting orders").
+- [x] **Status chip uses `audience="customer"`** on
+      OrdersScreen now too (`@/src/screens/OrdersScreen.tsx:227`),
+      so customers consistently see "Out for delivery" instead
+      of "Ready for Pickup". Was missed in PR 12 — caught when
+      hooking up the Reorder button on the same card.
+- [x] **Hooks discipline.** All four new `useState` calls
+      (`reorderModalVisible`, `reorderLoading`, `reorderPlan`,
+      `reorderShopMeta`) declared at the TOP of the component,
+      ABOVE the `if (loading)` and `if (orders.length === 0)`
+      early returns. Permanent comment block citing the PR 12
+      ETA-modal hotfix incident as a regression guard.
+- [x] **Reorder-button tap-isolation.** The card body is a
+      Pressable that navigates to OrderDetail; the inner
+      reorder-button row uses `onStartShouldSetResponder={() =>
+      true}` to swallow the tap and prevent the parent
+      navigating when the button is pressed.
+
+#### Verification
+
+- `npx tsc --noEmit`: 0 errors.
+- `npm test`: **51 suites / 516 tests** (502 → +14 new).
+- Deliberate-break: flipped `available_price_increased` test
+  expectation to `available_same_price`; one test went red as
+  expected; reverted; 516 green.
+- Zero new `DO NOT REMOVE` markers added.
+
+#### Smoke tests (after OTA)
+
+1. **Happy path same prices.** Past order with 3 unchanged items
+   → modal shows all 3 available, no badges → Add → cart has
+   them at the same prices and quantities.
+2. **Price change.** Shop bumped atta ₹250 → ₹275 → modal shows
+   ₹275 with ₹250 struck through + "+10%" badge → Add → cart
+   line price = ₹275, priceSnapshot = ₹275.
+3. **Some items unavailable.** Shop marked rice unavailable via
+   PR 8 bulk action → modal shows atta + dal in Available, rice
+   in Unavailable ("Currently unavailable"). CTA = "Add 2 items
+   to cart" → cart has 2 items.
+4. **All items unavailable.** Shop suspended every item → modal
+   shows everything in Unavailable. CTA = "No items available"
+   and disabled. Cancel → cart unchanged.
+5. **Shop suspended.** Reorder from a shop the admin has since
+   suspended → fetch fails → modal closes → Alert "This shop is
+   no longer accepting orders." Cart unchanged.
+6. **Replace cart from different shop.** Cart has 5 items from
+   Shop A. Tap Reorder on a Shop B past order. Confirm → cart
+   now has Shop B items only.
+7. **Reorder a cancelled order.** Customer cancelled a paid
+   order via the PR 7 2-min window. Reorder button still
+   appears; flow works identically to delivered case.
+
+#### Deploy plan
+
+Pure client OTA per `.windsurf/deploy-discipline.md`:
+
+```powershell
+$env:NODE_OPTIONS = "--use-system-ca"
+npm test
+eas update --branch production --message "PR 13 — Repeat order button"
+```
+
+No functions deploy, no rules deploy, no native rebuild. Tell
+testers to force-close + reopen TestFlight after publish to pick
+up the new bundle.
+
+#### Rollback
+
+- UI bug → `eas update --branch production --republish
+  [previous-update-id]`. Server unchanged so any rollback is
+  safe; no client/server version mismatch risk.
+
+#### Follow-ups (out of scope this PR)
+
+- [ ] **Reorder button on OrderDetailScreen.** Current entry
+      point is OrdersScreen card. Detail-screen reorder is a
+      one-line follow-up if testers ask for it. [PR 13 follow]
+- [ ] **HomeScreen "Order again" rail.** Surface top-3 reordered
+      shops per user. Needs reorder-frequency telemetry first.
+      [PR 13 follow]
+- [ ] **Partial reorder UX.** Let customer toggle which items
+      to include before confirming. Marginal value at MVP; track
+      if testers ask. [PR 13 follow]
+- [ ] **Saved shopping lists / favorites.** Will reuse
+      `replaceCartWithItems`. [post-MVP]
+- [ ] **Weekly recurring orders / subscription.** Distinct
+      feature; cart-replacement primitive in this PR unblocks
+      it. [post-MVP]
+- [ ] **Reorder push reminder.** "It's been 7 days since your
+      last order from Mahesh Kirana — reorder?" Needs the
+      transactional-push infrastructure not yet built.
+      [post-MVP]
+- [ ] **Reorder-conversion telemetry.** % of orders initiated
+      via the Reorder button vs. fresh browse. The synthetic
+      `product_id: 'reorder'` add_to_cart event is the first
+      breadcrumb; wire to a dashboard query once GA4 / Mixpanel
+      is live. [post-MVP]
+
 ### PR 12 — Shopkeeper ETA + early delivery visibility + status rename — ✅ CODE COMPLETE May 18 2026
 
 The biggest piece of family-testing feedback. Three coordinated

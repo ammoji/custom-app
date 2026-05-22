@@ -4,6 +4,7 @@ import { Shop } from '../../types';
 import { colors, spacing, radii, typography, shadow } from '../../constants/theme';
 import { formatDistance, formatRupees } from '../../utils/format';
 import Badge from '../common/Badge';
+import ShopRatingBadge from './ShopRatingBadge';
 
 type Props = {
   shop: Shop;
@@ -27,7 +28,14 @@ export default function ShopCard({ shop, onPress }: Props) {
         </View>
         <Text style={styles.address} numberOfLines={1}>{shop.address}</Text>
         <View style={styles.metaRow}>
-          <Text style={styles.meta}>★ {shop.rating}</Text>
+          {/* PR 20 — replaces the legacy "★ {shop.rating}" placeholder
+              with the live rolling-avg badge. ShopRatingBadge handles
+              the "New shop" fallback when ratingCount is 0/missing. */}
+          <ShopRatingBadge
+            ratingAvg={shop.ratingAvg}
+            ratingCount={shop.ratingCount}
+            size="sm"
+          />
           <Text style={styles.dot}>·</Text>
           <Text style={styles.meta}>{formatDistance(shop.distanceKm)}</Text>
           <Text style={styles.dot}>·</Text>

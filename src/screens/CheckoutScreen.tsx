@@ -1,6 +1,6 @@
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import React, { useCallback, useState } from 'react';
-import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../components/common/Button';
 import EmptyState from '../components/common/EmptyState';
@@ -13,7 +13,7 @@ import { profileService } from '../services/profileService';
 import { Sentry } from '../services/sentry';
 import { useAuthStore } from '../store/useAuthStore';
 import { useCartStore } from '../store/useCartStore';
-import type { Address, PaymentMethod, SavedAddress, UserProfile } from '../types';
+import type { Address, PaymentMethod, SavedAddress, SubstitutionPreference, UserProfile } from '../types';
 // PR 5 — DO NOT REMOVE. Auto-formatter stripped this import once during
 // PR 5. Used in the Razorpay `prefill.email` field below.
 import { deriveCheckoutEmail } from '../utils/checkoutEmail';
@@ -53,6 +53,20 @@ export default function CheckoutScreen() {
   const [errors, setErrors] = useState<Errors>({});
   const [placing, setPlacing] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cod');
+  // PR 21 — substitution preference. Hoisted with the other useState
+  // calls above any early-return per Rules-of-Hooks discipline (PR 12
+  // → 17 → 19 → 20 → 21 lineage). Default 'call_me' is the safest
+  // choice for first-time users; the picker below lets them switch
+  // to 'auto' (shop replaces with similar) or 'refund' (shop drops
+  // the item + adjusts the total) to skip the call entirely.
+  const [substitutionPreference, setSubstitutionPreference] =
+    useState<SubstitutionPreference>('call_me');
+  // PR 22 — per-order delivery instructions. Pre-filled from the
+  // selected saved address (or empty when starting from a form-mode
+  // entry), and editable per-order without touching the saved
+  // address book row. The override is captured on the order's
+  // deliveryAddress snapshot. Hoisted with the other field state.
+  const [orderInstructions, setOrderInstructions] = useState('');
 
   // Phase 12a-v2-iv: saved-address picker. The screen has two modes
   // distinguished by `usingForm`:
@@ -149,6 +163,10 @@ export default function CheckoutScreen() {
     setCity(addr.city);
     setPincode(addr.pincode);
     setPhone(addr.phone);
+    // PR 22 — pre-fill the per-order instructions from the saved
+    // address. Customer can still edit; the edit only lives on the
+    // order doc.
+    setOrderInstructions(addr.deliveryInstructions ?? '');
     setErrors({});
   };
 
@@ -297,6 +315,11 @@ export default function CheckoutScreen() {
       city: city.trim(),
       pincode: pincode.trim(),
       phone: phone.trim(),
+      // PR 22 — instructions snapshot for this order. Empty /
+      // whitespace-only → undefined so the server omits the field
+      // (instead of persisting a blank string). The saved-address
+      // book row is NOT updated; this is per-order only.
+      deliveryInstructions: orderInstructions.trim() || undefined,
     };
 
     try {
@@ -305,6 +328,12 @@ export default function CheckoutScreen() {
         items,
         address,
         paymentMethod,
+        // PR 21 — pre-stated substitution intent. Server re-validates
+        // via normalizeSubstitutionPreference + persists onto the
+        // order doc. ShopOrderDetail reads this prominently so the
+        // shop doesn't have to call mid-fulfillment for unavailable
+        // items the customer already decided about.
+        substitutionPreference,
       });
       Analytics.place_order({
         order_id: result.orderId,
@@ -609,6 +638,77 @@ export default function CheckoutScreen() {
             </View>
           </View>
 
+          {/* PR 22 — per-order delivery instructions. Sits between
+              the bill summary and substitution picker so the
+              customer can scan address → instructions →
+              substitution → payment top-to-bottom in a single
+              cognitive pass. Pre-filled from the picked address;
+              edits stay on the order doc and don't mutate the
+              saved address book row. */}
+          <Text style={styles.label}>Delivery instructions</Text>
+          <TextInput
+            value={orderInstructions}
+            onChangeText={t => setOrderInstructions(t.slice(0, 280))}
+            placeholder="Optional — e.g. Ring twice, leave at door"
+            placeholderTextColor={colors.textSecondary}
+            multiline
+            style={styles.instructionsInput}
+          />
+          <Text style={styles.charCount}>
+            {orderInstructions.length}/280
+          </Text>
+
+          {/* PR 21 — substitution preference picker. Sits between
+              the bill summary and the payment method so the customer
+              consciously chooses BEFORE committing to pay. Default
+              'call_me' covers the safe path; tapping 'auto' or
+              'refund' explicitly opts out of the call. */}
+          <Text style={styles.label}>If something&apos;s unavailable</Text>
+          <View style={styles.subRow}>
+            {([
+              {
+                value: 'call_me',
+                label: '📞 Call me first',
+                sub: 'Shop will call before changing anything',
+              },
+              {
+                value: 'auto',
+                label: '🔄 Replace with similar',
+                sub: 'Shop picks an equivalent item',
+              },
+              {
+                value: 'refund',
+                label: '💰 Refund the item',
+                sub: 'Skip the item; adjust the total',
+              },
+            ] as const).map(opt => {
+              const active = substitutionPreference === opt.value;
+              return (
+                <Pressable
+                  key={opt.value}
+                  onPress={() => setSubstitutionPreference(opt.value)}
+                  style={[
+                    styles.subOption,
+                    active && styles.subOptionActive,
+                  ]}
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected: active }}
+                  accessibilityLabel={opt.label}
+                >
+                  <Text
+                    style={[
+                      styles.subOptionLabel,
+                      active && styles.subOptionLabelActive,
+                    ]}
+                  >
+                    {opt.label}
+                  </Text>
+                  <Text style={styles.subOptionSub}>{opt.sub}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
           <Text style={styles.label}>Payment</Text>
           <PaymentOption
             selected={paymentMethod === 'cod'}
@@ -774,5 +874,49 @@ const styles = StyleSheet.create({
   profileLoadBannerRetry: {
     ...typography.bodyBold,
     color: colors.primary,
+  },
+  // PR 21 — substitution preference picker styles. Mirrors the
+  // address-card visual language (border + tinted-active state) so
+  // the customer instinctively recognizes it as a selection.
+  subRow: { gap: spacing.sm, marginBottom: spacing.lg },
+  subOption: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.md,
+    padding: spacing.md,
+    backgroundColor: colors.surface,
+  },
+  subOptionActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primaryLight,
+  },
+  subOptionLabel: { ...typography.bodyBold },
+  subOptionLabelActive: { color: colors.primaryDark },
+  subOptionSub: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  // PR 22 — multiline instructions input + char counter. Mirrors
+  // the same styling on AddressEditScreen for consistency.
+  instructionsInput: {
+    ...typography.body,
+    color: colors.textPrimary,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    minHeight: 80,
+    textAlignVertical: 'top',
+    marginTop: spacing.xs,
+    marginBottom: spacing.xs,
+    backgroundColor: colors.surface,
+  },
+  charCount: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    alignSelf: 'flex-end',
+    marginBottom: spacing.lg,
   },
 });

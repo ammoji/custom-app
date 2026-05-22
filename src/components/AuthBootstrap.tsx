@@ -4,6 +4,7 @@ import { authService } from '../services/authService';
 import { pushService } from '../services/pushService';
 import { useAuthStore } from '../store/useAuthStore';
 import { useLocationStore } from '../store/useLocationStore';
+import { useProfileStore } from '../store/useProfileStore';
 
 /**
  * Renders nothing. Subscribes to Firebase auth state on mount and keeps
@@ -36,6 +37,26 @@ export default function AuthBootstrap() {
         authService.signInAnonymouslyIfNeeded().catch(err => {
           console.warn('[auth] post-signOut anon re-auth failed:', err?.code || err);
         });
+        // PR 19 — clear cached profile on sign-out so the next user
+        // doesn't briefly see the previous user's favorites flash
+        // through HomeScreen / FavoritesScreen before the fresh
+        // hydrate completes.
+        useProfileStore.getState().setProfile(null);
+      }
+
+      // PR 19 — hydrate the profile store for real (non-anonymous)
+      // users so HomeScreen's favorites tile + FavoriteHeart's
+      // selectors have data on first render. Anonymous users skip
+      // the call (their profile doc is the empty seed; nothing to
+      // sync). Idempotent: every subsequent setUser tick re-fires
+      // this and getMyProfile is itself cheap.
+      if (user && !user.isAnonymous) {
+        useProfileStore
+          .getState()
+          .loadFromServer()
+          .catch(err => {
+            console.warn('[bootstrap] profile hydrate failed:', err);
+          });
       }
 
       // Once we have a real user, force-refresh the ID token ONCE so any

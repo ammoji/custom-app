@@ -18,6 +18,7 @@ import Button from '../../components/common/Button';
 import EmptyState from '../../components/common/EmptyState';
 import Loader from '../../components/common/Loader';
 import ScreenHeader from '../../components/common/ScreenHeader';
+import ShopRatingBadge from '../../components/shop/ShopRatingBadge';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
 import type { RootStackParamList } from '../../navigation/AppNavigator';
 import { orderService } from '../../services/orderService';
@@ -173,6 +174,17 @@ export default function ShopDetailManagementScreen() {
         <View style={styles.card}>
           <Text style={styles.name}>{shop.name}</Text>
           <Text style={styles.address}>{shop.address}</Text>
+          {/* PR 20.1 fix — admin should also see the shop's rating
+              stats. Customer-facing surfaces got this in PR 20 but
+              the admin shop detail was missed. Admins use this to
+              spot low-rated shops worth investigating. */}
+          <View style={{ marginTop: 8 }}>
+            <ShopRatingBadge
+              ratingAvg={shop.ratingAvg}
+              ratingCount={shop.ratingCount}
+              size="md"
+            />
+          </View>
           <View style={[styles.badge, styles[`badge_${status}`]]}>
             <Text style={[styles.badgeText, styles[`badgeText_${status}`]]}>
               {status}

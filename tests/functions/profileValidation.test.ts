@@ -129,6 +129,8 @@ describe('validateAddressInput', () => {
       line2: null,
       city: 'New Delhi',
       pincode: '110016',
+      // PR 22 — validator now always emits this key; null = absent.
+      deliveryInstructions: null,
     });
   });
 

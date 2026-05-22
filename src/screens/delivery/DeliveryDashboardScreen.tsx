@@ -1,5 +1,5 @@
-import { useNavigation } from '@react-navigation/native';
-import React, { useEffect, useMemo, useState } from 'react';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
     Alert,
     FlatList,
@@ -144,6 +144,25 @@ export default function DeliveryDashboardScreen() {
       off2();
     };
   }, [isDelivery, retryNonce]);
+
+  // PR 20.1 fix — bump retryNonce whenever the dashboard regains
+  // focus. This addresses the "stale coming-soon card" issue: if
+  // partner A is viewing the dashboard while partner B claims one
+  // of the visible orders, partner A's list will go stale until
+  // the next 15s poll. The user-facing symptom: partner A taps a
+  // card → opens detail → "Already Taken" error → navigates back.
+  // With this focus-triggered re-poll, navigating back triggers
+  // a fresh fetch within ~1s, so the stale card disappears
+  // immediately instead of lingering for up to 15s.
+  //
+  // No-op on initial mount (useEffect above already fetches on
+  // mount; useFocusEffect also runs on mount but bumping
+  // retryNonce just re-fires the same watcher with no extra cost).
+  useFocusEffect(
+    useCallback(() => {
+      setRetryNonce(n => n + 1);
+    }, []),
+  );
 
   const stats = useMemo(() => {
     let completedToday = 0;

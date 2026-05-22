@@ -43,6 +43,11 @@ export type SaveAddressInput = {
   line2?: string;
   city: string;
   pincode: string;
+  // PR 22 — optional free-text delivery instructions. Empty /
+  // whitespace-only → caller should pass undefined (server treats
+  // the field as absent in that case). Cap is 280 chars; server
+  // re-validates via normalizeDeliveryInstructions.
+  deliveryInstructions?: string;
 };
 
 export type ProfilePatch = {
@@ -126,6 +131,28 @@ export const profileService = {
     );
     const result = await fn({ id });
     return result.data.profile;
+  },
+
+  // PR 19 — toggle a per-shop menu-item favorite. Returns the fresh
+  // profile (same posture as the address mutators) AND the post-
+  // toggle isFavorite flag so the caller doesn't have to re-read
+  // the map. The pure logic lives server-side in
+  // `functions/src/favoritesHelpers.ts`; this is a thin dispatcher.
+  async toggleFavorite(input: {
+    shopId: string;
+    menuItemId: string;
+  }): Promise<{ profile: UserProfile; isFavorite: boolean }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('toggleFavorite');
+      const result = await fn(input);
+      return result.data as { profile: UserProfile; isFavorite: boolean };
+    }
+    const fn = httpsCallable<
+      { shopId: string; menuItemId: string },
+      { profile: UserProfile; isFavorite: boolean }
+    >(functions, 'toggleFavorite');
+    const result = await fn(input);
+    return result.data;
   },
 };
 

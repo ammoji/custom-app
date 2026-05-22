@@ -25,6 +25,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -72,6 +73,13 @@ export default function AddressEditScreen() {
   const [line2, setLine2] = useState(params.prefill?.line2 ?? '');
   const [city, setCity] = useState(params.prefill?.city ?? '');
   const [pincode, setPincode] = useState(params.prefill?.pincode ?? '');
+  // PR 22 — saved delivery instructions for this address. Hoisted
+  // with the other field state above all early returns per
+  // Rules-of-Hooks discipline (PR 12 → 17 → 19 → 20 → 21 → 22
+  // lineage). Empty string = absent; the trimmed value is passed
+  // through to saveAddress on submit (or omitted entirely if
+  // empty/whitespace).
+  const [deliveryInstructions, setDeliveryInstructions] = useState('');
 
   const [hydrating, setHydrating] = useState(isEditing);
   const [hydrateError, setHydrateError] = useState<string | null>(null);
@@ -104,6 +112,9 @@ export default function AddressEditScreen() {
         setLine2(found.line2 ?? '');
         setCity(found.city);
         setPincode(found.pincode);
+        // PR 22 — hydrate instructions on edit. Missing field on
+        // legacy saved addresses → empty string (no pre-fill).
+        setDeliveryInstructions(found.deliveryInstructions ?? '');
       })
       .catch(e => {
         if (cancelled) return;
@@ -148,6 +159,10 @@ export default function AddressEditScreen() {
         line2: line2.trim() || undefined,
         city: city.trim(),
         pincode: pincode.trim(),
+        // PR 22 — instructions. Empty / whitespace-only → undefined
+        // so the server-side normalizer omits the field entirely
+        // rather than persisting an empty string.
+        deliveryInstructions: deliveryInstructions.trim() || undefined,
       });
       nav.goBack();
     } catch (err: any) {
@@ -283,6 +298,29 @@ export default function AddressEditScreen() {
                 </View>
               </View>
 
+              {/* PR 22 — delivery instructions input. Multi-line
+                  TextInput (not the shared Input component which is
+                  single-line) so the customer can compose a short
+                  paragraph. Hard 280-char clamp on input matches the
+                  server's MAX_INSTRUCTIONS_LEN; the counter below
+                  gives instant feedback. */}
+              <Text style={styles.label}>
+                Delivery instructions (optional)
+              </Text>
+              <TextInput
+                value={deliveryInstructions}
+                onChangeText={t =>
+                  setDeliveryInstructions(t.slice(0, 280))
+                }
+                placeholder="e.g. Ring second bell, leave at door if no answer"
+                placeholderTextColor={colors.textSecondary}
+                multiline
+                style={styles.instructionsInput}
+              />
+              <Text style={styles.charCount}>
+                {deliveryInstructions.length}/280
+              </Text>
+
               {saveError && (
                 <View style={styles.inlineError}>
                   <Text style={styles.inlineErrorText}>{saveError}</Text>
@@ -342,4 +380,26 @@ const styles = StyleSheet.create({
     borderRadius: radii.md,
   },
   errorBannerText: { ...typography.body, color: colors.danger },
+  // PR 22 — multiline instructions input + char counter. minHeight
+  // gives the field visible affordance for multi-line input
+  // (default TextInput multiline collapses to one line until typed).
+  instructionsInput: {
+    ...typography.body,
+    color: colors.textPrimary,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    minHeight: 80,
+    textAlignVertical: 'top',
+    marginTop: spacing.xs,
+    backgroundColor: colors.surface,
+  },
+  charCount: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    alignSelf: 'flex-end',
+    marginTop: 2,
+  },
 });

@@ -4,6 +4,7 @@ import { CategoryId } from '../constants/categories';
 import AddressEditScreen from '../screens/AddressEditScreen';
 import CartScreen from '../screens/CartScreen';
 import CheckoutScreen from '../screens/CheckoutScreen';
+import FavoritesScreen from '../screens/FavoritesScreen';
 import HomeScreen from '../screens/HomeScreen';
 import LoginScreen from '../screens/LoginScreen';
 import OrderConfirmationScreen from '../screens/OrderConfirmationScreen';
@@ -49,6 +50,9 @@ export type RootStackParamList = {
   OrderConfirmation: { orderId: string };
   Orders: undefined;
   OrderDetail: { orderId: string };
+  // PR 19 — customer's per-shop favorites list. Reachable from
+  // the HomeScreen "❤ N favorites" tile.
+  Favorites: undefined;
   Search: { query?: string; category?: CategoryId } | undefined;
   AdminOrders: undefined;
   // PR 8 Part A — DO NOT REMOVE (formatter stripped this once
@@ -132,6 +136,7 @@ export default function AppNavigator() {
       <Stack.Screen name="OrderConfirmation" component={OrderConfirmationScreen} />
       <Stack.Screen name="Orders" component={OrdersScreen} />
       <Stack.Screen name="OrderDetail" component={OrderDetailScreen} />
+      <Stack.Screen name="Favorites" component={FavoritesScreen} />
       <Stack.Screen name="Search" component={SearchScreen} />
       <Stack.Screen name="AdminOrders" component={AdminOrdersScreen} />
       <Stack.Screen name="AuditLog" component={AuditLogScreen} />

@@ -1,16 +1,25 @@
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
-import React, { useCallback, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../components/common/Button';
+import QuickSwitchModal from '../components/dev/QuickSwitchModal';
+import ActiveOrdersRail from '../components/order/ActiveOrdersRail';
+import OrderAgainRail from '../components/order/OrderAgainRail';
+import ReorderModal from '../components/order/ReorderModal';
 import { CATEGORIES } from '../constants/categories';
+import { TEST_ACCOUNTS } from '../constants/testAccounts';
 import { colors, radii, spacing, typography } from '../constants/theme';
 import { orderService } from '../services/orderService';
 import { useAuthStore } from '../store/useAuthStore';
 import { useCartStore } from '../store/useCartStore';
 import { useLocationStore } from '../store/useLocationStore';
-import type { Shop } from '../types';
+import { useProfileStore } from '../store/useProfileStore';
+import type { Order, Shop } from '../types';
+import { buildReorderPlan, planToCartItems, ReorderPlan } from '../utils/buildReorderPlan';
 import { formatRupees } from '../utils/format';
+import { FrequentShopEntry, pickFrequentlyOrderedShops } from '../utils/pickFrequentlyOrderedShops';
+import { pickActiveOrders } from '../utils/pickActiveOrders';
 
 export default function HomeScreen() {
   const nav = useNavigation<any>();
@@ -21,6 +30,11 @@ export default function HomeScreen() {
   const isAdmin = useAuthStore(s => s.isAdmin);
   const isShopOwner = useAuthStore(s => s.isShopOwner);
   const isDelivery = useAuthStore(s => s.isDelivery);
+  // PR 18 — phoneNumber drives Quick Switch visibility. Reading
+  // it as a top-level store subscription so the screen re-renders
+  // when a switch completes (the modal calls setUser, which flips
+  // phoneNumber alongside the role flags).
+  const phoneNumber = useAuthStore(s => s.phoneNumber);
   const source = useLocationStore(s => s.source);
 
   // Phase 12a-v2-i. If the user has a shop in flight (registered but
@@ -29,6 +43,87 @@ export default function HomeScreen() {
   // hunting through nav. We refetch on focus so a freshly-rejected
   // shop appears as soon as the user returns to Home.
   const [pendingShop, setPendingShop] = useState<Shop | null>(null);
+
+  // PR 14 — "Order again" rail + reorder modal state.
+  //
+  // ⚠️ Rules of Hooks: ALL useState calls in this screen MUST stay
+  // ABOVE any conditional early returns. PR 12's ETA-modal hotfix
+  // was caused by a useState declared after an `if (loading) return`
+  // — React requires the same hook call order on every render and
+  // crashed the screen on first data load. PR 13 added the same
+  // guard comment to OrdersScreen. HomeScreen has no early returns
+  // today but enshrining the discipline here prevents a future
+  // refactor from quietly reintroducing the bug.
+  //
+  // `recentOrders` caches the listMine() payload so the reorder
+  // tap can find the source order in-memory instead of issuing a
+  // second network round-trip (the recommended optimisation from
+  // pr-14-...windsurf-prompt.md § Part 5).
+  const [recentOrders, setRecentOrders] = useState<Order[]>([]);
+  const [frequentShops, setFrequentShops] = useState<FrequentShopEntry[]>([]);
+  const [reorderModalVisible, setReorderModalVisible] = useState(false);
+  const [reorderLoading, setReorderLoading] = useState(false);
+  const [reorderPlan, setReorderPlan] = useState<ReorderPlan | null>(null);
+  const [reorderShopMeta, setReorderShopMeta] = useState<{
+    id: string;
+    name: string;
+    deliveryFee: number;
+  } | null>(null);
+
+  // PR 17 — ETA ticker. Bumps `nowMs` once per minute so the
+  // ActiveOrdersRail's "Arriving in ~X min" copy decrements
+  // visibly while the user lingers on Home. Without this, the
+  // copy stays stale until the next focus-effect refetch.
+  //
+  // Lineage: lives with the PR 14 hooks-discipline block above
+  // (Rules-of-Hooks — the PR 12 ETA-modal hotfix bug). Adding
+  // this useState below the function's later code branches
+  // would silently regress the same crash on first data load,
+  // so keep ALL state at the top.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  // PR 18 — Quick Switch modal visibility. Lives with the rest of
+  // the hoisted state per the Rules-of-Hooks discipline (PR 12 ETA
+  // modal hotfix lineage — reinforced in PR 13 / 14 / 15 / 17).
+  // Adding this useState below any conditional branch in this
+  // function would silently regress the same crash on first data
+  // load.
+  const [quickSwitchVisible, setQuickSwitchVisible] = useState(false);
+
+  // PR 18 — visibility gate for the Quick Switch button. True iff
+  // the currently signed-in user's E.164 phone matches one of the
+  // configured test accounts. Deliberately NOT gated on `isAdmin`:
+  // every test phone (admin AND non-admin) is in TEST_ACCOUNTS, so
+  // the button stays visible after switching to a customer-role
+  // test account, letting you switch back. A real customer's phone
+  // wouldn't be in the list, so they never see the button —
+  // automatic production safety without per-role gating.
+  const isTestAccount = phoneNumber
+    ? TEST_ACCOUNTS.some(a => `+91${a.phone}` === phoneNumber)
+    : false;
+
+  // PR 19 — total favorite count across all shops. Drives both the
+  // tile visibility (count > 0) and the badge text. Subscribing
+  // here (rather than at the JSX site) means the tile recomputes
+  // exactly when the favorites map mutates and not on unrelated
+  // profile edits like address-book changes.
+  const favoritesCount = useProfileStore(s => {
+    const fav = s.profile?.favorites;
+    if (!fav) return 0;
+    let n = 0;
+    for (const ids of Object.values(fav)) n += ids.length;
+    return n;
+  });
+
+  useEffect(() => {
+    // 60s cadence — matches the granularity of the "~N min"
+    // rounding, so we don't waste wakeups on sub-minute ticks
+    // that wouldn't change the rendered string. Cleanup is
+    // essential: a leaked interval would keep firing after
+    // HomeScreen unmounts (e.g. on sign-out).
+    const id = setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
   useFocusEffect(
     useCallback(() => {
       if (isAnonymous || isShopOwner) {
@@ -57,6 +152,119 @@ export default function HomeScreen() {
         cancelled = true;
       };
     }, [isAnonymous, isShopOwner]),
+  );
+
+  // PR 14 — fetch order history on focus. Mirrors the existing
+  // pendingShop focus effect's cancel-token pattern. Skipped for
+  // anonymous users (no UID = no orders to fetch) and for shop
+  // owners (their listMine returns empty for the customer scope
+  // anyway, but skipping saves a needless callable round-trip).
+  useFocusEffect(
+    useCallback(() => {
+      if (!uid || isAnonymous) {
+        setRecentOrders([]);
+        setFrequentShops([]);
+        return;
+      }
+      let cancelled = false;
+      orderService
+        .listMine(uid)
+        .then(orders => {
+          if (cancelled) return;
+          setRecentOrders(orders);
+          setFrequentShops(pickFrequentlyOrderedShops(orders, 3));
+        })
+        .catch(err => {
+          if (cancelled) return;
+          // Best-effort — a failed fetch shouldn't block Home or
+          // erase a previously-loaded rail. Just log and move on;
+          // the rail will refresh on next focus.
+          console.warn('[Home] listMine failed:', err);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }, [uid, isAnonymous]),
+  );
+
+  // PR 14 — reorder tap handler. Reuses the cached past order from
+  // recentOrders (no second network call) and fetches the shop's
+  // current menu via listShopMenuPublic — same primitive PR 13's
+  // OrdersScreen flow uses. Failure modes:
+  //   - Source order not found in cache → stale state, surface a
+  //     gentle Alert and bail.
+  //   - Shop suspended / removed → listShopMenuPublic 404s, we map
+  //     that to a customer-facing "may no longer be available".
+  const onOrderAgainTap = useCallback(
+    async (entry: FrequentShopEntry) => {
+      setReorderModalVisible(true);
+      setReorderLoading(true);
+      setReorderPlan(null);
+      setReorderShopMeta(null);
+      try {
+        const pastOrder = recentOrders.find(o => o.id === entry.lastOrderId);
+        if (!pastOrder) {
+          throw new Error('Past order no longer in cache.');
+        }
+        const { shop, items: menu } =
+          await orderService.listShopMenuPublic(entry.shopId);
+        const plan = buildReorderPlan(pastOrder, menu);
+        setReorderPlan(plan);
+        setReorderShopMeta({
+          id: shop.id,
+          name: shop.name,
+          deliveryFee: shop.deliveryFee,
+        });
+      } catch (e: any) {
+        console.warn('[Home] reorder fetch failed:', e);
+        setReorderModalVisible(false);
+        Alert.alert(
+          'Reorder unavailable',
+          e?.code === 'functions/not-found' || e?.code === 'not-found'
+            ? 'This shop may no longer be available. Try a different shop.'
+            : 'Could not load this shop right now. Please try again.',
+        );
+      } finally {
+        setReorderLoading(false);
+      }
+    },
+    [recentOrders],
+  );
+
+  const onConfirmReorder = useCallback(() => {
+    if (!reorderPlan || !reorderShopMeta) return;
+    const cartItems = planToCartItems(reorderPlan);
+    if (cartItems.length === 0) return; // CTA is disabled in this case
+    // getState() (not the hook subscriber) so this screen doesn't
+    // re-render mid-swap. Same posture as OrdersScreen.
+    useCartStore.getState().replaceCartWithItems(cartItems, reorderShopMeta);
+    setReorderModalVisible(false);
+    setReorderPlan(null);
+    setReorderShopMeta(null);
+    nav.navigate('Cart');
+  }, [reorderPlan, reorderShopMeta, nav]);
+
+  const onCancelReorder = useCallback(() => {
+    setReorderModalVisible(false);
+    setReorderPlan(null);
+    setReorderShopMeta(null);
+  }, []);
+
+  // PR 15 — active orders derived from the same listMine cache PR
+  // 14 already populates for the Order Again rail. No additional
+  // fetch. useMemo so the active rail only re-renders when the
+  // underlying order list actually changes (new placement, status
+  // tick, or focus refetch).
+  const activeOrders = useMemo(
+    () => pickActiveOrders(recentOrders),
+    [recentOrders],
+  );
+
+  const onActiveOrderTap = useCallback(
+    (order: Order) => {
+      nav.navigate('OrderDetail', { orderId: order.id });
+    },
+    [nav],
   );
 
   // A user has a "non-customer role" when they wear at least one extra
@@ -89,6 +297,26 @@ export default function HomeScreen() {
         >
           <Text style={styles.searchPlaceholder}>🔍  Search for atta, milk, soap...</Text>
         </Pressable>
+
+        {/* PR 15 — "Your active orders" rail. Sits ABOVE the Order
+            Again rail because in-flight orders need glanceable
+            attention more than reorder prompts. Self-hides when
+            empty (first-time / anonymous / all-terminal users). */}
+        <ActiveOrdersRail
+          orders={activeOrders}
+          onTap={onActiveOrderTap}
+          nowMs={nowMs}
+        />
+
+        {/* PR 14 — "Order again" rail. Sits between the search box
+            and the category chips per the highest-impact slot in
+            the prompt. Returns null internally when entries=[] so
+            it self-hides for first-time + non-customer users. */}
+        <OrderAgainRail
+          entries={frequentShops}
+          loading={false}
+          onTap={onOrderAgainTap}
+        />
 
         <ScrollView
           horizontal
@@ -327,6 +555,44 @@ export default function HomeScreen() {
           <Step n="3" title="Place order" desc="Pay on delivery, get it fast" />
         </View>
 
+        {/* PR 19 — Favorites indicator tile. Tap-through to the
+            dedicated FavoritesScreen. Self-hides when the customer
+            has zero favorites so first-time / anonymous users
+            don't see a useless empty link. */}
+        {favoritesCount > 0 && (
+          <Pressable
+            style={styles.favoritesTile}
+            onPress={() => nav.navigate('Favorites')}
+            accessibilityRole="button"
+            accessibilityLabel={`Open ${favoritesCount} favorite${favoritesCount === 1 ? '' : 's'}`}
+          >
+            <Text style={styles.favoritesText}>
+              ❤️  {favoritesCount} {favoritesCount === 1 ? 'favorite' : 'favorites'}
+            </Text>
+            <Text style={styles.favoritesChevron}>›</Text>
+          </Pressable>
+        )}
+
+        {/* PR 18 — Quick Switch dev tile. Dashed-border + muted
+            color signals "developer tool, not a normal feature"
+            so it's visually distinct from the real role tiles
+            above. Auto-hidden for non-test users via
+            isTestAccount; safe to leave deployed. */}
+        {isTestAccount && (
+          <View style={styles.devSection}>
+            <Pressable
+              onPress={() => setQuickSwitchVisible(true)}
+              style={styles.quickSwitchButton}
+              accessibilityRole="button"
+              accessibilityLabel="Switch to test account"
+            >
+              <Text style={styles.quickSwitchText}>
+                🔀 Switch test account
+              </Text>
+            </Pressable>
+          </View>
+        )}
+
         {__DEV__ && (
           <Text style={{ fontSize: 10, color: colors.textMuted, marginTop: spacing.xl, paddingHorizontal: spacing.lg }}>
             uid: {uid ?? 'pending'} {isAnonymous ? '[Anon]' : ''}{' '}
@@ -336,6 +602,23 @@ export default function HomeScreen() {
           </Text>
         )}
       </ScrollView>
+
+      <ReorderModal
+        visible={reorderModalVisible}
+        plan={reorderPlan}
+        loading={reorderLoading}
+        onConfirm={onConfirmReorder}
+        onCancel={onCancelReorder}
+      />
+
+      {/* PR 18 — Quick Switch modal. Mounted unconditionally
+          (cheap when visible=false) so the open/close transitions
+          animate cleanly; the visibility-gating happens on the
+          trigger button above. */}
+      <QuickSwitchModal
+        visible={quickSwitchVisible}
+        onClose={() => setQuickSwitchVisible(false)}
+      />
 
       {itemCount > 0 && (
         <Pressable
@@ -372,6 +655,54 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg },
   content: { paddingVertical: spacing.lg, paddingBottom: 120 },
   greeting: { ...typography.h1 },
+  // PR 18 — Quick Switch dev tile styles. Dashed border + muted
+  // surface deliberately read as "developer tool" rather than a
+  // normal user CTA. Sits inline at the bottom of HomeScreen above
+  // the __DEV__ debug line.
+  devSection: {
+    paddingHorizontal: spacing.lg,
+    marginTop: spacing.md,
+  },
+  quickSwitchButton: {
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderStyle: 'dashed',
+    alignSelf: 'flex-start',
+  },
+  quickSwitchText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '600',
+  },
+  // PR 19 — favorites tile styles. Same horizontal-pill shape as
+  // the saved-address rows on ProfileScreen so the visual language
+  // for "tap-through to a list of saved things" stays consistent
+  // across screens.
+  favoritesTile: {
+    marginTop: spacing.md,
+    marginHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  favoritesText: {
+    ...typography.bodyBold,
+    color: colors.textPrimary,
+  },
+  favoritesChevron: {
+    ...typography.h2,
+    color: colors.textSecondary,
+  },
   location: { ...typography.body, color: colors.textSecondary, marginTop: spacing.xs },
   fallbackBanner: {
     marginTop: spacing.md,

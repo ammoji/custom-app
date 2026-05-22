@@ -24,6 +24,12 @@ export type CandidateShop = {
   status?: string;
   location?: LatLng;
   distanceKm?: number;
+  // PR 20 — rolling rating stats. Optional so legacy shops without
+  // ratings still pass through; the search result join propagates
+  // both fields so SearchScreen can render ShopRatingBadge inline
+  // with each result row.
+  ratingAvg?: number;
+  ratingCount?: number;
 };
 
 export type RawMenuItem = {
@@ -43,6 +49,12 @@ export type SearchResultItem = {
     name: string;
     address: string;
     distanceKm?: number;
+    // PR 20 — propagate rolling rating stats so SearchScreen can
+    // render ShopRatingBadge per result row without a second
+    // round-trip. Both fields optional; missing/zero count =
+    // "New shop" branch in the badge.
+    ratingAvg?: number;
+    ratingCount?: number;
   };
 };
 
@@ -131,6 +143,15 @@ export function filterAndJoinSearchResults(input: {
         address: shop.address,
         ...(typeof shop.distanceKm === 'number'
           ? { distanceKm: shop.distanceKm }
+          : {}),
+        // PR 20 — propagate rating stats. Spread-conditionals so
+        // legacy shops without ratings round-trip with the same
+        // wire shape they had pre-PR 20.
+        ...(typeof shop.ratingAvg === 'number'
+          ? { ratingAvg: shop.ratingAvg }
+          : {}),
+        ...(typeof shop.ratingCount === 'number'
+          ? { ratingCount: shop.ratingCount }
           : {}),
       },
     });

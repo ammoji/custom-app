@@ -63,13 +63,30 @@ export function reduceWatcherUpdate(
 export type DeliveryFlags = {
   isAssigned: boolean;
   isAvailableForClaim: boolean;
+  /**
+   * PR 23 — the viewer is a delivery partner previewing an order
+   * that the shop has accepted or is preparing but has not yet
+   * flagged ready_for_pickup. The dashboard's "Heads up — coming
+   * soon" rail (PR 12) routes here on tap; the screen renders the
+   * order info with an info banner and no action button.
+   *
+   * Before PR 23 these orders fell into `isTerminalForOthers` and
+   * the screen wrongly rendered "Already taken". See the screen-
+   * branch ordering comment in DeliveryOrderDetailScreen.tsx.
+   */
+  isComingSoon: boolean;
   isPickedUp: boolean;
   isDelivered: boolean;
   /**
-   * The order is no longer actionable by the current viewer. Either
-   * a different delivery person claimed it, or it's already
-   * delivered. Drives the "claimed by another partner" /
-   * "already delivered" terminal EmptyState branch on the screen.
+   * The order is no longer actionable by the current viewer because
+   * a different delivery person claimed it, OR it was already
+   * delivered by someone else. Drives the "claimed by another
+   * partner" / "already delivered" terminal EmptyState branches on
+   * the screen.
+   *
+   * PR 23 narrowed this: it no longer catches orders that simply
+   * aren't ready_for_pickup yet (accepted/preparing) — those are
+   * `isComingSoon` instead.
    */
   isTerminalForOthers: boolean;
 };
@@ -77,6 +94,7 @@ export type DeliveryFlags = {
 export const FLAGS_NULL_ORDER: DeliveryFlags = {
   isAssigned: false,
   isAvailableForClaim: false,
+  isComingSoon: false,
   isPickedUp: false,
   isDelivered: false,
   isTerminalForOthers: false,
@@ -97,15 +115,29 @@ export function deriveDeliveryFlags(
     !isAssignedToMe &&
     isUnassigned &&
     order.status === 'ready_for_pickup';
+  // PR 23 — "coming soon" matches the server's AVAILABLE_POOL minus
+  // ready_for_pickup. The dashboard surfaces these to delivery
+  // partners so they can plan routes; tapping should preview, not
+  // dead-end into "Already taken".
+  const isComingSoon =
+    !!isDelivery &&
+    !isAssignedToMe &&
+    isUnassigned &&
+    (order.status === 'accepted' || order.status === 'preparing');
   const isPickedUp = !!order.pickedUpAt;
-  // "Terminal for others" = the viewer can't claim AND isn't the
-  // owner. Either someone else has it, or it's done. The screen
-  // uses this to render an EmptyState instead of dead buttons.
+  // PR 23 — narrowed semantics: claimed by another partner OR
+  // already delivered (and not by me). The previous formulation
+  // (`!isAssignedToMe && !isAvailableForClaim`) was a catch-all
+  // that swept accepted/preparing into "terminal", which produced
+  // the spurious "Already taken" message when a partner tapped a
+  // heads-up card.
+  const isClaimedByOther = !isUnassigned && !isAssignedToMe;
   const isTerminalForOthers =
-    !isAssignedToMe && !isAvailableForClaim;
+    isClaimedByOther || (isDelivered && !isAssignedToMe);
   return {
     isAssigned: isAssignedToMe,
     isAvailableForClaim,
+    isComingSoon,
     isPickedUp,
     isDelivered,
     isTerminalForOthers,

@@ -1,5 +1,6 @@
 import { useNavigation } from '@react-navigation/native';
-import React, { useEffect, useMemo, useState } from 'react';
+import * as Haptics from 'expo-haptics';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import EmptyState from '../../components/common/EmptyState';
@@ -20,6 +21,7 @@ import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
 import type { Order } from '../../types';
 import { formatOrderTime, formatRupees } from '../../utils/format';
+import { detectNewOrderIds } from '../../utils/detectNewOrderIds';
 import { handleRoleAuthError } from '../../utils/handleRoleAuthError';
 import { OrderStatus } from '../../utils/orderStateMachine';
 import { mapShopOrdersError } from '../../utils/shopOrdersErrorMessage';
@@ -90,6 +92,25 @@ export default function ShopOwnerDashboardScreen() {
   // when fresh data arrives, not on a fixed timeout.
   const [refreshing, setRefreshing] = useState(false);
 
+  // PR 16 — new-order alert state.
+  //
+  // ⚠️ Rules of Hooks: ALL useState calls in this screen MUST stay
+  // ABOVE the early-return guards below (`if (!isShopOwner)`,
+  // `if (loading)`). PR 12's ETA-modal hotfix was caused by adding
+  // useState below an early return; PRs 13 / 14 / 15 added the same
+  // discipline comment to OrdersScreen, HomeScreen, and the rails.
+  // Adding state below the role-guard / loader returns here would
+  // crash the dashboard the instant the watcher's first callback
+  // flips `loading` to false.
+  //
+  // `seenOrderIds` is the baseline set (or null on first tick —
+  // see detectNewOrderIds first-tick semantics). `newOrderIds` is
+  // the rolling "unread" set: highlighted with a primary border
+  // and a NEW tag, surfaced in the yellow banner above the list,
+  // and cleared on tap-card / scroll / banner-dismiss.
+  const [seenOrderIds, setSeenOrderIds] = useState<Set<string> | null>(null);
+  const [newOrderIds, setNewOrderIds] = useState<Set<string>>(new Set());
+
   useEffect(() => {
     if (!isShopOwner || !shopId) {
       setLoading(false);
@@ -111,6 +132,40 @@ export default function ShopOwnerDashboardScreen() {
       } else {
         setOrders(list);
         setError(null);
+        // PR 16 — detect new orders since last successful tick. We
+        // run the diff INSIDE the watcher callback so a polling
+        // tick that returns the same orders doesn't re-trigger
+        // haptics / banners on every render. Only successful
+        // callbacks update the seen baseline; an error callback
+        // leaves the baseline untouched so the next successful
+        // tick can still detect what arrived in the meantime.
+        const currentIds = list.map(o => o.id);
+        setSeenOrderIds(prevSeen => {
+          const detected = detectNewOrderIds(currentIds, prevSeen);
+          if (detected.size > 0) {
+            setNewOrderIds(prevNew => {
+              const merged = new Set(prevNew);
+              for (const id of detected) merged.add(id);
+              return merged;
+            });
+            // Single 'success'-style buzz per tick that has at
+            // least one new order, regardless of count. Multiple
+            // buzzes per tick would be jarring on the typical
+            // shopkeeper's countertop. Wrapped in .catch so a
+            // platform without haptics (web preview, sim) silently
+            // no-ops — the visual cues still fire.
+            Haptics.notificationAsync(
+              Haptics.NotificationFeedbackType.Success,
+            ).catch(() => {
+              /* haptics unavailable — visual alert still fires */
+            });
+          }
+          // Always advance the baseline to the current set so the
+          // NEXT tick has the right reference point. On first tick
+          // (prevSeen=null) this transitions us out of "baseline
+          // unset" silently.
+          return new Set(currentIds);
+        });
       }
       // ALWAYS clear loading on the first callback, regardless of
       // success/failure — the whole reason for the watcher contract
@@ -146,6 +201,16 @@ export default function ShopOwnerDashboardScreen() {
     if (showAll) return orders;
     return orders.filter(o => !TERMINAL_STATUSES.includes(o.status));
   }, [orders, showAll]);
+
+  // PR 16 — clear the "new" highlight on user acknowledgement.
+  // Wired to (a) card press, (b) banner press, (c) FlatList
+  // onScrollBeginDrag. Three independent ack paths cover every
+  // way a shopkeeper can plausibly engage with the screen. Cheap
+  // no-op if there's nothing to clear (avoids a spurious re-render
+  // every time the shopkeeper scrolls the list).
+  const clearNewHighlight = useCallback(() => {
+    setNewOrderIds(prev => (prev.size === 0 ? prev : new Set()));
+  }, []);
 
   if (!isShopOwner || !shopId) {
     return (
@@ -184,11 +249,31 @@ export default function ShopOwnerDashboardScreen() {
           </Pressable>
         </View>
       )}
+      {/* PR 16 — yellow banner above the list when there are
+          unacknowledged new orders. Tap dismisses; tapping a card
+          or scrolling also dismisses (see clearNewHighlight). */}
+      {newOrderIds.size > 0 && (
+        <Pressable
+          onPress={clearNewHighlight}
+          style={styles.newOrderBanner}
+          accessibilityRole="button"
+          accessibilityLabel={`${newOrderIds.size} new ${
+            newOrderIds.size === 1 ? 'order' : 'orders'
+          }. Tap to dismiss.`}
+        >
+          <Text style={styles.newOrderBannerText}>
+            🔔 {newOrderIds.size}{' '}
+            {newOrderIds.size === 1 ? 'new order' : 'new orders'}
+          </Text>
+          <Text style={styles.newOrderBannerHint}>Tap to dismiss</Text>
+        </Pressable>
+      )}
       <FlatList
         data={visibleOrders}
         keyExtractor={o => o.id}
         contentContainerStyle={styles.list}
         ItemSeparatorComponent={() => <View style={{ height: spacing.md }} />}
+        onScrollBeginDrag={clearNewHighlight}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -266,18 +351,30 @@ export default function ShopOwnerDashboardScreen() {
         }
         renderItem={({ item }) => {
           const itemCount = item.items.reduce((n, i) => n + i.quantity, 0);
+          // PR 16 — highlight orders that arrived in a recent
+          // watcher tick the shopkeeper hasn't yet acknowledged.
+          const isNew = newOrderIds.has(item.id);
           return (
             <Pressable
               style={({ pressed }) => [
                 styles.card,
+                isNew && styles.cardNew,
                 pressed && styles.cardBodyPressed,
               ]}
-              onPress={() =>
-                nav.navigate('ShopOrderDetail', { orderId: item.id })
-              }
+              onPress={() => {
+                clearNewHighlight();
+                nav.navigate('ShopOrderDetail', { orderId: item.id });
+              }}
               accessibilityRole="button"
-              accessibilityLabel={`Open details for order ${item.id}`}
+              accessibilityLabel={`Open details for order ${item.id}${
+                isNew ? ', new order' : ''
+              }`}
             >
+              {isNew && (
+                <View style={styles.newTag}>
+                  <Text style={styles.newTagText}>NEW</Text>
+                </View>
+              )}
               <View style={styles.cardHeader}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.orderId} numberOfLines={1}>
@@ -474,6 +571,54 @@ const styles = StyleSheet.create({
     borderRadius: radii.sm,
   },
   retryText: { ...typography.bodyBold, color: '#fff' },
+  // PR 16 — new-order alert visuals.
+  // Banner uses a warm-yellow background (the standard
+  // attention-but-not-danger colour across consumer apps) with a
+  // bold left-rail in `colors.warning` so it reads as informational
+  // even at a glance from across the counter.
+  newOrderBanner: {
+    backgroundColor: '#FEF3C7',
+    borderLeftWidth: 4,
+    borderLeftColor: colors.warning,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.md,
+    borderRadius: radii.md,
+  },
+  newOrderBannerText: { ...typography.bodyBold, color: colors.textPrimary },
+  newOrderBannerHint: {
+    ...typography.caption,
+    color: colors.textSecondary,
+  },
+  // Card border + tinted background mirrors PR 15's
+  // ActiveOrdersRail card aesthetic so the visual language for
+  // "live, needs attention" is consistent across customer-side
+  // and shopkeeper-side surfaces.
+  cardNew: {
+    borderWidth: 2,
+    borderColor: colors.primary,
+    backgroundColor: colors.primaryLight,
+  },
+  newTag: {
+    position: 'absolute',
+    top: spacing.sm,
+    right: spacing.sm,
+    backgroundColor: colors.primary,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: radii.sm,
+    zIndex: 1,
+  },
+  newTagText: {
+    ...typography.caption,
+    fontWeight: '700',
+    color: '#fff',
+    letterSpacing: 0.5,
+  },
   // PR 7 — delivery substate timeline. Style values copied verbatim
   // from AdminOrdersScreen so the two surfaces look identical when
   // an admin and a shop owner side-by-side compare an order's

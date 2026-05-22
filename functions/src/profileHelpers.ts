@@ -15,6 +15,7 @@
  * react-native — that's the testability contract. The Cloud Function
  * callable wires these helpers to HttpsError and FieldValue itself.
  */
+import { normalizeDeliveryInstructions } from './deliveryInstructionsHelpers';
 
 // -------------------------------------------------------------------
 // Types — kept local so the helpers don't depend on the client-side
@@ -30,6 +31,11 @@ export type AddressInput = {
   line2?: string | null;
   city?: string;
   pincode?: string;
+  // PR 22 — optional free-text instructions. Validated +
+  // normalized via normalizeDeliveryInstructions (see
+  // deliveryInstructionsHelpers); validator below treats it like
+  // line2 (collapse empty/whitespace to null, length-capped).
+  deliveryInstructions?: string | null;
 };
 
 export type ValidatedAddress = {
@@ -42,6 +48,11 @@ export type ValidatedAddress = {
   line2: string | null;
   city: string;
   pincode: string;
+  // PR 22 — normalized output. null means "absent"; non-null
+  // strings have been trimmed and length-checked. The Cloud
+  // Function strips null before writing so we don't store an
+  // explicit null on Firestore.
+  deliveryInstructions: string | null;
 };
 
 export type ProfilePatch = {
@@ -238,6 +249,21 @@ export function validateAddressInput(
     line2 = trimmed.length > 0 ? trimmed : null;
   }
 
+  // PR 22 — delivery instructions. Delegated to the shared pure
+  // helper so saveAddress + placeOrder enforce identical rules.
+  // The helper returns `undefined` for absent / whitespace-only;
+  // we collapse that to `null` to match the existing label / line2
+  // representation here.
+  const instr = normalizeDeliveryInstructions(input.deliveryInstructions);
+  if (!instr.ok) {
+    return {
+      ok: false,
+      field: 'deliveryInstructions',
+      message: instr.message,
+    };
+  }
+  const deliveryInstructions = instr.value ?? null;
+
   return {
     ok: true,
     value: {
@@ -248,6 +274,7 @@ export function validateAddressInput(
       line2,
       city: city.value,
       pincode: input.pincode.trim(),
+      deliveryInstructions,
     },
   };
 }

@@ -13,6 +13,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import EmptyState from '../components/common/EmptyState';
 import Loader from '../components/common/Loader';
+import ShopRatingBadge from '../components/shop/ShopRatingBadge';
 import { CATEGORIES } from '../constants/categories';
 import { colors, radii, spacing, typography } from '../constants/theme';
 import { orderService } from '../services/orderService';
@@ -45,7 +46,15 @@ import { formatRupees } from '../utils/format';
  */
 type Result = {
   menuItem: MenuItem;
-  shop: { id: string; name: string; address: string; distanceKm?: number };
+  shop: {
+    id: string;
+    name: string;
+    address: string;
+    distanceKm?: number;
+    // PR 20 — rolling rating stats propagated from searchMenuPublic.
+    ratingAvg?: number;
+    ratingCount?: number;
+  };
 };
 
 const DEBOUNCE_MS = 250;
@@ -150,6 +159,17 @@ export default function SearchScreen() {
                 ? ` · ${item.shop.distanceKm.toFixed(1)} km`
                 : ''}
             </Text>
+            {/* PR 20 — shop rolling rating badge sits beneath the
+                shop-name line so the customer sees the trust signal
+                without it competing with item name + price for the
+                top spot in the row. */}
+            <View style={styles.ratingRow}>
+              <ShopRatingBadge
+                ratingAvg={item.shop.ratingAvg}
+                ratingCount={item.shop.ratingCount}
+                size="sm"
+              />
+            </View>
             <Text style={styles.packLine} numberOfLines={1}>
               {item.menuItem.packLabel}
             </Text>
@@ -395,6 +415,9 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     marginTop: 2,
   },
+  // PR 20 — slim wrap so the badge has visible margin from
+  // shopLine and packLine without overlapping either.
+  ratingRow: { marginTop: 2, flexDirection: 'row' },
   packLine: {
     ...typography.caption,
     color: colors.textMuted,

@@ -294,6 +294,42 @@ export default function ShopOrderDetailScreen() {
           </Text>
         </View>
 
+        {/* PR 22 — customer-supplied delivery instructions (e.g.
+            "Ring second bell", "Gate locked after 9 PM"). Renders
+            above items + substitution preference so the shop owner
+            can read the access details while picking — and so the
+            delivery partner sees them after pickup. Silently
+            omitted when no instructions were given. */}
+        {order.deliveryAddress.deliveryInstructions && (
+          <View style={styles.dropInstructionsCard}>
+            <Text style={styles.dropInstructionsLabel}>
+              📝 Delivery instructions
+            </Text>
+            <Text style={styles.dropInstructionsValue}>
+              {order.deliveryAddress.deliveryInstructions}
+            </Text>
+          </View>
+        )}
+
+        {/* PR 21 — customer's substitution preference. Rendered
+            BEFORE items because it dictates how the shop handles an
+            unavailable line item. Legacy orders (missing field)
+            render the 'call_me' default explicitly — the safest
+            assumption when we don't know the customer's intent. */}
+        <View style={styles.customerPrefCard}>
+          <Text style={styles.customerPrefLabel}>
+            Customer&apos;s preference
+          </Text>
+          <Text style={styles.customerPrefValue}>
+            {!order.substitutionPreference ||
+            order.substitutionPreference === 'call_me'
+              ? '📞 Call before substituting or refunding'
+              : order.substitutionPreference === 'auto'
+                ? '🔄 Replace with similar items (shop picks)'
+                : '💰 Refund unavailable items — skip and adjust total'}
+          </Text>
+        </View>
+
         {/* Items — the section that motivated this PR */}
         <Text style={styles.sectionTitle}>
           Items ({itemCount})
@@ -657,4 +693,52 @@ const styles = StyleSheet.create({
     borderRadius: radii.sm,
   },
   retryText: { ...typography.bodyBold, color: '#fff' },
+  // PR 21 — shop-side substitution preference card. Tinted +
+  // accent-bordered so the shop owner can't miss it before they
+  // start fulfilling the order. Stronger visual treatment than the
+  // customer-side confirmation card by design — for the shop this
+  // is actionable; for the customer it's just a receipt.
+  customerPrefCard: {
+    backgroundColor: colors.primaryLight,
+    borderRadius: radii.md,
+    padding: spacing.md,
+    borderLeftWidth: 4,
+    borderLeftColor: colors.primary,
+    marginTop: spacing.md,
+  },
+  customerPrefLabel: {
+    ...typography.caption,
+    color: colors.primaryDark,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 2,
+  },
+  customerPrefValue: {
+    ...typography.bodyBold,
+    color: colors.primaryDark,
+  },
+  // PR 22 — soft-yellow tinted card. Different hue from the
+  // primary-tinted substitution-preference card so the shop owner
+  // can visually distinguish the two information types at a glance.
+  dropInstructionsCard: {
+    backgroundColor: '#FEF9E7',
+    borderRadius: radii.md,
+    padding: spacing.md,
+    borderLeftWidth: 4,
+    borderLeftColor: '#F4D03F',
+    marginTop: spacing.md,
+  },
+  dropInstructionsLabel: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  dropInstructionsValue: {
+    ...typography.body,
+    color: colors.textPrimary,
+  },
 });

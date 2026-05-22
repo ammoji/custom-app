@@ -52,6 +52,17 @@ export type Shop = {
   suspendedAt?: number | null;
   suspendedBy?: string | null;
   suspendedReason?: string | null;
+  // PR 20 — rolling rating statistics. Updated atomically inside
+  // submitOrderRating's transaction every time a customer rates an
+  // order from this shop. Both fields are 0 / missing for a new
+  // shop with no ratings yet (rendered as "New shop" by
+  // ShopRatingBadge). Distinct from the legacy `rating: number`
+  // field above (a placeholder seed value, never written to by
+  // any callable) — `ratingAvg` is the live, customer-driven
+  // metric. Future PRs can decommission the legacy field once
+  // every surface reads `ratingAvg` exclusively.
+  ratingAvg?: number;
+  ratingCount?: number;
 };
 
 // Returned by `listAllUsers` callable. Mirrors the subset of
@@ -158,6 +169,16 @@ export type Address = {
   city: string;
   pincode: string;
   phone: string;
+  // PR 22 — optional delivery instructions ("Ring second bell",
+  // "Leave at door, dog inside", "Gate locked after 9 PM"). Stored
+  // per-saved-address so the customer doesn't retype every order;
+  // CheckoutScreen pre-fills from the picked address and lets the
+  // customer override per-order (the override is captured on the
+  // order's deliveryAddress snapshot, the saved-address book row
+  // is untouched). Server caps the trimmed length at 280 chars via
+  // normalizeDeliveryInstructions. Missing / empty / whitespace-only
+  // input → undefined (field absent on the stored doc).
+  deliveryInstructions?: string;
 };
 
 // Phase 12a-v2-iv: saved address book on /users/{uid}.
@@ -190,6 +211,11 @@ export type SavedAddress = {
   pincode: string;
   createdAt: number;
   updatedAt: number;
+  // PR 22 — mirrors the field on the freestanding Address type.
+  // Free-text instructions for the delivery partner; capped at
+  // 280 chars server-side. See the comment on Address above for
+  // semantics + override-at-checkout rules.
+  deliveryInstructions?: string;
 };
 
 // User profile doc shape returned by the getMyProfile callable.
@@ -228,6 +254,18 @@ export type UserProfile = {
   defaultAddressId: string | null;
   createdAt: number | null;
   updatedAt: number | null;
+  // PR 19 — Per-shop favorites. Map of shopId → array of menuItemIds
+  // the customer has favorited at that shop. Missing key means "no
+  // favorites at that shop"; the server's applyFavoriteToggle helper
+  // also DELETES the key entirely when its array drops to empty, so
+  // an empty inner array should never appear in steady state.
+  //
+  // Per-shop scoping (rather than a flat list of menuItemIds) is
+  // intentional: a customer might favorite "Tata Sampann atta 5kg"
+  // at Mahesh Kirana. If Mahesh stops carrying it, the favorite
+  // is gone. But the customer's separate favorite for "Aashirvaad
+  // atta 5kg" at Test Kirana 2 keeps working independently.
+  favorites?: Record<string, string[]>;
 };
 
 export type PaymentMethod = 'cod' | 'online';
@@ -319,4 +357,39 @@ export type Order = {
     by: string;
     reason?: string;
   }>;
+  // PR 20 — customer-submitted rating. Set ONCE when the customer
+  // rates a delivered order. Updates are NOT allowed in MVP (would
+  // require recomputing the shop's rolling average from scratch).
+  // Missing field means "not yet rated"; OrderDetailScreen renders
+  // the prompt card while this is undefined and flips to a
+  // "Thanks for rating!" card once present.
+  rating?: OrderRating;
+  // PR 21 — customer's substitution preference. Captured ONCE at
+  // checkout. Tells the shop how to handle an item that turns out
+  // to be unavailable mid-fulfillment without a call interrupting
+  // the customer:
+  //   'call_me' (default) — shop MUST call before substituting or
+  //                         refunding. Safe choice; assumed on any
+  //                         order placed before this PR shipped.
+  //   'auto'              — shop picks an equivalent item.
+  //   'refund'            — shop drops the item + adjusts total.
+  // Missing field on legacy orders → ShopOrderDetail renders the
+  // call_me copy explicitly (safe), customer OrderDetail silently
+  // omits the section (no choice was made; nothing to confirm).
+  substitutionPreference?: SubstitutionPreference;
+};
+
+// PR 21 — substitution preference. Set ONCE at checkout. Tells the
+// shop how to handle an unavailable item without needing to call
+// the customer mid-fulfillment. See the field comment on Order
+// above for the full semantics + legacy-order rendering rules.
+export type SubstitutionPreference = 'call_me' | 'auto' | 'refund';
+
+// PR 20 — order rating. Stars are 1-5 inclusive integers; comment
+// is trimmed + capped at 500 chars by the server validator. ratedAt
+// is set server-side at submission (Date.now()).
+export type OrderRating = {
+  stars: 1 | 2 | 3 | 4 | 5;
+  comment?: string;
+  ratedAt: number;
 };

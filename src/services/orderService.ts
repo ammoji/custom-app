@@ -23,6 +23,7 @@ import type {
     Order,
     PaymentMethod,
     Shop,
+    SubstitutionPreference,
     UserInfo,
 } from '../types';
 import type { OrderStatus } from '../utils/orderStateMachine';
@@ -44,6 +45,10 @@ type PlaceOrderInput = {
   items: CartItem[];
   address: Address;
   paymentMethod: PaymentMethod;
+  // PR 21 — optional. CheckoutScreen always sets it (defaults to
+  // 'call_me' on mount); legacy callers that omit it round-trip
+  // unchanged because the server normalizes missing → 'call_me'.
+  substitutionPreference?: SubstitutionPreference;
 };
 
 type PlaceOrderResult = {
@@ -118,6 +123,12 @@ export const orderService = {
         items: compactItems,
         address: input.address,
         paymentMethod: input.paymentMethod,
+        // PR 21 — forward the substitution preference. Server
+        // re-validates via normalizeSubstitutionPreference; missing
+        // here is safe (server treats undefined as 'call_me').
+        ...(input.substitutionPreference
+          ? { substitutionPreference: input.substitutionPreference }
+          : {}),
       };
       let data: PlaceOrderResult;
       if (isNative) {
@@ -186,6 +197,27 @@ export const orderService = {
     }
     const fn = httpsCallable(functions, 'retryPayment');
     const result = await fn({ orderId });
+    return result.data as any;
+  },
+
+  // PR 20 — submit a 1-5 star rating (and optional comment) for a
+  // delivered order. Server validates auth + order ownership +
+  // delivered-status + no-prior-rating, then atomically writes
+  // the order's rating field and bumps the shop's rolling avg /
+  // count. Returns the canonical { stars, comment } so the caller
+  // can render its "Thanks for rating!" confirmation immediately.
+  async submitOrderRating(input: {
+    orderId: string;
+    stars: 1 | 2 | 3 | 4 | 5;
+    comment?: string;
+  }): Promise<{ ok: true; stars: number; comment?: string }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('submitOrderRating');
+      const result = await fn(input);
+      return result.data as any;
+    }
+    const fn = httpsCallable(functions, 'submitOrderRating');
+    const result = await fn(input);
     return result.data as any;
   },
 
@@ -582,7 +614,7 @@ export const orderService = {
   }): Promise<{
     items: Array<{
       menuItem: MenuItem;
-      shop: { id: string; name: string; address: string; distanceKm?: number };
+      shop: { id: string; name: string; address: string; distanceKm?: number; ratingAvg?: number; ratingCount?: number };
     }>;
   }> {
     if (isNative) {
@@ -591,7 +623,7 @@ export const orderService = {
       return result.data as {
         items: Array<{
           menuItem: MenuItem;
-          shop: { id: string; name: string; address: string; distanceKm?: number };
+          shop: { id: string; name: string; address: string; distanceKm?: number; ratingAvg?: number; ratingCount?: number };
         }>;
       };
     }
@@ -600,7 +632,7 @@ export const orderService = {
     return result.data as {
       items: Array<{
         menuItem: MenuItem;
-        shop: { id: string; name: string; address: string; distanceKm?: number };
+        shop: { id: string; name: string; address: string; distanceKm?: number; ratingAvg?: number; ratingCount?: number };
       }>;
     };
   },

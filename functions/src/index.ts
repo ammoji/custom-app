@@ -64,6 +64,20 @@ import {
 import { canReadOrder } from './getOrderAuth';
 import { computeOnlineDeliveryCount } from './onlineDeliveryCountHelpers';
 import {
+    applyFavoriteToggle,
+    validateToggleFavoriteInput,
+} from './favoritesHelpers';
+import {
+    computeNewRollingAverage,
+    validateRatingSubmission,
+} from './ratingHelpers';
+// PR 21 — DO NOT REMOVE. Auto-formatter risk per code-discipline.
+// Used by placeOrder below to normalize the substitution preference.
+import { normalizeSubstitutionPreference } from './substitutionHelpers';
+// PR 22 — used by both placeOrder (per-order override stamping) and
+// indirectly by saveAddress (via profileHelpers.validateAddressInput).
+import { normalizeDeliveryInstructions } from './deliveryInstructionsHelpers';
+import {
     promoteDefaultAfterDelete,
     validateAddressInput,
     validateProfilePatch,
@@ -173,6 +187,10 @@ type PlaceOrderInput = {
     phone: string;
   };
   paymentMethod: PaymentMethod;
+  // PR 21 — optional. Old clients won't send it; server defaults
+  // to 'call_me' via normalizeSubstitutionPreference. New clients
+  // send one of the three string values from the checkout picker.
+  substitutionPreference?: 'call_me' | 'auto' | 'refund';
 };
 
 export const placeOrder = onCall<PlaceOrderInput>(
@@ -196,6 +214,34 @@ export const placeOrder = onCall<PlaceOrderInput>(
     if (paymentMethod !== 'cod' && paymentMethod !== 'online') {
       throw new HttpsError('invalid-argument', 'Invalid paymentMethod');
     }
+
+    // PR 21 — normalize the substitution preference. Undefined /
+    // null (old clients) → 'call_me'. Unknown strings reject with
+    // invalid-argument; we don't want typos persisted on the doc
+    // since the shop UI can't render them.
+    const subResult = normalizeSubstitutionPreference(
+      (request.data as { substitutionPreference?: unknown })
+        ?.substitutionPreference,
+    );
+    if (!subResult.ok) {
+      throw new HttpsError(subResult.code, subResult.message);
+    }
+    const substitutionPreference = subResult.value;
+
+    // PR 22 — normalize the customer's delivery instructions. The
+    // existing per-field address validation above doesn't know about
+    // the new optional field. Same allowlist + length rules saveAddress
+    // uses (delegated to deliveryInstructionsHelpers so both callables
+    // can't diverge). Missing / whitespace-only → undefined; we then
+    // stamp it onto the deliveryAddress snapshot only when set, to
+    // keep legacy doc shape stable.
+    const instrResult = normalizeDeliveryInstructions(
+      (address as { deliveryInstructions?: unknown })?.deliveryInstructions,
+    );
+    if (!instrResult.ok) {
+      throw new HttpsError(instrResult.code, instrResult.message);
+    }
+    const deliveryInstructions = instrResult.value;
 
     const shopSnap = await db.doc(`shops/${shopId}`).get();
     if (!shopSnap.exists) throw new HttpsError('not-found', 'Shop not found');
@@ -418,12 +464,33 @@ export const placeOrder = onCall<PlaceOrderInput>(
       subtotal,
       deliveryFee,
       total,
-      deliveryAddress: address,
+      // PR 22 — stamp the normalized instructions onto the snapshot.
+      // We first strip the raw field from the spread (so a client-
+      // sent whitespace-only string doesn't survive into the doc),
+      // then re-add ONLY the trimmed value when present. Pre-PR-22
+      // orders simply have no field here.
+      deliveryAddress: (() => {
+        const { deliveryInstructions: _drop, ...rest } =
+          address as Record<string, unknown>;
+        void _drop;
+        return {
+          ...rest,
+          ...(deliveryInstructions !== undefined
+            ? { deliveryInstructions }
+            : {}),
+        };
+      })(),
       paymentMethod,
       paymentStatus,
       ...(razorpayOrderId ? { razorpayOrderId } : {}),
       status: 'pending',
       statusHistory: [{ status: 'pending', at: now, by: 'system' }],
+      // PR 21 — substitution preference captured at checkout. Always
+      // present on new orders (defaults to 'call_me' for old clients
+      // that omit the field); legacy orders predate this and have
+      // it missing entirely. ShopOrderDetail treats missing as
+      // 'call_me' to be safe.
+      substitutionPreference,
       estimatedDeliveryAt: now + etaMinutes * 60_000,
       createdAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
@@ -4534,6 +4601,10 @@ type StoredAddress = {
   pincode: string;
   createdAt: number;
   updatedAt: number;
+  // PR 22 — optional, omitted from the stored doc when absent
+  // (we don't write the key at all if null) so old reads round-trip
+  // unchanged. saveAddress strips null below before write.
+  deliveryInstructions?: string;
 };
 
 type StoredProfile = {
@@ -4545,6 +4616,9 @@ type StoredProfile = {
   defaultAddressId?: string | null;
   createdAt?: number | null;
   updatedAt?: number | null;
+  // PR 19 — per-shop favorites map. See `src/types/index.ts` for
+  // the full doc block; the wire shape is identical client + server.
+  favorites?: Record<string, string[]>;
 } & Record<string, unknown>;
 
 function publicProfileShape(uid: string, data: StoredProfile) {
@@ -4555,6 +4629,15 @@ function publicProfileShape(uid: string, data: StoredProfile) {
   for (const [k, v] of Object.entries(data)) {
     if (!PROFILE_INTERNAL_FIELDS.has(k)) out[k] = v;
   }
+  // PR 19 — favorites round-trip the profile shape. We only emit
+  // the field when the underlying doc has a non-empty map so legacy
+  // profiles without favorites stay at the same wire size.
+  const rawFavorites = out.favorites;
+  const favorites: Record<string, string[]> | undefined =
+    rawFavorites && typeof rawFavorites === 'object'
+      ? (rawFavorites as Record<string, string[]>)
+      : undefined;
+
   return {
     uid,
     phone: (out.phone as string) ?? null,
@@ -4564,6 +4647,7 @@ function publicProfileShape(uid: string, data: StoredProfile) {
     defaultAddressId: (out.defaultAddressId as string) ?? null,
     createdAt: typeof out.createdAt === 'number' ? out.createdAt : null,
     updatedAt: typeof out.updatedAt === 'number' ? out.updatedAt : null,
+    favorites,
   };
 }
 
@@ -4716,6 +4800,12 @@ export const saveAddress = onCall<AddressInput>(
         pincode: result.value.pincode,
         createdAt,
         updatedAt: now,
+        // PR 22 — only include the key when the validator returned
+        // a non-null trimmed string. Avoids storing explicit nulls
+        // on Firestore (legacy doc shape compatibility).
+        ...(result.value.deliveryInstructions !== null
+          ? { deliveryInstructions: result.value.deliveryInstructions }
+          : {}),
       };
       existing[targetIdx] = next;
 
@@ -4840,4 +4930,188 @@ export const setDefaultAddress = onCall<{ id: string }>(
   },
 );
 
+// PR 19 — toggle a per-shop menu-item favorite on the caller's
+// profile. Pure helpers in `favoritesHelpers.ts` own the validation
+// + state machine; this callable is the firebase-admin glue.
+//
+// Note: we DO NOT validate that menuItemId actually exists in the
+// shop's current menu. That's deliberate. If a shop removes an
+// item, the customer's favorite for it should silently become
+// "unavailable" on FavoritesScreen (handled client-side via the
+// per-shop menu fetch), not throw at toggle time. Cheaper, simpler,
+// more forgiving UX — and matches the "favorites can outlive a
+// shop's menu" rationale documented on the type in
+// `src/types/index.ts`.
+export const toggleFavorite = onCall<{
+  shopId: string;
+  menuItemId: string;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const auth = request.auth;
+    const check = validateToggleFavoriteInput(
+      auth ? { uid: auth.uid } : null,
+      (request.data ?? {}) as { shopId: unknown; menuItemId: unknown },
+    );
+    if (!check.ok) {
+      throw new HttpsError(check.code, check.message);
+    }
+    const { shopId, menuItemId } = check;
+    const uid = auth!.uid;
+
+    const ref = db.doc(`users/${uid}`);
+
+    // Transaction so a rapid double-tap (mobile users LOVE
+    // double-tapping hearts) doesn't race-condition the array. The
+    // pure helper is read-modify-write; without the tx, two
+    // parallel toggles could both read the same baseline and
+    // overwrite each other.
+    const { isFavorite } = await db.runTransaction(async tx => {
+      const snap = await tx.get(ref);
+      const data: StoredProfile = snap.exists
+        ? (snap.data() as StoredProfile)
+        : {};
+      const result = applyFavoriteToggle(
+        data.favorites,
+        shopId,
+        menuItemId,
+      );
+      tx.set(
+        ref,
+        {
+          favorites: result.favorites,
+          updatedAt: Date.now(),
+        },
+        { merge: true },
+      );
+      return result;
+    });
+
+    const finalSnap = await ref.get();
+    return {
+      profile: publicProfileShape(
+        uid,
+        (finalSnap.data() ?? {}) as StoredProfile,
+      ),
+      isFavorite,
+    };
+  },
+);
+
+// PR 20 — submit a 1-5 star rating + optional comment for a
+// delivered order. Atomic: writes the rating onto the order doc
+// AND bumps the shop's rolling avg + count in a single
+// transaction. If either fails, both roll back — no half-rated
+// orders, no double-counted shops.
+//
+// Re-reads inside the transaction guard the double-tap race
+// (customer hits Submit twice quickly): the second tx sees the
+// just-written rating and throws `failed-precondition`. Helpers
+// in `ratingHelpers.ts` own validation + the rolling-avg math;
+// this callable is the firebase-admin glue + audit-log emitter.
+export const submitOrderRating = onCall<{
+  orderId: string;
+  stars: number;
+  comment?: string;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const auth = request.auth;
+    const { orderId, stars, comment } = (request.data ?? {}) as {
+      orderId?: string;
+      stars?: number;
+      comment?: string;
+    };
+    if (typeof orderId !== 'string' || orderId.length === 0) {
+      throw new HttpsError('invalid-argument', 'orderId required');
+    }
+
+    const orderRef = db.doc(`orders/${orderId}`);
+    const orderSnap = await orderRef.get();
+    const orderData = orderSnap.exists ? (orderSnap.data() as any) : null;
+
+    const check = validateRatingSubmission({
+      auth: auth ? { uid: auth.uid } : null,
+      order: orderData,
+      stars,
+      comment,
+    });
+    if (!check.ok) {
+      throw new HttpsError(check.code, check.message);
+    }
+    const { shopId, stars: validStars, comment: validComment } = check;
+
+    const shopRef = db.doc(`shops/${shopId}`);
+    const now = Date.now();
+
+    await db.runTransaction(async tx => {
+      // Re-read inside the transaction so a rapid double-submit
+      // hits the prior-rating check on the second invocation
+      // rather than racing with the first write.
+      const orderInTx = await tx.get(orderRef);
+      if (!orderInTx.exists) {
+        throw new HttpsError('not-found', 'Order vanished mid-rating');
+      }
+      const orderTxData = orderInTx.data() as any;
+      if (orderTxData.rating) {
+        throw new HttpsError(
+          'failed-precondition',
+          'This order has already been rated',
+        );
+      }
+      const shopInTx = await tx.get(shopRef);
+      const shopTxData = shopInTx.exists ? (shopInTx.data() as any) : {};
+
+      const { newAvg, newCount } = computeNewRollingAverage(
+        shopTxData.ratingAvg,
+        shopTxData.ratingCount,
+        validStars,
+      );
+
+      // Build the rating payload conditionally — Firestore rejects
+      // explicit `undefined` field values, so omit comment when
+      // absent rather than setting it to undefined.
+      const ratingPayload: Record<string, unknown> = {
+        stars: validStars,
+        ratedAt: now,
+      };
+      if (validComment) ratingPayload.comment = validComment;
+
+      tx.update(orderRef, {
+        rating: ratingPayload,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      tx.set(
+        shopRef,
+        {
+          ratingAvg: newAvg,
+          ratingCount: newCount,
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+    });
+
+    // Audit log (non-fatal — PR 8 wrapper pattern; a failed audit
+    // write must not break the user-visible action that triggered
+    // it). hasComment lets ops query "ratings with comments" without
+    // exposing the comment text in the audit doc.
+    await writeAuditLog({
+      actorUid: auth!.uid,
+      actorRole: 'customer',
+      actionType: 'order.rate',
+      targetType: 'order',
+      targetId: orderId,
+      metadata: {
+        shopId,
+        stars: validStars,
+        hasComment: !!validComment,
+      },
+    }).catch(e =>
+      console.warn('[submitOrderRating] writeAuditLog failed:', e),
+    );
+
+    return { ok: true, stars: validStars, comment: validComment };
+  },
+);
 

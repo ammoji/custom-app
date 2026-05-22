@@ -29,6 +29,16 @@ type CartState = {
   decrement: (productId: string) => void;
   removeItem: (productId: string) => void;
   clearCart: () => void;
+  // PR 13 — atomic clear-and-replace for the repeat-order flow.
+  // Mirrors the multi-shop replacement UX of Swiggy/Zomato:
+  // tapping Reorder always REPLACES the cart (never merges), so
+  // there's no "merge mode". Caller is responsible for passing
+  // CartItems already at current prices (planToCartItems
+  // guarantees this).
+  replaceCartWithItems: (
+    items: CartItem[],
+    shop: { id: string; name: string; deliveryFee: number },
+  ) => void;
 
   subtotal: () => number;
   total: () => number;
@@ -212,6 +222,32 @@ export const useCartStore = create<CartState>()(
 
   clearCart: () =>
     set({ items: [], shopId: null, shopName: null, deliveryFee: 0 }),
+
+  // PR 13 — repeat order. Atomic clear-and-replace so the reorder
+  // flow swaps the cart in one Zustand set() call instead of N
+  // sequential forceAddMenuItem calls (which would each emit an
+  // add_to_cart Analytics event and could cross shopId guards if
+  // the previous cart was from a different shop). The reorder
+  // primitive is also reusable: saved-shopping-list and
+  // weekly-recurring features (tracked in PRELAUNCH_CHECKLIST)
+  // will lean on this same method.
+  replaceCartWithItems: (items, shop) => {
+    set({
+      items,
+      shopId: shop.id,
+      shopName: shop.name,
+      deliveryFee: shop.deliveryFee,
+    });
+    // One synthetic add_to_cart event for the whole bundle. Using
+    // product_id: 'reorder' to distinguish reorder-driven adds in
+    // the analytics dashboard from organic browse adds.
+    Analytics.add_to_cart({
+      product_id: 'reorder',
+      shop_id: shop.id,
+      price: items.reduce((s, i) => s + i.price * i.quantity, 0),
+      quantity: items.reduce((n, i) => n + i.quantity, 0),
+    });
+  },
 
       subtotal: () =>
         get().items.reduce((sum, i) => sum + i.price * i.quantity, 0),

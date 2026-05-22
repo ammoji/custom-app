@@ -52,6 +52,7 @@ export default function DeliveryOrderDetailScreen() {
     error,
     isAssigned,
     isAvailableForClaim,
+    isComingSoon,
     isPickedUp,
     isDelivered,
     isTerminalForOthers,
@@ -174,7 +175,14 @@ export default function DeliveryOrderDetailScreen() {
   }
 
   const itemCount = order.items.reduce((n, i) => n + i.quantity, 0);
-  const headerTitle = isAvailableForClaim ? 'Pickup details' : 'Delivery';
+  const headerTitle =
+    isAvailableForClaim || isComingSoon ? 'Pickup details' : 'Delivery';
+  // PR 23 — coming-soon banner copy. We surface the shop's state
+  // verbatim so the partner can read intent ("the shop just
+  // accepted" vs "the shop is preparing"); the ETA line below
+  // adds time-to-ready when the shopkeeper has set one.
+  const comingSoonState =
+    order.status === 'preparing' ? 'preparing your order' : 'just accepted';
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -193,6 +201,26 @@ export default function DeliveryOrderDetailScreen() {
         </View>
       )}
       <ScrollView contentContainerStyle={styles.content}>
+        {/* PR 23 — coming-soon banner. Surfaced above every other
+            card so a partner who tapped a HeadsUpCard on the
+            dashboard immediately understands why there's no Accept
+            button below: the shop hasn't signalled ready yet. Before
+            PR 23 this state rendered as "Already taken" — see the
+            useDeliveryOrderDetail hook's deriveDeliveryFlags. */}
+        {isComingSoon && (
+          <View style={styles.comingSoonCard}>
+            <Text style={styles.comingSoonTitle}>⏳ Not yet ready for pickup</Text>
+            <Text style={styles.comingSoonBody}>
+              The shop is {comingSoonState}. You'll be able to accept this
+              pickup as soon as the shop marks it ready.
+            </Text>
+            {order.readyByEstimate ? (
+              <Text style={styles.comingSoonEta}>
+                Ready by {formatOrderTime(order.readyByEstimate)}
+              </Text>
+            ) : null}
+          </View>
+        )}
         <View style={styles.card}>
           <Text style={styles.label}>Pickup from</Text>
           <Text style={styles.value}>{order.shopName}</Text>
@@ -239,6 +267,22 @@ export default function DeliveryOrderDetailScreen() {
             <Text style={styles.link}>📍 Directions to customer</Text>
           </Pressable>
         </View>
+
+        {/* PR 22 — delivery instructions card. Most actionable
+            surface in the app for this field — the delivery partner
+            is the one ringing the bell / finding the door. Yellow-
+            tinted with a left accent so it's impossible to miss on
+            arrival. Silently omitted on legacy orders. */}
+        {order.deliveryAddress.deliveryInstructions && (
+          <View style={styles.dropInstructionsCard}>
+            <Text style={styles.dropInstructionsLabel}>
+              📝 Delivery instructions
+            </Text>
+            <Text style={styles.dropInstructionsValue}>
+              {order.deliveryAddress.deliveryInstructions}
+            </Text>
+          </View>
+        )}
 
         <View style={styles.card}>
           <Text style={styles.label}>Items ({itemCount})</Text>

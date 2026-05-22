@@ -12,10 +12,12 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Badge from '../components/common/Badge';
 import EmptyState from '../components/common/EmptyState';
+import FavoriteHeart from '../components/common/FavoriteHeart';
 import Loader from '../components/common/Loader';
 import Price from '../components/common/Price';
 import QuantityStepper from '../components/common/QuantityStepper';
 import ScreenHeader from '../components/common/ScreenHeader';
+import ShopRatingBadge from '../components/shop/ShopRatingBadge';
 import { CATEGORIES } from '../constants/categories';
 import { colors, radii, spacing, typography } from '../constants/theme';
 import { Analytics } from '../services/analytics';
@@ -192,10 +194,21 @@ export default function ShopDetailScreen() {
                 />
               </View>
               <Text style={styles.address}>{shop.address}</Text>
+              {/* PR 20 — prominent rolling-rating badge on the
+                  shop's own page (size="md"). Sits above the
+                  meta line so it reads as a primary trust signal
+                  rather than mixed in with delivery / ETA / fee. */}
+              <View style={styles.ratingRow}>
+                <ShopRatingBadge
+                  ratingAvg={shop.ratingAvg}
+                  ratingCount={shop.ratingCount}
+                  size="md"
+                />
+              </View>
               <Text style={styles.meta}>
-                ★ {shop.rating} · {formatDistance(shop.distanceKm)} ·{' '}
-                {shop.etaMinutes} min · {formatRupees(shop.deliveryFee)}{' '}
-                delivery · Min {formatRupees(shop.minOrder)}
+                {formatDistance(shop.distanceKm)} · {shop.etaMinutes} min ·{' '}
+                {formatRupees(shop.deliveryFee)} delivery · Min{' '}
+                {formatRupees(shop.minOrder)}
               </Text>
             </View>
           </View>
@@ -217,6 +230,7 @@ export default function ShopDetailScreen() {
           <View style={styles.productRow}>
             <MenuItemCard
               item={item}
+              shopId={shop.id}
               onAdd={() => onAdd(item)}
               quantityInCart={qtyInCart(item)}
               onIncrement={() => increment(item.productId ?? item.id)}
@@ -249,6 +263,7 @@ export default function ShopDetailScreen() {
 // have to synthesize a Product shape per render.
 function MenuItemCard({
   item,
+  shopId,
   onAdd,
   quantityInCart,
   onIncrement,
@@ -256,6 +271,7 @@ function MenuItemCard({
   disabled,
 }: {
   item: MenuItem;
+  shopId: string;
   onAdd: () => void;
   quantityInCart: number;
   onIncrement: () => void;
@@ -269,9 +285,16 @@ function MenuItemCard({
     <View style={[styles.card, disabled && styles.cardDisabled]}>
       <Image source={{ uri: item.imageUrl }} style={styles.cardImage} />
       <View style={styles.cardBody}>
-        <Text style={styles.cardName} numberOfLines={2}>
-          {item.name}
-        </Text>
+        <View style={styles.cardTitleRow}>
+          <Text style={styles.cardName} numberOfLines={2}>
+            {item.name}
+          </Text>
+          {/* PR 19 — favorite heart sits in the title row so it
+              doesn't displace the +/- controls below. Visible
+              regardless of cart state; tapping while signed-out
+              shows the "Sign in to save favorites" Alert. */}
+          <FavoriteHeart shopId={shopId} menuItemId={item.id} size={20} />
+        </View>
         <Text style={styles.cardPack}>{item.packLabel}</Text>
         <View style={styles.cardBottomRow}>
           <Price value={item.price} mrp={item.mrp} size="sm" />
@@ -307,6 +330,10 @@ const styles = StyleSheet.create({
   titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm },
   address: { ...typography.body, color: colors.textSecondary, marginTop: spacing.xs },
   meta: { ...typography.caption, marginTop: spacing.sm },
+  // PR 20 — spacer for the size="md" rating badge on the shop
+  // header. flex-row so the inline badge layout doesn't get
+  // stretched to row width.
+  ratingRow: { marginTop: spacing.sm, flexDirection: 'row' },
   sectionHeader: {
     backgroundColor: colors.bg,
     paddingHorizontal: spacing.lg,
@@ -347,7 +374,15 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
   },
   cardBody: { flex: 1, justifyContent: 'space-between' },
-  cardName: { ...typography.body, fontWeight: '600' },
+  // PR 19 — title row holds name + favorite heart on one line so
+  // the +/- controls below stay visually anchored.
+  cardTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+  },
+  cardName: { ...typography.body, fontWeight: '600', flex: 1 },
   cardPack: { ...typography.caption, marginTop: 2 },
   cardBottomRow: {
     flexDirection: 'row',

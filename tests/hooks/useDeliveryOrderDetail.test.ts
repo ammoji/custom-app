@@ -165,7 +165,12 @@ describe('deriveDeliveryFlags', () => {
     expect(flags.isTerminalForOthers).toBe(false);
   });
 
-  test('order not yet ready_for_pickup (e.g. preparing) → not available, terminal for others', () => {
+  test('PR 23 — order in preparing → coming-soon preview, NOT terminal', () => {
+    // Before PR 23 this test asserted `isTerminalForOthers: true`
+    // and the screen rendered "Already taken" on tap from the
+    // HeadsUpCard. That was the user-reported bug. The flag now
+    // splits into isComingSoon vs isTerminalForOthers — pinning the
+    // new contract.
     const flags = deriveDeliveryFlags(
       mkOrder({ status: 'preparing' }),
       'me',
@@ -173,7 +178,49 @@ describe('deriveDeliveryFlags', () => {
     );
     expect(flags.isAvailableForClaim).toBe(false);
     expect(flags.isAssigned).toBe(false);
+    expect(flags.isComingSoon).toBe(true);
+    expect(flags.isTerminalForOthers).toBe(false);
+  });
+
+  test('PR 23 — order in accepted → coming-soon preview, NOT terminal', () => {
+    // The other half of the AVAILABLE_POOL minus ready_for_pickup.
+    // Server can return accepted orders to listAvailableDeliveries
+    // (see functions/src/index.ts AVAILABLE_POOL_STATUSES); the
+    // client must classify them as preview, not terminal.
+    const flags = deriveDeliveryFlags(
+      mkOrder({ status: 'accepted' }),
+      'me',
+      true,
+    );
+    expect(flags.isComingSoon).toBe(true);
+    expect(flags.isAvailableForClaim).toBe(false);
+    expect(flags.isTerminalForOthers).toBe(false);
+  });
+
+  test('PR 23 — accepted + claimed by ANOTHER partner → terminal, not coming-soon', () => {
+    // Defensive: the dashboard wouldn't normally surface this
+    // (server filters deliveryPersonId == null) but a deep-link
+    // could land here. Claimed-by-other should still take
+    // precedence over the coming-soon preview branch.
+    const flags = deriveDeliveryFlags(
+      mkOrder({ status: 'accepted', deliveryPersonId: 'someone_else' }),
+      'me',
+      true,
+    );
+    expect(flags.isComingSoon).toBe(false);
     expect(flags.isTerminalForOthers).toBe(true);
+  });
+
+  test('PR 23 — coming-soon requires the delivery role', () => {
+    // Mirrors the gate on isAvailableForClaim. A non-delivery
+    // viewer (e.g. a customer somehow landing here via a stale
+    // link) should not see the partner-facing preview UI.
+    const flags = deriveDeliveryFlags(
+      mkOrder({ status: 'preparing' }),
+      'me',
+      false,
+    );
+    expect(flags.isComingSoon).toBe(false);
   });
 
   test('empty-string deliveryPersonId is treated as unassigned', () => {
