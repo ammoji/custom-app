@@ -389,6 +389,44 @@ callables piecemeal.
       (the repo has no precedent for storage-rule emulator tests).
       Adding one would pin "non-admin reads denied" + "all writes
       denied" against a future rule edit.
+- [x] **Admin shop-review polish** — [Shipped — PR 31.1].
+      Three small UX gaps surfaced in PR 31 smoke testing, all
+      closed on the admin side. (1) Lat/lng coords in both
+      `ShopRegistrationDetailScreen` and `ShopDetailManagementScreen`
+      are now tappable links that open the device's preferred
+      maps handler via a universal Google Maps URL — new utility
+      `src/utils/openMapsForCoords.ts` + 4 tests in
+      `tests/utils/openMapsForCoords.test.ts`. (2)
+      `ShopDetailManagementScreen` now renders a
+      `rejectedCard` (red left-border accent) showing
+      `shop.rejectedReason` + `formatOrderTime(shop.rejectedAt)` for
+      rejected shops, instead of just the "no available actions"
+      one-liner. (3) KYC docs grid + tap-to-zoom modal mirrored
+      from `ShopRegistrationDetailScreen` into
+      `ShopDetailManagementScreen` so admin can pull original KYC
+      evidence post-approval for customer disputes (works for
+      active / suspended / rejected — server-side
+      `getShopKycReadUrls` has no status gate, only an admin gate).
+      Zero server / rules / native changes — OTA-only. Total: 627
+      tests pass (+4) + tsc clean.
+- [ ] **Lift `AdminShopKycGrid` to a shared component** — PR 31.1
+      kept the KYC grid + zoom modal inline-copied in both admin
+      screens (`ShopRegistrationDetailScreen` and
+      `ShopDetailManagementScreen`) because each surface's UX may
+      diverge over time (e.g. dispute-view may add re-request
+      actions). If divergence proves false after a few more
+      iterations, lift to `src/components/shop/AdminShopKycGrid.tsx`.
+- [ ] **In-app map embed for shop locations** — PR 31.1 deep-links
+      to the device's maps handler. A `react-native-maps` embed
+      would be nicer UX but adds a heavy native dep purely for
+      admin convenience. Justify once a customer-facing map need
+      lands (Phase D PR 53).
+- [ ] **Audit-log "admin viewed KYC docs" event** — privacy
+      consideration worth tracking once we add real customer
+      disputes / regulator review. Today the access is silent.
+      Add a low-priority `auditLog` entry on every
+      `getShopKycReadUrls` call so we can answer "who looked at
+      shop X's docs and when".
 - [ ] **Storefront photo display on shop card** — PR 31 collects
       the storefront photo as part of KYC but the shop catalog
       (`HomeScreen`, `ShopMenuScreen`) still uses the legacy

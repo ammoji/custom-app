@@ -2,6 +2,7 @@ import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
     Alert,
+    Image,
     Keyboard,
     KeyboardAvoidingView,
     Modal,
@@ -23,8 +24,28 @@ import { colors, radii, shadow, spacing, typography } from '../../constants/them
 import type { RootStackParamList } from '../../navigation/AppNavigator';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
-import type { Shop } from '../../types';
+import type { Shop, ShopKycDocKind } from '../../types';
 import { formatOrderTime } from '../../utils/format';
+import { openMapsForCoords } from '../../utils/openMapsForCoords';
+
+// PR 31.1 — mirror of the KYC slot ordering + labels from
+// `ShopRegistrationDetailScreen`. Kept inline (instead of a shared
+// component) because the duplicated block is small and the
+// two surfaces' UX is expected to diverge over time (e.g. admin
+// dispute view may add re-request actions). If divergence proves
+// false in a future PR, lift into `src/components/shop/AdminShopKycGrid.tsx`.
+const KYC_KINDS_ORDERED: ShopKycDocKind[] = [
+  'storefront',
+  'gstDoc',
+  'fssaiDoc',
+  'ownerIdDoc',
+];
+const KYC_LABELS_ADMIN: Record<ShopKycDocKind, string> = {
+  storefront: 'Storefront',
+  gstDoc: 'GST certificate',
+  fssaiDoc: 'FSSAI license',
+  ownerIdDoc: 'Owner ID',
+};
 
 /**
  * Admin shop detail with suspend/unsuspend actions. Pending shops
@@ -44,6 +65,14 @@ export default function ShopDetailManagementScreen() {
   const [pending, setPending] = useState<'suspend' | 'unsuspend' | null>(null);
   const [showSuspendModal, setShowSuspendModal] = useState(false);
   const [reason, setReason] = useState('');
+  // PR 31.1 — KYC docs viewer state. Mirrors the pattern PR 31
+  // added to `ShopRegistrationDetailScreen`: fetch signed-read
+  // URLs once the admin is verified, render a 2x2 grid, tap a
+  // thumbnail to zoom. State sits ABOVE the early returns so the
+  // hook order is stable on every render path (Rules-of-Hooks).
+  const [kycUrls, setKycUrls] = useState<Record<string, string>>({});
+  const [kycLoading, setKycLoading] = useState(true);
+  const [zoomUrl, setZoomUrl] = useState<string | null>(null);
 
   const fetchShop = useCallback(async () => {
     try {
@@ -71,6 +100,37 @@ export default function ShopDetailManagementScreen() {
       nav.replace('ShopRegistrationDetail', { shopId: shop.id });
     }
   }, [shop, nav]);
+
+  // PR 31.1 — fetch KYC signed-read URLs for any uploaded docs.
+  // Unlike `ShopRegistrationDetailScreen`, this runs for active /
+  // suspended / rejected shops too — admin needs to be able to
+  // pull the original KYC evidence post-approval for customer
+  // disputes. Server-side `getShopKycReadUrls` does not gate by
+  // status (admin-only check), so the data is available.
+  useEffect(() => {
+    if (!isAdmin || !shopId) {
+      setKycLoading(false);
+      return;
+    }
+    let cancelled = false;
+    orderService
+      .getShopKycReadUrls({ shopId })
+      .then(({ urls }) => {
+        if (!cancelled) setKycUrls(urls);
+      })
+      .catch(e => {
+        console.warn(
+          '[ShopDetailManagement] getShopKycReadUrls failed:',
+          e,
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setKycLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdmin, shopId]);
 
   const handleUnsuspend = async () => {
     if (!shop) return;
@@ -197,6 +257,36 @@ export default function ShopDetailManagementScreen() {
               value={formatOrderTime(shop.approvedAt)}
             />
           ) : null}
+          {/* PR 31.1 — tappable coords. Mirrors the pattern
+              in `ShopRegistrationDetailScreen`. (0,0) sentinel
+              is treated as "no GPS" with a plain-text fallback. */}
+          {shop.location &&
+          (shop.location.lat !== 0 || shop.location.lng !== 0) ? (
+            <Pressable
+              onPress={() =>
+                openMapsForCoords(
+                  shop.location.lat,
+                  shop.location.lng,
+                  shop.name,
+                )
+              }
+              accessibilityRole="link"
+              accessibilityLabel={`Open ${shop.name} location in maps`}
+              hitSlop={8}
+              style={{ marginTop: spacing.sm }}
+            >
+              <Text style={[styles.helper, styles.mapLink]}>
+                📍 {shop.location.lat.toFixed(4)},{' '}
+                {shop.location.lng.toFixed(4)}
+                {'  '}
+                <Text style={styles.mapLinkArrow}>↗︎</Text>
+              </Text>
+            </Pressable>
+          ) : (
+            <Text style={[styles.helper, { marginTop: spacing.sm }]}>
+              📍 No GPS provided at registration.
+            </Text>
+          )}
         </View>
 
         {shop.registrationData && (
@@ -244,6 +334,59 @@ export default function ShopDetailManagementScreen() {
           </View>
         ) : null}
 
+        {/* PR 31.1 — KYC documents card. Renders for any non-pending
+            shop the admin can view (pending shops are redirected to
+            `ShopRegistrationDetail`). Customer disputes post-approval
+            require pulling the original KYC evidence, so the docs
+            stay visible for active / suspended / rejected shops. */}
+        <View style={styles.card}>
+          <Text style={styles.label}>KYC documents</Text>
+          {kycLoading ? (
+            <Text style={styles.helper}>Loading documents…</Text>
+          ) : (
+            <View style={styles.kycGrid}>
+              {KYC_KINDS_ORDERED.map(kind => {
+                const url = kycUrls[kind];
+                return (
+                  <View key={kind} style={styles.kycCell}>
+                    <Pressable
+                      onPress={() => url && setZoomUrl(url)}
+                      disabled={!url}
+                      style={[
+                        styles.kycCellThumb,
+                        !url && styles.kycCellThumbEmpty,
+                      ]}
+                    >
+                      {url ? (
+                        <Image
+                          source={{ uri: url }}
+                          style={{ width: '100%', height: '100%' }}
+                          resizeMode="cover"
+                        />
+                      ) : (
+                        <Text style={styles.kycCellEmptyText}>—</Text>
+                      )}
+                    </Pressable>
+                    <Text style={styles.kycCellLabel}>
+                      {KYC_LABELS_ADMIN[kind]}
+                    </Text>
+                    <Text
+                      style={[
+                        styles.kycCellStatus,
+                        url
+                          ? { color: colors.success }
+                          : { color: colors.textSecondary },
+                      ]}
+                    >
+                      {url ? 'Uploaded' : 'Not uploaded'}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          )}
+        </View>
+
         <View style={styles.actions}>
           {/*
             PR 5 hotfix: admin path into ShopSettings for ANY shop.
@@ -287,11 +430,25 @@ export default function ShopDetailManagementScreen() {
             />
           )}
           {status === 'rejected' && (
-            <Text style={styles.helper}>
-              Rejected shops have no available actions. The owner can
-              re-register from the home screen, which creates a new
-              shop document.
-            </Text>
+            // PR 31.1 — surface the rejectedReason + rejectedAt so
+            // admin has the decision history at hand (previously
+            // only visible to the owner via WaitingForApprovalScreen).
+            <View style={styles.rejectedCard}>
+              <Text style={styles.rejectedTitle}>Rejection reason</Text>
+              <Text style={styles.rejectedReason}>
+                {shop.rejectedReason?.trim() || 'No reason recorded.'}
+              </Text>
+              {shop.rejectedAt ? (
+                <Text style={styles.rejectedTimestamp}>
+                  Rejected on {formatOrderTime(shop.rejectedAt)}
+                </Text>
+              ) : null}
+              <Text style={[styles.helper, { marginTop: spacing.md }]}>
+                Rejected shops have no available actions. The owner can
+                re-register from the home screen, which creates a new
+                shop document.
+              </Text>
+            </View>
           )}
         </View>
       </ScrollView>
@@ -352,6 +509,29 @@ export default function ShopDetailManagementScreen() {
             />
           </View>
         </KeyboardAvoidingView>
+      </Modal>
+
+      {/* PR 31.1 — KYC tap-to-zoom modal. Signed-read URL is valid
+          for 1 hour from `getShopKycReadUrls`; well within a single
+          review session. */}
+      <Modal
+        visible={!!zoomUrl}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setZoomUrl(null)}
+      >
+        <Pressable
+          style={styles.zoomBackdrop}
+          onPress={() => setZoomUrl(null)}
+        >
+          {zoomUrl && (
+            <Image
+              source={{ uri: zoomUrl }}
+              style={styles.zoomImage}
+              resizeMode="contain"
+            />
+          )}
+        </Pressable>
       </Modal>
     </SafeAreaView>
   );
@@ -459,5 +639,84 @@ const styles = StyleSheet.create({
     textAlignVertical: 'top',
     ...typography.body,
     color: colors.textPrimary,
+  },
+  // PR 31.1 — tappable lat/lng styling.
+  mapLink: {
+    color: colors.primary,
+    textDecorationLine: 'underline',
+  },
+  mapLinkArrow: {
+    color: colors.primary,
+    fontWeight: '600',
+  },
+  // PR 31.1 — KYC docs grid (mirrors ShopRegistrationDetailScreen).
+  kycGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: spacing.sm,
+    marginHorizontal: -spacing.xs,
+  },
+  kycCell: {
+    width: '50%',
+    paddingHorizontal: spacing.xs,
+    paddingVertical: spacing.xs,
+  },
+  kycCellThumb: {
+    width: '100%',
+    aspectRatio: 1,
+    borderRadius: radii.sm,
+    overflow: 'hidden',
+    backgroundColor: colors.bg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  kycCellThumbEmpty: {
+    backgroundColor: colors.surface,
+  },
+  kycCellEmptyText: {
+    ...typography.h2,
+    color: colors.textMuted,
+  },
+  kycCellLabel: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontWeight: '600',
+    marginTop: spacing.xs,
+  },
+  kycCellStatus: {
+    ...typography.caption,
+    fontWeight: '600',
+  },
+  zoomBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.92)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  zoomImage: { width: '100%', height: '100%' },
+  // PR 31.1 — rejection-reason card on rejected shops.
+  rejectedCard: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderLeftWidth: 4,
+    borderLeftColor: colors.danger,
+    borderRadius: radii.md,
+    padding: spacing.md,
+  },
+  rejectedTitle: {
+    ...typography.h3,
+    marginBottom: spacing.xs,
+  },
+  rejectedReason: {
+    ...typography.body,
+    color: colors.textPrimary,
+  },
+  rejectedTimestamp: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    marginTop: spacing.xs,
   },
 });

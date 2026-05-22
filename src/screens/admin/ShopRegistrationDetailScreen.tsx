@@ -25,6 +25,7 @@ import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
 import type { Shop, ShopKycDocKind, UserInfo } from '../../types';
 import { formatOrderTime } from '../../utils/format';
+import { openMapsForCoords } from '../../utils/openMapsForCoords';
 
 // PR 31 — Same labels the registration screen uses, kept here as a
 // local copy so admin doesn't import from a screen folder. Order
@@ -254,10 +255,29 @@ export default function ShopRegistrationDetailScreen() {
           <Text style={styles.address}>{shop.address}</Text>
           {shop.location &&
           (shop.location.lat !== 0 || shop.location.lng !== 0) ? (
-            <Text style={styles.helper}>
-              📍 {shop.location.lat.toFixed(4)},{' '}
-              {shop.location.lng.toFixed(4)}
-            </Text>
+            // PR 31.1 — tappable coords. Universal Google Maps URL
+            // opens the device's preferred maps handler (Apple
+            // Maps respects the link on iOS too). See
+            // `src/utils/openMapsForCoords.ts`.
+            <Pressable
+              onPress={() =>
+                openMapsForCoords(
+                  shop.location.lat,
+                  shop.location.lng,
+                  shop.name,
+                )
+              }
+              accessibilityRole="link"
+              accessibilityLabel={`Open ${shop.name} location in maps`}
+              hitSlop={8}
+            >
+              <Text style={[styles.helper, styles.mapLink]}>
+                📍 {shop.location.lat.toFixed(4)},{' '}
+                {shop.location.lng.toFixed(4)}
+                {'  '}
+                <Text style={styles.mapLinkArrow}>↗︎</Text>
+              </Text>
+            </Pressable>
           ) : (
             <Text style={styles.helper}>
               📍 No GPS provided at registration.
@@ -595,4 +615,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   zoomImage: { width: '100%', height: '100%' },
+  // PR 31.1 — tappable map link styling.
+  mapLink: {
+    color: colors.primary,
+    textDecorationLine: 'underline',
+  },
+  mapLinkArrow: {
+    color: colors.primary,
+    fontWeight: '600',
+  },
 });
