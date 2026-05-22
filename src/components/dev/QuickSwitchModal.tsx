@@ -37,7 +37,10 @@ import {
 import { TEST_ACCOUNTS, type TestAccount } from '../../constants/testAccounts';
 import { colors, radii, spacing, typography } from '../../constants/theme';
 import { authService } from '../../services/authService';
+import { pushService } from '../../services/pushService';
+import { signOutAndClearLocalState } from '../../services/signOutAndClearLocalState';
 import { useAuthStore } from '../../store/useAuthStore';
+import { useCartStore } from '../../store/useCartStore';
 import Button from '../common/Button';
 
 type Props = {
@@ -56,12 +59,18 @@ export default function QuickSwitchModal({ visible, onClose }: Props) {
     setBusy(account.phone);
     setError(null);
     try {
-      // 1. Sign out current user. This clears persisted Firebase
-      //    auth and (downstream of useAuthStore.setUser(null) in
-      //    the AuthProvider) the local cart store too — so the
-      //    incoming customer doesn't inherit the previous tester's
-      //    cart.
-      await authService.signOut();
+      // 1. Sign out current user via the shared orchestrator so
+      //    QuickSwitch picks up the full sign-out discipline:
+      //    PR 24 push-token cleanup (so the previous tester stops
+      //    receiving pushes on this device) AND the cart clear
+      //    (so the incoming customer doesn't inherit the previous
+      //    tester's cart). No resetNavigation — the AuthBootstrap
+      //    re-render handles routing once the next sign-in lands.
+      await signOutAndClearLocalState({
+        signOut: () => authService.signOut(),
+        unregisterPushToken: () => pushService.unregisterPushToken(),
+        clearCart: useCartStore.getState().clearCart,
+      });
 
       // 2. Kick off phone auth. On native this calls
       //    signInWithPhoneNumber (no reCAPTCHA); on web the

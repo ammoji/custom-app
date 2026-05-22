@@ -26,17 +26,30 @@
  *   - useLocationStore → user's GPS / fallback choice survives across
  *                        accounts. Per Sudhir's spec.
  *
- * Known follow-up (NOT addressed here): we do NOT remove this
- * device's FCM token from /users/{prev-uid}.fcmTokens during
- * sign-out. Result is the previous account keeps receiving push
- * notifications meant for them on this physical device, even after
- * a new user signs in. Logged in PRELAUNCH_CHECKLIST as
- * `[Phase 12a-v2-iv-followup]` push-token-on-signout.
+ * Push token cleanup (PR 24):
+ *   - unregisterPushToken (optional dep) runs BEFORE firebase
+ *     signOut so the callable still has auth. Failures are
+ *     logged but never abort sign-out — user's intent to log
+ *     out takes priority; the next launch's
+ *     registerForPushNotifications is idempotent and will
+ *     re-sync if the stale token somehow survives.
  */
 
 export type SignOutDeps = {
   /** The actual Firebase auth signOut. */
   signOut: () => Promise<void>;
+  /**
+   * PR 24 — Remove this device's push token from the currently
+   * authed user's fcmTokens BEFORE firebase signOut so the new
+   * user doesn't inherit notifications meant for the previous
+   * account. Production caller wires
+   * `pushService.unregisterPushToken`; tests pass jest.fn().
+   *
+   * Optional so older call sites (no push at all, e.g. web /
+   * simulator) and the existing test suite continue to work
+   * without modification.
+   */
+  unregisterPushToken?: () => Promise<void>;
   /** Wipes useCartStore. */
   clearCart: () => void;
   /**
@@ -63,6 +76,18 @@ export type SignOutDeps = {
  * offline). Caller decides how to communicate the failure.
  */
 export async function signOutAndClearLocalState(deps: SignOutDeps): Promise<void> {
+  // PR 24 — Push token cleanup MUST happen before signOut because
+  // the callable requires auth. Failures are logged but don't abort
+  // sign-out (user's intent to log out takes priority over
+  // server-side state cleanup; the next launch's
+  // registerForPushNotifications is idempotent and will re-sync).
+  if (deps.unregisterPushToken) {
+    try {
+      await deps.unregisterPushToken();
+    } catch (e) {
+      console.warn('[signOut] unregisterPushToken failed (non-fatal):', e);
+    }
+  }
   await deps.signOut();
   deps.clearCart();
   deps.resetNavigation?.();

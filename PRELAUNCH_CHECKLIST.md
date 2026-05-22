@@ -353,7 +353,50 @@ callables piecemeal.
 - [ ] **Delivery person KYC + onboarding** — currently `becomeDelivery`
       is one-tap self-service (Phase 12a/b decision). Production needs
       vehicle, license, Aadhaar verification gated behind admin
-      approval (same workflow noted for shop-owner KYC).
+      approval (mirror the shop-owner KYC flow shipped in PR 31 —
+      same signed-PUT-URL + admin-only-read pattern).
+- [x] **Shop owner KYC document upload** — [Shipped — PR 31].
+      `RegisterShopScreen` is now a 2-step wizard: step 1 collects
+      name/address/hours/GST/FSSAI like before, step 2 surfaces 4
+      KYC slots (storefront, GST cert, FSSAI license, owner ID).
+      New pure helper `functions/src/kycUploadHelpers.ts` validates
+      `getShopKycUploadUrl` callable input (auth + ownership +
+      pending-state + slot whitelist). Three new callables in
+      `functions/src/index.ts`: `getShopKycUploadUrl` (mints v4
+      signed PUT URL bound to `Content-Type: image/jpeg`),
+      `recordShopKycUpload` (stamps `registrationData.kycDocs.{kind}`
+      with `{ storagePath, uploadedAt }` after PUT, with path-prefix
+      check), and `getShopKycReadUrls` (admin-only, returns 1-hour
+      signed-read URLs for each uploaded doc). `storage.rules`
+      extended: `/shop-kyc/{shopId}/{filename}` is write-deny (signed
+      URLs bypass at signing time, same as `/menu/`) and read-deny
+      except for callers with `request.auth.token.admin == true`,
+      because the docs contain PII. Admin
+      `ShopRegistrationDetailScreen` renders a 2x2 KYC grid with
+      tap-to-zoom modal. Helper has 8 unit tests in
+      `tests/functions/kycUploadHelpers.test.ts` covering every
+      authorization branch. Total: 623 tests pass + tsc clean
+      (root + functions).
+- [ ] **Shop owner can edit KYC docs after rejection** — PR 31
+      currently freezes uploads once the shop leaves `pending` state
+      (server returns `failed-precondition`). For rejected shops
+      that need to resubmit with corrected docs, add a server-side
+      "re-open KYC" admin action that flips the shop back to
+      pending and re-enables uploads, OR allow uploads in `rejected`
+      state. Decide once we see real rejection patterns.
+- [ ] **Storage rules unit tests for `/shop-kyc/`** — PR 31 added
+      the rules block but no `@firebase/rules-unit-testing` coverage
+      (the repo has no precedent for storage-rule emulator tests).
+      Adding one would pin "non-admin reads denied" + "all writes
+      denied" against a future rule edit.
+- [ ] **Storefront photo display on shop card** — PR 31 collects
+      the storefront photo as part of KYC but the shop catalog
+      (`HomeScreen`, `ShopMenuScreen`) still uses the legacy
+      `Shop.imageUrl`. Once admin approves a shop, copy the
+      storefront `storagePath` into `Shop.imageUrl` (or add a
+      separate `Shop.storefrontPath` and mint public-read access at
+      approve-time by moving the file from `/shop-kyc/` to
+      `/shops/`).
 - [ ] **Audit log collection for admin governance actions** — every
       `revokeShopOwner` / `revokeDelivery` / `suspendShop` /
       `unsuspendShop` / `approveShop` / `rejectShop` is currently

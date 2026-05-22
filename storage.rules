@@ -43,6 +43,24 @@ service firebase.storage {
       allow read: if true;
       allow write: if false;
     }
+    // PR 31 — Shop KYC documents (storefront photo, GST cert, FSSAI
+    // license, owner ID). Same signed-PUT-URL pattern as /menu/:
+    // writes go through `getShopKycUploadUrl`, which mints a v4
+    // signed URL via the Admin SDK (bypasses these rules at signing
+    // time). Direct client writes are denied.
+    //
+    // Reads are admin-only because these documents contain PII
+    // (Aadhaar/PAN images, GST registration with shop address, etc).
+    // The shop owner re-views their own uploads through the
+    // `RegisterShopScreen` step-2 thumbnails which are local-only
+    // (the `localPreviewUri` from `expo-image-picker`); we
+    // deliberately do NOT mint signed-read URLs back to the owner
+    // post-upload to keep the read surface tight.
+    match /shop-kyc/{shopId}/{filename} {
+      allow write: if false;
+      allow read: if request.auth != null
+                  && request.auth.token.admin == true;
+    }
     match /{allPaths=**} {
       allow read, write: if false;
     }

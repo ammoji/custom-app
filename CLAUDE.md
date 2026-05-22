@@ -123,15 +123,35 @@ regressions to TestFlight before.
 
 Each PR has a prompt at `docs/pr-N-<slug>-windsurf-prompt.md`. The
 prompt is the source of truth for what that PR does, what to read
-first, the discipline checklist, and the test plan. Sudhir authors
-these prompts and runs them through Windsurf.
+first, the discipline checklist, and the test plan.
+
+**Authoring split (Claude + Windsurf cross-check pattern):**
+
+- **Claude writes the prompt.** Sudhir asks Claude to design a PR,
+  diagnose a bug, or propose a change. Claude writes the full
+  windsurf-prompt.md — root-cause analysis, exact code transforms,
+  test plan, deploy plan. Claude does NOT edit source files
+  directly for non-trivial changes. (Quick one-line clarifications
+  and doc-only edits can stay direct.)
+- **Windsurf executes the prompt** inside Sudhir's IDE with full
+  TypeScript + auto-formatter feedback. This catches a class of
+  bugs (auto-import strip, file truncation on big multi-line
+  replaces, hooks order regressions) that direct file edits via
+  Claude have shipped before.
+- **Sudhir reviews the diff** Windsurf produced against the
+  prompt's acceptance checklist before committing.
+- **Claude can review post-implementation** too — the durable
+  prompt + the resulting diff give a clean audit trail.
+
+This split is intentional. One agent grading its own work is weak
+review; two agents with different blind spots is real review.
 
 PRs land on `main` as merge commits with messages like
 `PR 7: customer cancel window + shop dashboard UX`. The PR number in
 the commit corresponds to the prompt filename.
 
 **Naming for new PRs:** next number after the highest existing prompt
-file (currently PR 22 is the most recent), `docs/pr-N-<slug>-windsurf-prompt.md`.
+file (currently PR 23 is the most recent), `docs/pr-N-<slug>-windsurf-prompt.md`.
 
 ## Where prior context lives in this repo
 
@@ -153,6 +173,11 @@ file (currently PR 22 is the most recent), `docs/pr-N-<slug>-windsurf-prompt.md`
   state has diverged in many places.
 - **`docs/SESSION_LOG.md`** — append-only log of Cowork/Claude
   sessions on this repo. New entry per session.
+- **`docs/ROADMAP.md`** — strategic multi-month view: audit of
+  shipped features vs. industry baseline, phased roadmap A→E, AI
+  integration strategy, decisions deferred / out of scope. Read this
+  when picking the next PR or evaluating a new feature request.
+  Updated when the roadmap shifts, not every session.
 
 ## Resume protocol (do this at the start of every fresh session)
 
@@ -166,11 +191,34 @@ file (currently PR 22 is the most recent), `docs/pr-N-<slug>-windsurf-prompt.md`
 6. Ask Sudhir what he wants to work on. Don't assume — even if context
    suggests an obvious next step, confirm before doing anything destructive.
 
-## Current state — 2026-05-22
+## Current state — 2026-05-22 (post-PR-27 OTA; PR 26 code committed, build pending)
 
 **Branch:** `main`, up to date with `origin/main`.
 
-**Last commit:** `7665d59 Resent OTP` (May 22).
+**Last commit:** `PR 26: Sentry source-map upload enabled on
+production builds` (May 22). Previous: `PR 27: usePressGuard hook +
+tap protection on order-flow buttons`, `PR 25: Privacy Policy + ToS
+hosted on Firebase Hosting + linked in-app`, `PR 24: push token
+cleanup on sign-out`.
+
+**OTA status:** PR 27 + PR 25 are live on production via
+`eas update --branch production`. **PR 26 is intentionally NOT
+OTA'd** — it's a build-time-only config change; OTAs don't run
+the source-map upload step. The Sentry source-map upload starts
+working on the **next native production build**
+(`eas build --profile production`). Required pre-step before that
+build: create the `SENTRY_AUTH_TOKEN` EAS secret on the production
+environment (Sudhir runs this once via
+`eas secret:create --scope project --name SENTRY_AUTH_TOKEN ...`).
+Until the next build, prod Sentry stack traces stay minified;
+that's an accepted state because the next build will happen during
+App Store submission prep regardless. Unit suite 615/615 passing
+(+4 from `tests/services/sentry.test.ts`).
+
+PR 25 (Privacy Policy + ToS hosting) is still live at
+`grocery-mvp-dev.web.app/{privacy,terms}`. PR 24 (push token
+cleanup) and PR 23 (delivery heads-up fix) also live on the same
+production channel.
 
 **Uncommitted local changes — large bundle, 28 files, ~4200 insertions:**
 - `PRELAUNCH_CHECKLIST.md` (+1857 lines — new sections appended)
@@ -213,7 +261,31 @@ Worth clarifying with Sudhir before touching this code.
 
 ## In-flight work / open questions
 
-- **Disposition of uncommitted diff** (see above) — needs Sudhir input.
+- **Three PR 25 follow-ups documented in the Windsurf hand-off:**
+  - Replace `[CITY TBD before launch]` in `docs/terms-of-service.md`
+    §13 with the operating-entity city, then re-run
+    `npm run build-legal` + `firebase deploy --only hosting` before
+    the App Store submission.
+  - When the prod Firebase project lands (PR 28), bump the URLs in
+    `app.json` `extra.legal` to the prod hosting domain — single
+    place to change since `src/constants/legal.ts` is the only
+    reader.
+  - Consider custom domain (e.g. `kiranamart.in/{privacy,terms}`)
+    once the brand is finalized — out of scope for Phase A.
+- **PR 26 build + EAS secret pending.** Code is committed but
+  inert until two manual steps Sudhir runs in his own PowerShell:
+  (a) generate Sentry auth token + `eas secret:create --scope
+  project --name SENTRY_AUTH_TOKEN ... --environment production`,
+  (b) trigger the next `eas build --profile production` (whenever
+  that's needed for any reason — App Store prep, native module
+  change, etc.). The build will fail loudly if the secret isn't set
+  first, so there's no risk of silent skip. Smoke tests 1–4 from
+  `docs/pr-26-sentry-sourcemap-upload-windsurf-prompt.md` run after
+  the build completes.
+- **One drafted Windsurf prompt still waiting to be picked up:**
+  PR 31 (shop KYC document upload — already re-scoped on the
+  ROADMAP from "the foundation" to "the actual KYC-doc gap", since
+  `registerShop`/`approveShop` shipped in Phase 12a-v2-i).
 - **Production Firebase project** (`grocery-mvp-prod`) not yet created.
   Documented workstream in `PRELAUNCH_CHECKLIST.md`. Trigger: family
   testing reports quiet for 1–2 weeks + ready to commit to launch date.

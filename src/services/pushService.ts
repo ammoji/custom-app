@@ -135,4 +135,54 @@ export const pushService = {
 
     return token;
   },
+
+  /**
+   * PR 24 — Remove this device's Expo push token from the currently
+   * authed user's fcmTokens server-side. Call BEFORE
+   * firebase.auth().signOut() — the callable needs auth, and once
+   * sign-out completes request.auth is null.
+   *
+   * Idempotent: server uses arrayRemove, so duplicate calls are
+   * cheap. Returns silently in any of these cases (no throw):
+   *   - running on web (no native push registered to begin with)
+   *   - simulator/emulator (no token was ever obtained)
+   *   - no permission granted (no token to remove)
+   *   - cannot fetch the Expo token (transient network / Expo issue)
+   *
+   * Only throws if the callable itself rejects with something other
+   * than "user is unauthenticated" — in which case the orchestrator
+   * logs but does not abort sign-out.
+   */
+  async unregisterPushToken(): Promise<void> {
+    if (Platform.OS === 'web') return;
+    if (!Device.isDevice) return;
+
+    const { status } = await Notifications.getPermissionsAsync();
+    if (status !== 'granted') return;
+
+    const projectId = getEasProjectId();
+    if (!projectId) return;
+
+    let token: string;
+    try {
+      const result = await Notifications.getExpoPushTokenAsync({ projectId });
+      token = result.data;
+    } catch (e) {
+      console.warn('[push] unregister: getExpoPushTokenAsync failed:', e);
+      return;
+    }
+
+    try {
+      if (isNative) {
+        const fn = getNativeFunctions().httpsCallable('unregisterPushToken');
+        await fn({ token });
+      } else {
+        const fn = httpsCallable(functions, 'unregisterPushToken');
+        await fn({ token });
+      }
+      console.log('[push] token unregistered from backend');
+    } catch (e) {
+      console.warn('[push] unregisterPushToken call failed:', e);
+    }
+  },
 };

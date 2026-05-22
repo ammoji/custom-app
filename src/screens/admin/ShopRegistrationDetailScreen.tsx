@@ -2,6 +2,7 @@ import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import React, { useEffect, useState } from 'react';
 import {
     Alert,
+    Image,
     Keyboard,
     KeyboardAvoidingView,
     Modal,
@@ -22,8 +23,24 @@ import { colors, radii, shadow, spacing, typography } from '../../constants/them
 import type { RootStackParamList } from '../../navigation/AppNavigator';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
-import type { Shop, UserInfo } from '../../types';
+import type { Shop, ShopKycDocKind, UserInfo } from '../../types';
 import { formatOrderTime } from '../../utils/format';
+
+// PR 31 — Same labels the registration screen uses, kept here as a
+// local copy so admin doesn't import from a screen folder. Order
+// drives display order in the KYC docs card.
+const KYC_KINDS_ORDERED: ShopKycDocKind[] = [
+  'storefront',
+  'gstDoc',
+  'fssaiDoc',
+  'ownerIdDoc',
+];
+const KYC_LABELS_ADMIN: Record<ShopKycDocKind, string> = {
+  storefront: 'Storefront',
+  gstDoc: 'GST certificate',
+  fssaiDoc: 'FSSAI license',
+  ownerIdDoc: 'Owner ID',
+};
 
 /**
  * Admin detail/action page for one pending registration. Loads via
@@ -54,6 +71,11 @@ export default function ShopRegistrationDetailScreen() {
   // informational, not action-blocking.
   const [owner, setOwner] = useState<UserInfo | null>(null);
   const [priorShopsCount, setPriorShopsCount] = useState<number | null>(null);
+  // PR 31 — KYC document signed-read URLs, fetched after the shop
+  // record loads. `null` = never attempted; `{}` = attempted but the
+  // shop has no docs yet. `zoomedUrl` drives the full-screen viewer.
+  const [kycUrls, setKycUrls] = useState<Record<string, string> | null>(null);
+  const [zoomedUrl, setZoomedUrl] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isAdmin) {
@@ -108,6 +130,28 @@ export default function ShopRegistrationDetailScreen() {
       cancelled = true;
     };
   }, [shopId, isAdmin]);
+
+  // PR 31 — Mint signed-read URLs for any uploaded KYC docs. Runs
+  // only when an admin reaches a shop they have permission to view;
+  // failure is non-fatal (the card just shows "Could not load").
+  useEffect(() => {
+    if (!isAdmin || !shop) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { urls } = await orderService.getShopKycReadUrls({
+          shopId: shop.id,
+        });
+        if (!cancelled) setKycUrls(urls ?? {});
+      } catch (e) {
+        console.warn('[ShopRegistrationDetail] kyc urls fetch failed:', e);
+        if (!cancelled) setKycUrls({});
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [shop, isAdmin]);
 
   const handleApprove = async () => {
     if (!shop) return;
@@ -245,6 +289,58 @@ export default function ShopRegistrationDetailScreen() {
           </View>
         )}
 
+        {/* PR 31 — KYC documents card. Shown unconditionally — even
+            shops registered before PR 31 (no kycDocs at all) get the
+            "Not uploaded" treatment so admin sees the full slot list
+            and can ask the owner to add the missing pieces. */}
+        <View style={styles.card}>
+          <Text style={styles.label}>KYC documents</Text>
+          {kycUrls === null ? (
+            <Text style={styles.helper}>Loading documents…</Text>
+          ) : (
+            <View style={styles.kycGrid}>
+              {KYC_KINDS_ORDERED.map(kind => {
+                const url = kycUrls[kind];
+                return (
+                  <View key={kind} style={styles.kycCell}>
+                    <Pressable
+                      onPress={() => url && setZoomedUrl(url)}
+                      disabled={!url}
+                      style={[
+                        styles.kycCellThumb,
+                        !url && styles.kycCellThumbEmpty,
+                      ]}
+                    >
+                      {url ? (
+                        <Image
+                          source={{ uri: url }}
+                          style={{ width: '100%', height: '100%' }}
+                          resizeMode="cover"
+                        />
+                      ) : (
+                        <Text style={styles.kycCellEmptyText}>—</Text>
+                      )}
+                    </Pressable>
+                    <Text style={styles.kycCellLabel}>
+                      {KYC_LABELS_ADMIN[kind]}
+                    </Text>
+                    <Text
+                      style={[
+                        styles.kycCellStatus,
+                        url
+                          ? { color: colors.success }
+                          : { color: colors.textSecondary },
+                      ]}
+                    >
+                      {url ? 'Uploaded' : 'Not uploaded'}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          )}
+        </View>
+
         <View style={styles.actions}>
           <Button
             title={actionPending === 'approve' ? 'Approving…' : '✅ Approve'}
@@ -322,6 +418,29 @@ export default function ShopRegistrationDetailScreen() {
             />
           </View>
         </KeyboardAvoidingView>
+      </Modal>
+
+      {/* PR 31 — Tap-to-zoom for KYC documents. The signed-read URL
+          is valid for 1 hour from the initial fetch — well within
+          a single review session. */}
+      <Modal
+        visible={!!zoomedUrl}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setZoomedUrl(null)}
+      >
+        <Pressable
+          style={styles.zoomBackdrop}
+          onPress={() => setZoomedUrl(null)}
+        >
+          {zoomedUrl && (
+            <Image
+              source={{ uri: zoomedUrl }}
+              style={styles.zoomImage}
+              resizeMode="contain"
+            />
+          )}
+        </Pressable>
       </Modal>
     </SafeAreaView>
   );
@@ -429,4 +548,51 @@ const styles = StyleSheet.create({
     ...typography.body,
     color: colors.textPrimary,
   },
+  // PR 31 — KYC documents card.
+  kycGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: spacing.sm,
+    marginHorizontal: -spacing.xs,
+  },
+  kycCell: {
+    width: '50%',
+    paddingHorizontal: spacing.xs,
+    paddingVertical: spacing.xs,
+  },
+  kycCellThumb: {
+    width: '100%',
+    aspectRatio: 1,
+    borderRadius: radii.sm,
+    overflow: 'hidden',
+    backgroundColor: colors.bg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  kycCellThumbEmpty: {
+    backgroundColor: colors.surface,
+  },
+  kycCellEmptyText: {
+    ...typography.h2,
+    color: colors.textMuted,
+  },
+  kycCellLabel: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontWeight: '600',
+    marginTop: spacing.xs,
+  },
+  kycCellStatus: {
+    ...typography.caption,
+    fontWeight: '600',
+  },
+  zoomBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.92)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  zoomImage: { width: '100%', height: '100%' },
 });

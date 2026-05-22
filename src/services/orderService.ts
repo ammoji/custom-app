@@ -811,6 +811,82 @@ export const orderService = {
     };
   },
 
+  // PR 31 — Mint a v4 signed PUT URL for a shop KYC document
+  // upload (storefront photo, GST cert, FSSAI license, owner ID).
+  // Server validates the caller owns the target pending shop and
+  // chooses the storage path; client blindly PUTs JPEG bytes to
+  // `uploadUrl` with header `Content-Type: image/jpeg` (must match
+  // exactly — v4 signatures bind contentType), then calls
+  // `recordShopKycUpload` to stamp the path onto the shop doc.
+  //
+  // Rejects with `failed-precondition` if the shop has left the
+  // `pending` state — KYC docs are frozen post-approval. Native
+  // dispatch goes through RNFB so the phone-authed user reaches
+  // the Cloud Function with a valid uid.
+  async getShopKycUploadUrl(args: {
+    shopId: string;
+    docKind: 'storefront' | 'gstDoc' | 'fssaiDoc' | 'ownerIdDoc';
+  }): Promise<{
+    uploadUrl: string;
+    storagePath: string;
+    docKind: string;
+    expiresAt: number;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('getShopKycUploadUrl');
+      const result = await fn(args);
+      return result.data as {
+        uploadUrl: string;
+        storagePath: string;
+        docKind: string;
+        expiresAt: number;
+      };
+    }
+    const fn = httpsCallable(functions, 'getShopKycUploadUrl');
+    const result = await fn(args);
+    return result.data as {
+      uploadUrl: string;
+      storagePath: string;
+      docKind: string;
+      expiresAt: number;
+    };
+  },
+
+  // PR 31 — Confirm a successful PUT to the signed URL by stamping
+  // `registrationData.kycDocs.{docKind}` onto the shop doc. Server
+  // re-verifies the caller owns the pending shop AND the
+  // storagePath is under that shop's KYC folder.
+  async recordShopKycUpload(args: {
+    shopId: string;
+    docKind: 'storefront' | 'gstDoc' | 'fssaiDoc' | 'ownerIdDoc';
+    storagePath: string;
+  }): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('recordShopKycUpload');
+      await fn(args);
+      return;
+    }
+    const fn = httpsCallable(functions, 'recordShopKycUpload');
+    await fn(args);
+  },
+
+  // PR 31 — Admin-only. Returns a `{ docKind: signedReadUrl }` map
+  // for every uploaded KYC doc on the given shop. Used by
+  // `ShopRegistrationDetailScreen` to render thumbnails. URLs are
+  // valid for 1 hour; the screen re-fetches on focus if needed.
+  async getShopKycReadUrls(args: {
+    shopId: string;
+  }): Promise<{ urls: Record<string, string> }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('getShopKycReadUrls');
+      const result = await fn(args);
+      return result.data as { urls: Record<string, string> };
+    }
+    const fn = httpsCallable(functions, 'getShopKycReadUrls');
+    const result = await fn(args);
+    return result.data as { urls: Record<string, string> };
+  },
+
   // PR 8 Part B — Bulk-toggle availability on multiple menu items
   // owned by the caller's shop. Server validates shopOwner claim +
   // per-id ownership; ids that don't match the caller's shop are

@@ -457,4 +457,53 @@ const styles = StyleSheet.create({
     borderRadius: radii.sm,
   },
   retryText: { ...typography.bodyBold, color: '#fff' },
+  // PR 23 — coming-soon banner. Same yellow family as the
+  // dashboard HeadsUpCard / dropInstructionsCard so a partner
+  // reads the visual language as "informational, not actionable
+  // yet".
+  comingSoonCard: {
+    backgroundColor: '#FEF9E7',
+    borderRadius: radii.md,
+    padding: spacing.lg,
+    borderWidth: 1,
+    borderColor: '#F4D03F',
+    marginBottom: spacing.md,
+  },
+  comingSoonTitle: {
+    ...typography.h3,
+    color: colors.primaryDark,
+    marginBottom: spacing.xs,
+  },
+  comingSoonBody: {
+    ...typography.body,
+    color: colors.textPrimary,
+  },
+  comingSoonEta: {
+    ...typography.bodyBold,
+    color: colors.primaryDark,
+    marginTop: spacing.sm,
+  },
+  // PR 22 — yellow-tinted instructions card. Same visual language
+  // as the shop's display so the field reads as "the same data" to
+  // anyone seeing both screens.
+  dropInstructionsCard: {
+    backgroundColor: '#FEF9E7',
+    borderRadius: radii.md,
+    padding: spacing.md,
+    borderLeftWidth: 4,
+    borderLeftColor: '#F4D03F',
+    marginBottom: spacing.md,
+  },
+  dropInstructionsLabel: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  dropInstructionsValue: {
+    ...typography.body,
+    color: colors.textPrimary,
+  },
 });

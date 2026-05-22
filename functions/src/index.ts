@@ -33,6 +33,16 @@ import { validateOrderStatusTransition } from './orderStatusTransitionHelpers';
 // PR 6.1 — DO NOT REMOVE. Used by `getMenuImageUploadUrl` callable.
 // Auto-formatter stripped this once during PR 6.1 development.
 import { validateGetUploadUrlInput } from './menuImageUploadHelpers';
+// PR 31 — DO NOT REMOVE. Used by `getShopKycUploadUrl`,
+// `recordShopKycUpload`, and `getShopKycReadUrls` callables below.
+// `VALID_DOC_KINDS` is also referenced as a runtime guard inside
+// `recordShopKycUpload` to defend against forged docKind payloads
+// independent of the helper's own check.
+import {
+  validateGetKycUploadUrlInput,
+  VALID_DOC_KINDS,
+  type DocKind,
+} from './kycUploadHelpers';
 // PR 8 — DO NOT REMOVE (auto-formatter has eaten this once already
 // during PR 8 development). Used by writeAuditLog wrapper +
 // listRecentAuditEntries + bulkUpdateMenuAvailability callables. If
@@ -1414,6 +1424,218 @@ export const getMenuImageUploadUrl = onCall(
 );
 
 // ---------------------------------------------------------------------
+// PR 31 — Shop KYC document upload (signed PUT URL + record + admin read)
+// ---------------------------------------------------------------------
+//
+// Three callables, mirroring the menu-image-upload split but with a
+// stricter auth model:
+//   - `getShopKycUploadUrl`: caller must own a *pending* shop. Mints
+//     a v4 signed PUT URL targeting `shop-kyc/{shopId}/...`. Storage
+//     rule for `/shop-kyc/` is write-deny — the signed URL bypasses
+//     rules at signing time, same posture as `/menu/`.
+//   - `recordShopKycUpload`: caller confirms a successful PUT and
+//     the server stamps `registrationData.kycDocs.{kind}` onto the
+//     shop doc. Re-verifies ownership + pending-state + path-prefix
+//     to defend against a forged record-call carrying another
+//     shop's storagePath.
+//   - `getShopKycReadUrls`: admin-only. Returns server-minted v4
+//     signed-read URLs for each uploaded doc on a given shop, for
+//     use by `ShopRegistrationDetailScreen`. Bucket reads are
+//     admin-only at the rule level (PII), so the admin client
+//     cannot read directly via the Web SDK either.
+//
+// The signed-PUT URL has a 15-minute validity (matches menu-image
+// upload) — long enough for resize+upload on slow networks, short
+// enough that a leaked URL goes stale before it can be abused.
+//
+// Helper validation is in `kycUploadHelpers.ts` (pure, fully tested).
+
+export const getShopKycUploadUrl = onCall<{
+  shopId: string;
+  docKind: string;
+}>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    const shopId = request.data?.shopId;
+    const docKind = request.data?.docKind;
+
+    // Look up the shop ONCE here so the helper stays pure (no
+    // Firestore handles). The helper sees `shop: null` for missing
+    // shops and returns `not-found`.
+    let shop:
+      | { ownerUid?: string; status?: string }
+      | null = null;
+    if (shopId && typeof shopId === 'string') {
+      const snap = await db.doc(`shops/${shopId}`).get();
+      shop = snap.exists ? (snap.data() as { ownerUid?: string; status?: string }) : null;
+    }
+
+    const result = validateGetKycUploadUrlInput(
+      {
+        auth: auth ? { uid: auth.uid } : null,
+        shopId,
+        docKind,
+        shop,
+      },
+      Date.now(),
+      () => Math.random().toString(36).slice(2, 8),
+    );
+    if (!result.ok) {
+      throw new HttpsError(result.code, result.message);
+    }
+
+    const bucket = getStorage().bucket();
+    const file = bucket.file(result.storagePath);
+    const expiresAt = Date.now() + 15 * 60 * 1000;
+    const [uploadUrl] = await file.getSignedUrl({
+      version: 'v4',
+      action: 'write',
+      expires: expiresAt,
+      // v4 binds contentType into the signature — client MUST send
+      // `Content-Type: image/jpeg` exactly. expo-image-picker on
+      // both iOS and Android delivers a JPEG-encoded local URI for
+      // images by default, and we re-fetch as a Blob client-side
+      // so the upload bytes are JPEG.
+      contentType: 'image/jpeg',
+    });
+
+    return {
+      ok: true,
+      uploadUrl,
+      storagePath: result.storagePath,
+      docKind: result.docKind,
+      expiresAt,
+    };
+  },
+);
+
+export const recordShopKycUpload = onCall<{
+  shopId: string;
+  docKind: string;
+  storagePath: string;
+}>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    if (!auth) {
+      throw new HttpsError('unauthenticated', 'Sign in required');
+    }
+
+    const { shopId, docKind, storagePath } = request.data ?? {};
+    if (
+      !shopId ||
+      typeof shopId !== 'string' ||
+      !docKind ||
+      typeof docKind !== 'string' ||
+      !storagePath ||
+      typeof storagePath !== 'string'
+    ) {
+      throw new HttpsError(
+        'invalid-argument',
+        'shopId, docKind, storagePath required',
+      );
+    }
+    if (!VALID_DOC_KINDS.includes(docKind as DocKind)) {
+      throw new HttpsError(
+        'invalid-argument',
+        `docKind must be one of: ${VALID_DOC_KINDS.join(', ')}`,
+      );
+    }
+
+    // Defense-in-depth: the storagePath MUST be under the shop's
+    // own folder. A forged call carrying `storagePath:
+    // "shop-kyc/<other-shop>/foo.jpg"` would otherwise let an
+    // owner stamp another shop's path onto their own doc — not
+    // dangerous (admin only sees their own doc's pointers) but
+    // confusing and worth blocking.
+    const expectedPrefix = `shop-kyc/${shopId}/`;
+    if (!storagePath.startsWith(expectedPrefix)) {
+      throw new HttpsError(
+        'permission-denied',
+        'storagePath does not match the shop',
+      );
+    }
+
+    const shopRef = db.doc(`shops/${shopId}`);
+    const snap = await shopRef.get();
+    if (!snap.exists) {
+      throw new HttpsError('not-found', 'Shop not found');
+    }
+    const shop = snap.data() as { ownerUid?: string; status?: string };
+    if (shop.ownerUid !== auth.uid) {
+      throw new HttpsError(
+        'permission-denied',
+        'You are not the owner of this shop',
+      );
+    }
+    if (shop.status !== 'pending') {
+      throw new HttpsError(
+        'failed-precondition',
+        `KYC docs are frozen once the shop leaves pending state (status is '${shop.status}')`,
+      );
+    }
+
+    await shopRef.update({
+      [`registrationData.kycDocs.${docKind}`]: {
+        storagePath,
+        uploadedAt: Date.now(),
+      },
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    return { ok: true };
+  },
+);
+
+export const getShopKycReadUrls = onCall<{ shopId: string }>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    if (!auth) {
+      throw new HttpsError('unauthenticated', 'Sign in required');
+    }
+    if (auth.token?.admin !== true) {
+      throw new HttpsError('permission-denied', 'Admin role required');
+    }
+
+    const shopId = request.data?.shopId;
+    if (!shopId || typeof shopId !== 'string') {
+      throw new HttpsError('invalid-argument', 'shopId required');
+    }
+
+    const snap = await db.doc(`shops/${shopId}`).get();
+    if (!snap.exists) {
+      throw new HttpsError('not-found', 'Shop not found');
+    }
+    const shop = snap.data() as {
+      registrationData?: {
+        kycDocs?: Partial<
+          Record<DocKind, { storagePath: string; uploadedAt: number }>
+        >;
+      };
+    };
+    const docs = shop?.registrationData?.kycDocs;
+    if (!docs) return { ok: true, urls: {} };
+
+    const bucket = getStorage().bucket();
+    const out: Record<string, string> = {};
+    const expires = Date.now() + 60 * 60 * 1000; // 1 hour
+    for (const [kind, ref] of Object.entries(docs)) {
+      if (!ref || !ref.storagePath) continue;
+      const file = bucket.file(ref.storagePath);
+      const [url] = await file.getSignedUrl({
+        version: 'v4',
+        action: 'read',
+        expires,
+      });
+      out[kind] = url;
+    }
+    return { ok: true, urls: out };
+  },
+);
+
+// ---------------------------------------------------------------------
 // PR 8 Part A — Admin audit log
 // ---------------------------------------------------------------------
 // Writes are intentionally non-fatal. A Firestore outage during the
@@ -2190,6 +2412,44 @@ export const registerPushToken = onCall<{ token: string }>(
     await db.doc(`users/${auth.uid}`).set(
       {
         fcmTokens: FieldValue.arrayUnion(token),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+    return { ok: true };
+  },
+);
+
+// PR 24 — Inverse of registerPushToken. Removes THIS device's Expo
+// push token from the caller's users/{uid}.fcmTokens array so the
+// account no longer receives notifications on this device.
+//
+// Called by the client's signOutAndClearLocalState flow BEFORE
+// firebase.auth().signOut() — once Firebase signs out, request.auth
+// is null and the call would be rejected as unauthenticated.
+//
+// arrayRemove is idempotent: if the token isn't in the array (never
+// registered, already removed, or different device), the operation
+// is a no-op. The callable never throws for "token not found".
+//
+// Multi-device safety: arrayRemove only touches the exact token
+// string passed in. Other devices the user has registered (phone +
+// tablet, etc.) keep their tokens — they continue to receive push.
+// Only the device that signed out is detached.
+export const unregisterPushToken = onCall<{ token: string }>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    if (!auth) {
+      throw new HttpsError('unauthenticated', 'Sign in required');
+    }
+    const { token } = request.data ?? ({} as { token?: string });
+    if (!token || typeof token !== 'string') {
+      throw new HttpsError('invalid-argument', 'token required');
+    }
+    await db.doc(`users/${auth.uid}`).set(
+      {
+        fcmTokens: FieldValue.arrayRemove(token),
         updatedAt: FieldValue.serverTimestamp(),
       },
       { merge: true },

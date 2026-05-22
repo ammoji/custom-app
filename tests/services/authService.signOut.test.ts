@@ -73,4 +73,53 @@ describe('signOutAndClearLocalState', () => {
     expect(clearCart).not.toHaveBeenCalled();
     expect(resetNavigation).not.toHaveBeenCalled();
   });
+
+  test('PR 24 — calls unregisterPushToken BEFORE signOut when provided', async () => {
+    // Order matters: the callable on the server requires auth, so it
+    // must run while the user is still signed in.
+    const callOrder: string[] = [];
+    const signOut = jest.fn(async () => {
+      callOrder.push('signOut');
+    });
+    const unregisterPushToken = jest.fn(async () => {
+      callOrder.push('unregisterPushToken');
+    });
+    const clearCart = jest.fn();
+    await signOutAndClearLocalState({
+      signOut,
+      unregisterPushToken,
+      clearCart,
+    });
+    expect(callOrder).toEqual(['unregisterPushToken', 'signOut']);
+  });
+
+  test('PR 24 — unregisterPushToken failure does NOT abort signOut', async () => {
+    // User intent: get me out of this account. A server-side cleanup
+    // failure must not block that.
+    const signOut = jest.fn(async () => {});
+    const unregisterPushToken = jest.fn(async () => {
+      throw new Error('network down');
+    });
+    const clearCart = jest.fn();
+    await expect(
+      signOutAndClearLocalState({
+        signOut,
+        unregisterPushToken,
+        clearCart,
+      }),
+    ).resolves.toBeUndefined();
+    expect(signOut).toHaveBeenCalledTimes(1);
+    expect(clearCart).toHaveBeenCalledTimes(1);
+  });
+
+  test('PR 24 — unregisterPushToken is optional (legacy callers still work)', async () => {
+    // The signOutAndClearLocalState contract pre-PR 24: just signOut +
+    // clearCart. Keep it green for any caller that hasn't wired the
+    // new dep yet.
+    const signOut = jest.fn(async () => {});
+    const clearCart = jest.fn();
+    await signOutAndClearLocalState({ signOut, clearCart });
+    expect(signOut).toHaveBeenCalledTimes(1);
+    expect(clearCart).toHaveBeenCalledTimes(1);
+  });
 });

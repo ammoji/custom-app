@@ -12,12 +12,36 @@ export type GeoPoint = { lat: number; lng: number };
 //               UI ships in a later phase)
 export type ShopStatus = 'pending' | 'active' | 'rejected' | 'suspended';
 
+// PR 31 — KYC document slot kinds. Keep this list in sync with
+// `VALID_DOC_KINDS` in `functions/src/kycUploadHelpers.ts` — the
+// server validates against the same whitelist.
+export type ShopKycDocKind =
+  | 'storefront'
+  | 'gstDoc'
+  | 'fssaiDoc'
+  | 'ownerIdDoc';
+
+// PR 31 — Server-stamped pointer to one uploaded KYC document.
+// Kept minimal: the storage path is the only durable identity; the
+// admin reads it via a server-minted signed-read URL through
+// `getShopKycReadUrls`. No public download URL is persisted because
+// `/shop-kyc/` is read-deny for non-admins.
+export type ShopKycDocRef = {
+  storagePath: string; // shop-kyc/{shopId}/{kind}_<ts>_<rand>.jpg
+  uploadedAt: number; // epoch ms
+};
+
 export type ShopRegistrationData = {
   phone: string;
   hours: { open: string; close: string }; // "HH:mm" 24h
   gstNumber?: string | null;
   fssaiLicense?: string | null;
   submittedAt: number; // epoch ms
+  // PR 31 — KYC documents. All optional; existing shops without
+  // them just show "Not uploaded" in admin review. Added in a
+  // schema-additive way so previously-registered pending shops keep
+  // working.
+  kycDocs?: Partial<Record<ShopKycDocKind, ShopKycDocRef>>;
 };
 
 export type Shop = {
