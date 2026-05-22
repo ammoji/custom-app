@@ -58,7 +58,13 @@
           "isIosBackgroundLocationEnabled": false
         }
       ],
-      "@sentry/react-native",
+      [
+        "@sentry/react-native",
+        {
+          "organization": "grocery-mvp",
+          "project": "react-native"
+        }
+      ],
       "@react-native-firebase/app",
       "@react-native-firebase/auth",
       [
@@ -94,6 +100,10 @@
       },
       "sentry": {
         "dsn": "https://b066d00d989b75e7464212453e487782@o4511383723573248.ingest.us.sentry.io/4511383731503104"
+      },
+      "legal": {
+        "privacyUrl": "https://grocery-mvp-dev.web.app/privacy",
+        "termsUrl": "https://grocery-mvp-dev.web.app/terms"
       }
     },
     "owner": "ammoji",

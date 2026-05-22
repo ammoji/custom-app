@@ -136,9 +136,20 @@ callables piecemeal.
       Redeploy Functions. [Phase 8a]
 - [ ] **Rotate Razorpay webhook secret** for live mode. Reconfigure webhook
       in Razorpay Dashboard pointing to production Function URL. [Phase 8a]
-- [ ] **Configure Sentry source-map upload** via `SENTRY_AUTH_TOKEN` EAS
-      secret + `SENTRY_ORG`, `SENTRY_PROJECT` env in eas.json. Currently
-      `SENTRY_DISABLE_AUTO_UPLOAD=true` to bypass build failure. [Phase 5e-i, 9a]
+- [x] **Configure Sentry source-map upload** via `SENTRY_AUTH_TOKEN` EAS
+      secret + Sentry plugin `organization` / `project` config in
+      `app.json`. [Shipped — PR 26]
+      `app.json` plugin upgraded to array form with
+      `organization: "grocery-mvp"`, `project: "react-native"`.
+      `SENTRY_DISABLE_AUTO_UPLOAD` removed from the production
+      profile in `eas.json` (still present on dev + preview to save
+      Sentry quota). **Manual follow-up before next production
+      build:** Sudhir runs `eas secret:create --scope project
+      --name SENTRY_AUTH_TOKEN --value "<sntrys_...>" --type string
+      --visibility secret --environment production` per the runbook
+      in the PR 26 prompt. The first native production build after
+      the secret lands triggers the first sourcemap upload; OTAs
+      do not. [Phase 5e-i, 9a]
 - [ ] **Verify `service-account.json` and all .p8 files** are gitignored
       and not in any commit history. [Phase 3, 9c]
 - [ ] **Audit secrets in Functions** — confirm `RAZORPAY_KEY_SECRET`,
@@ -252,13 +263,15 @@ callables piecemeal.
       via Razorpay's `orders.fetch` API and reusing if it's still
       `'created'` or `'attempted'`. Skip until orphaned-order count
       becomes a real cleanup concern. [Phase 8b-mobile]
-- [ ] **Background-tap protection on retry/cancel buttons** \u2014
-      `OrderDetailScreen`'s `paying` / `cancelling` state disables both
-      buttons during inflight calls, but if the user backgrounds the
-      app mid-call, the state may not survive. The Cloud Function's
-      state-machine checks reject duplicate retries server-side, so the
-      worst-case is a wasted Razorpay session create. Acceptable for
-      MVP; revisit if telemetry shows it happening. [Phase 8b-mobile]
+- [x] **Background-tap protection on retry/cancel buttons** \u2014
+      [Shipped — PR 27]. Closed by the new `usePressGuard` hook
+      (`src/hooks/usePressGuard.ts`) wrapping `placeOrder`,
+      `handleRetryPayment`, `handleCancel` and `handleWindowCancel`.
+      Synchronous ref-backed mutex flips inside the handler before
+      any `await`, so a double-tap fired before the disabled-state
+      paint is a guaranteed no-op. Server-side state-machine checks
+      remain as the belt-and-suspenders second line of defense.
+      [Phase 8b-mobile]
 - [ ] **Track react-native-razorpay New Architecture support upstream**.
       MVP currently relies on Expo SDK 54's interop layer to bridge the
       legacy module onto the new architecture; this works today but may
@@ -555,9 +568,19 @@ callables piecemeal.
 
 ## 📝 Compliance & Distribution
 
-- [ ] **Privacy Policy** drafted, hosted at a public URL, linked in app
-      and store listings. Required for both Play Store and App Store. [pre-launch]
-- [ ] **Terms of Service** drafted, hosted, linked. [pre-launch]
+- [x] **Privacy Policy** drafted, hosted at a public URL, linked in app
+      and store listings. Required for both Play Store and App Store.
+      [Shipped — PR 25] — markdown at `docs/privacy-policy.md`,
+      static HTML at `dist/privacy.html`, hosted at
+      `https://grocery-mvp-dev.web.app/privacy`. Linked from
+      LoginScreen footer + ProfileScreen "Legal" section.
+- [x] **Terms of Service** drafted, hosted, linked.
+      [Shipped — PR 25] — markdown at `docs/terms-of-service.md`,
+      static HTML at `dist/terms.html`, hosted at
+      `https://grocery-mvp-dev.web.app/terms`. Linked same surfaces.
+      **Follow-up before App Store submission:** replace
+      `[CITY TBD before launch]` placeholder in §13 governing-law
+      clause with the real operating-entity city.
 - [ ] **DPDP Act 2023 (India) compliance review** — data collection notice,
       retention policy, deletion request process. [pre-launch]
 - [ ] **Play Store listing** prepared: app icon (512×512), screenshots
@@ -1018,10 +1041,11 @@ prompts to save unsaved ones after a successful order.
 
 ### Deferred (logged for follow-up)
 
-- [ ] **Push token cleanup on sign-out** — the device's Expo push
-      token currently stays in the previous user's
-      `users/{prev-uid}.fcmTokens` after signing out. The previous
-      account keeps receiving notifications meant for them on this
+- [x] **Push token cleanup on sign-out** — [Shipped — PR 24]. The
+      device's Expo push token currently stays in the previous
+      user's `users/{prev-uid}.fcmTokens` after signing out. The
+      previous account keeps receiving notifications meant for
+      them on this
       physical device. Fix: add a `removePushToken` callable that
       arrayRemoves the current device's token, called from
       `signOutAndClearLocalState` BEFORE the firebase signOut
@@ -2490,6 +2514,813 @@ builds — but the only way to be sure is to OTA and try the picker on
 a real device. If the picker fails to launch (typical symptom: app
 crashes or shows a "Module not found" red-box), a fresh `eas build`
 is required before family testing can continue.
+
+### PR 26 — Sentry source-map upload on production builds — ✅ CODE COMPLETE May 22 2026
+
+Until PR 26, every Sentry stack trace in production looked like
+`<anonymous>:1:24561` — minified single-line JS, useless for
+debugging. Sentry was wired up and receiving events, but the
+source maps that would de-minify those traces were never uploaded
+because `eas.json` set `SENTRY_DISABLE_AUTO_UPLOAD: "true"` on
+**all three** profiles (a deliberate dev/preview optimization that
+silently extended to production), there was no
+`SENTRY_AUTH_TOKEN` EAS secret to authenticate the upload, and the
+`@sentry/react-native` plugin entry in `app.json` was a plain
+string with no `organization` / `project` slugs to tell the plugin
+where to upload to.
+
+PR 26 enables sourcemap upload on **production builds only**.
+Dev + preview stay disabled (saves Sentry's free-tier upload
+quota on builds that get thrown away). Once shipped, every
+production crash that lands in Sentry resolves to a real file
+path + line number + symbolicated function name.
+
+#### What shipped
+
+- [x] **`app.json` plugin upgraded to array form** at
+      `@/app.json:61-67`. `organization: "grocery-mvp"`,
+      `project: "react-native"` (slugs taken from the Sentry
+      dashboard URL — these are public, not secret). The plugin
+      reads `SENTRY_AUTH_TOKEN` from the build env automatically.
+- [x] **`SENTRY_DISABLE_AUTO_UPLOAD` removed** from the
+      `production` profile's `env` block in `@/eas.json:38-47`.
+      `development` and `preview` profiles retain the flag.
+      Removing the var is cleaner than setting `"false"` — the
+      sentry-cli upload step keys on truthiness, so absence
+      means upload is enabled.
+- [x] **`src/utils/sentryDebugThrow.ts`** — dev-only helper
+      `triggerSentryTestError()` that throws a distinct,
+      grep-able error. Wire it to any throwaway button on the
+      first production build to verify the dashboard shows a
+      de-minified frame pointing at this file. The export stays
+      in tree (zero default-import surface) for future re-tests.
+- [x] **4 unit tests** at `@/tests/services/sentry.test.ts`.
+      Pin the runtime init contract: DSN read from
+      `expo-constants`, PII-off, environment tag mapped from
+      `__DEV__`, network-noise filters present. Total project
+      tests: **615 / 615 passing** (was 611; +4).
+- [x] **Manual follow-up captured** in the PRELAUNCH_CHECKLIST
+      Sentry item: Sudhir runs `eas secret:create --scope project
+      --name SENTRY_AUTH_TOKEN ... --environment production`
+      before the next production build. Step-by-step in the
+      "Deploy" subsection below.
+- [x] **No runtime code changed.** `src/services/sentry.ts` is
+      untouched. Bundle behaviour is identical pre/post-PR-26;
+      only the build-step that runs sentry-cli inside EAS Build
+      is affected.
+- [x] **PRELAUNCH_CHECKLIST entry flipped** — the
+      "Configure Sentry source-map upload" item under
+      `🔐 Security & Compliance` is now `[x] [Shipped — PR 26]`.
+- [x] **No new `DO NOT REMOVE` markers** (16-PR clean streak).
+
+#### Verification done in-session
+
+- `npx tsc --noEmit` — **0 errors**.
+- `npm test` — **615 / 615 passing**.
+- `app.json` + `eas.json` JSON valid (the existing IDE schema
+  warnings about `edgeToEdgeEnabled` and the `react-native-firebase`
+  config-plugin export are pre-existing and unrelated to PR 26).
+
+#### Deploy plan
+
+Pre-flight (Sudhir, in PowerShell, once):
+
+```text
+1. Generate the Sentry auth token:
+   - Open https://sentry.io/settings/account/api/auth-tokens/
+   - "Create New Token"
+   - Scopes required: project:releases (write), project:write
+   - Name: "EAS Build - grocery-mvp-prod"
+   - Copy the token (sntrys_...)
+
+2. Create the EAS secret on the production environment:
+   eas secret:create `
+     --scope project `
+     --name SENTRY_AUTH_TOKEN `
+     --value "<paste-the-token>" `
+     --type string `
+     --visibility secret `
+     --environment production
+
+3. Verify it landed:
+   eas secret:list
+   # SENTRY_AUTH_TOKEN should appear with environment "production".
+```
+
+If the token leaks, rotate immediately:
+
+```powershell
+eas secret:delete --id <secret-id-from-list>
+# Then re-run the eas secret:create above with a fresh token.
+```
+
+Then ship the code change:
+
+```powershell
+$env:NODE_OPTIONS = "--use-system-ca"
+
+npm test
+git add app.json eas.json
+git add src/utils/sentryDebugThrow.ts
+git add tests/services/sentry.test.ts
+git add PRELAUNCH_CHECKLIST.md
+git add docs/pr-26-sentry-sourcemap-upload-windsurf-prompt.md
+git commit -m "PR 26: Sentry source-map upload enabled on production builds"
+git push origin main
+
+# 4. Trigger the next production build (this is where upload runs).
+eas build --profile production --platform ios
+eas build --profile production --platform android
+```
+
+**Do NOT run `eas update` for PR 26.** OTAs don't execute the
+sourcemap-upload step (that runs once during the native build).
+The first real test happens after `eas build --profile production`
+completes.
+
+#### Smoke tests (after the next production build, NOT after an OTA)
+
+PR 26's effect only materializes when a fresh **native** production
+build runs through EAS. An OTA on top of an older native build
+picks up JS changes but doesn't trigger the sourcemap upload (no
+build = no upload step).
+
+1. **EAS build logs show the upload step.** After
+   `eas build --profile production` completes, open the build's
+   logs. Search for `sentry-cli`. You should see lines like:
+   ```
+   > Uploaded source maps to Sentry
+   > Created release X.Y.Z (Z artifacts)
+   ```
+   If you see `SENTRY_DISABLE_AUTO_UPLOAD=true` instead, the env
+   override didn't take.
+2. **Sentry dashboard shows new artifacts.** Visit
+   `https://grocery-mvp.sentry.io/releases/` (project
+   `react-native`). The latest release should match the runtime
+   version of the build you just ran. Click into it. Artifacts
+   count > 0. Each artifact is a `.bundle` / `.map` pair.
+3. **Test crash de-minifies.** Install the new build on a phone.
+   Wire `triggerSentryTestError` to any throwaway button on a
+   screen (e.g. a dev-only red button at the bottom of
+   `ProfileScreen` while testing). Tap it. App crashes. Force-close
+   + reopen — the crash uploads from the on-disk queue. Within
+   ~1 minute, the Sentry dashboard shows the event. **Open the
+   stack frame.** It MUST point at
+   `src/utils/sentryDebugThrow.ts:<line>` and show the function
+   name `triggerSentryTestError`. If it points at
+   `<anonymous>:1:24561`, the upload didn't work — re-check the
+   build log.
+4. **No PII in the crash event.** Same Sentry event. Verify the
+   "User" section is empty / contains only the Sentry-generated
+   anonymous ID. The phone number, email, address must NOT be
+   present.
+5. **Dev / preview unchanged.** Run
+   `eas build --profile preview`. Confirm
+   `SENTRY_DISABLE_AUTO_UPLOAD=true` is still in the build env
+   (logs show it). Sentry should NOT receive a new release
+   artifact for this build.
+
+#### Deliberate-break verification (optional)
+
+Before declaring done, temporarily change line 23 of
+`src/services/sentry.ts` from `sendDefaultPii: false` to
+`sendDefaultPii: true`. Run
+`npm test -- --testPathPattern="sentry"`. The "PII collection is
+disabled" test must fail. Revert. This proves the PII-off contract
+is genuinely test-pinned.
+
+#### Rollback
+
+`git revert` the commit. The `app.json` plugin returns to
+plain-string form, `eas.json` re-adds `SENTRY_DISABLE_AUTO_UPLOAD`
+to production, and the next native build will skip the upload step
+(but won't fail — the auth token, if still present in EAS secrets,
+just goes unused). The EAS secret can stay; deleting it requires
+a separate `eas secret:delete` call.
+
+#### Follow-ups (out of scope this PR)
+
+- [ ] **Tune `tracesSampleRate`** on the Sentry init based on
+      real traffic in Phase B+. Currently `__DEV__ ? 1.0 : 0.5`.
+      [Post-launch]
+- [ ] **Sentry release-tracking integration.** The expo plugin
+      auto-tags releases using the runtime version; verify on
+      the first production build that release names look like
+      `com.ammoji.grocerymvp@1.0.0+N` and group correctly. File
+      a follow-up if not. [PR 26 follow]
+- [ ] **Sentry replay sessions** + user-feedback dialog. Privacy
+      review needed first. [Post-MVP]
+- [ ] **Once PR 26 is verified end-to-end**, remove the wiring
+      that calls `triggerSentryTestError` from whatever screen
+      it was temporarily attached to. The export itself stays
+      in the codebase for future re-tests. [Manual cleanup]
+
+### PR 27 — Background-tap protection (`usePressGuard`) — ✅ CODE COMPLETE May 22 2026
+
+Closes the long-deferred `[Phase 8b-mobile]` *Background-tap
+protection on retry/cancel buttons* item. The existing
+`disabled={busyState}` pattern across the order flow is paint-time
+defense only: a double-tap fired before React re-renders with
+`disabled=true` runs the handler twice. On `placeOrder` /
+`handleRetryPayment` that means **two Razorpay sessions stack** and
+the user pays one + dismisses the other, leaving the server with a
+duplicate pending order. Server-side state-machine checks reject the
+duplicate eventually, but the user-visible damage (two overlays,
+wasted Razorpay budget, support ping from confused shopkeeper) is
+already done.
+
+PR 27 introduces a tiny `usePressGuard` hook (ref-backed
+synchronous mutex) and wraps every order-flow button whose `onPress`
+initiates a server callable or a payment session.
+
+#### What shipped
+
+- [x] **`usePressGuard` hook** at `@/src/hooks/usePressGuard.ts`.
+      Two exports: a pure `createPressGuard(handler)` factory
+      (closure-based busy flag, React-free, unit-testable) and the
+      `usePressGuard(handler)` hook (`useRef` + `useCallback`
+      wrapper). The wrapped function preserves args, return value
+      and rejection — the guard does NOT swallow errors. Pure
+      mutex; no time-based debounce.
+- [x] **`CheckoutScreen` Place Order / Pay button** wired through
+      `guardedPlaceOrder` at
+      `@/src/screens/CheckoutScreen.tsx:462`. The hook call sits
+      ABOVE the `if (items.length === 0) return` early return per
+      Rules-of-Hooks discipline (PR 12 lineage). `placing` state
+      and `disabled={placing}` retained — the guard is additive
+      front-line defense, the disabled paint is the second line.
+- [x] **`OrderDetailScreen` four buttons** routed through three
+      guards at `@/src/screens/OrderDetailScreen.tsx:213-225`:
+      `guardedRetryPayment`, `guardedCancel` (shared by the
+      payment-pending Cancel + the COD-pending Cancel — same
+      handler, same guard), and `guardedWindowCancel`. Hook calls
+      sit above all early returns.
+- [x] **Handlers converted to async + Promise-returning.** The
+      original `function handleX()` declarations were sync wrappers
+      around fire-and-forget IIFEs — the outer fn returned
+      synchronously, so a guard wrapped around them would clear
+      after microseconds and offer no real protection. PR 27
+      converts each to `async function handleX(): Promise<void>`
+      that resolves only when the underlying work settles
+      (`@/src/screens/OrderDetailScreen.tsx:638-700` for
+      `handleRetryPayment`; the Razorpay overlay's
+      `handler` / `ondismiss` / `onError` each call `resolve()`
+      so the guard holds for the entire overlay lifetime).
+- [x] **`confirmAlert` upgraded to `confirmAlertAsync`** at
+      `@/src/screens/OrderDetailScreen.tsx:32-68`.
+      `Promise<boolean>` shape so the cancel handlers can `await`
+      the user's confirm/dismiss decision rather than firing the
+      mutation in a callback. Android back-button / outside-tap
+      dismissal also resolves `false` via
+      `{ cancelable: true, onDismiss: ... }`.
+- [x] **5 new unit tests** at
+      `@/tests/hooks/usePressGuard.test.ts`. Pin: first-call
+      passthrough, re-entrant in-flight call swallowed (handler
+      called exactly once), post-resolution next press allowed,
+      handler rejection propagates AND clears the guard, args +
+      return value pass-through. Tests target the pure
+      `createPressGuard` factory — same RNTL-free precedent as
+      `useOnlineDeliveryCount`. Total project tests:
+      **611 / 611 passing** (was 606; +5).
+- [x] **No existing busy state removed.** `placing`,
+      `cancelling`, `paying`, `windowCancelling` all still drive
+      the visible spinner + title-text changes. The guard sits in
+      front of the handler; the state machine sits behind it.
+- [x] **No new `DO NOT REMOVE` markers** (16-PR clean streak).
+- [x] **PRELAUNCH_CHECKLIST entry flipped** — the
+      "Background-tap protection on retry/cancel buttons" item
+      under `OrderDetailScreen` deferrals is now
+      `[x] [Shipped — PR 27]`.
+
+#### Verification done in-session
+
+- `npx tsc --noEmit` — **0 errors**.
+- `npm test` — **611 / 611 passing**.
+- Deliberate-break rehearsed mentally: removing the
+  `if (busy.current) return undefined` early-return causes the
+  "re-entrant call WHILE first is in-flight is a no-op" test to
+  fail with the handler called twice — confirms the test
+  genuinely pins the re-entry block. (User should run this
+  break manually before declaring done if desired.)
+
+#### Manual smoke-test runbook (post-OTA)
+
+1. **Double-tap place-order does not duplicate Razorpay** — set
+   up a cart, go to Checkout, switch to "Pay Online". Double-tap
+   the "Pay ₹X" button as fast as you can. Exactly **one**
+   Razorpay overlay appears. Cancel it. Check Firestore `orders`
+   — exactly one new order, not two.
+2. **Single-tap still works** — standard place-order flow on a
+   single tap. Order created, watcher fires, OrderDetail navigates.
+3. **Cancel within window — double-tap** — place an online order
+   that's reached `paid + accepted`. Open OrderDetail. Double-tap
+   "Cancel order (X:XX left)". The order cancels exactly once.
+   Button transitions through "Cancelling…" then disappears as
+   the watcher delivers the new `cancelled` state.
+4. **Retry payment — double-tap** — start a Razorpay payment
+   from CheckoutScreen, dismiss the overlay without paying.
+   Order sits in `paymentStatus='pending'`. On OrderDetail,
+   double-tap "Pay ₹X now". Exactly one Razorpay overlay opens.
+5. **COD cancel — double-tap** — place a COD order. On
+   OrderDetail, double-tap "Cancel order". One cancel happens;
+   the order moves to `cancelled` state.
+6. **Cancel-confirm + dismiss** — tap "Cancel order"; on the
+   confirm dialog tap "Keep order" or back-button-dismiss. The
+   button is immediately tappable again (guard cleared via
+   `finally`); no soft-lock.
+7. **No hooks warnings** — `react-devtools` console clean.
+   Sentry quiet on these screens.
+
+#### Deploy
+
+Client-only OTA per `.windsurf/deploy-discipline.md`:
+
+```powershell
+$env:NODE_OPTIONS = "--use-system-ca"
+
+npm test
+git add src/hooks/usePressGuard.ts
+git add src/screens/CheckoutScreen.tsx src/screens/OrderDetailScreen.tsx
+git add tests/hooks/usePressGuard.test.ts
+git add PRELAUNCH_CHECKLIST.md
+git add docs/pr-27-background-tap-protection-windsurf-prompt.md
+git commit -m "PR 27: usePressGuard hook + tap protection on order-flow buttons"
+git push origin main
+eas update --branch production --message "PR 27 - tap protection on place-order/cancel/retry"
+```
+
+No native rebuild. No Cloud Functions deploy.
+
+#### Rollback
+
+`git revert` the screen + hook changes + OTA. The reverted
+version restores the original sync `function handleX()` declarations
+and the original `confirmAlert` callback shape; the
+`disabled={busyState}` paint-time defense remains as it was
+pre-PR-27. No server contract touched.
+
+#### Follow-ups (out of scope)
+
+- [ ] **Sweep other async `onPress` handlers** for similar
+      exposure (favorites toggle, rating thumbs, address-edit
+      Save, profile name/email Save, ShopOwner accept/reject,
+      delivery accept/handoff). Lower duplicate-call cost than
+      payment, but the wrap is one-line per handler. [PR 28-ish]
+- [ ] **Refactor `Button.tsx` to expose a built-in guard prop**
+      so call-sites stop having to pair `usePressGuard(handler)`
+      with `<Button onPress={guarded} ...>`. Cleaner but couples
+      behaviour to the component. Defer until at least 8 wrap
+      sites exist to amortize the API change. [Post-MVP]
+- [ ] **Server-side idempotency keys on `placeOrder`** — accept
+      a client-generated `idempotencyKey` and dedupe within a
+      60-second window. Belt-and-suspenders for the residual
+      "two devices same account" race that the client guard
+      cannot cover. [Post-MVP]
+- [ ] **Telemetry: `press_guard_blocked`** event with handler
+      name + button label so we can see how often the guard
+      actually fires in production. [PR 27 follow]
+
+### PR 25 — Privacy Policy + ToS hosted + linked in-app — ✅ CODE COMPLETE May 22 2026
+
+App Store Review and Google Play both reject builds without a
+publicly reachable Privacy Policy URL. Until PR 25, the policy
+existed only as markdown in `docs/privacy-policy.md`; there was no
+hosted URL, no Terms of Service document at all, and nothing in-app
+pointed users at either document.
+
+PR 25 authors the missing ToS, converts both markdown sources into
+mobile-friendly static HTML, publishes them via Firebase Hosting on
+the existing `dist/` block, and surfaces the URLs in two screens:
+LoginScreen (footer below "Send OTP") and ProfileScreen (new
+"Legal" section above "Account"). URLs are centralized in
+`app.json` `extra.legal` so the future custom-domain swap is a
+two-line change.
+
+#### What shipped
+
+- [x] **Terms of Service** at `@/docs/terms-of-service.md` — 14
+      sections mirroring the Privacy Policy structure. Covers
+      acceptance, account responsibilities (incl. one-shop-per-owner
+      enforced server-side), permitted / prohibited use, orders /
+      payments / refunds (with the 2-minute self-cancel window +
+      PR 21 substitution preferences), pricing, delivery (marketplace
+      disclaimer — independent partners, estimates not penalties),
+      content licensing for ratings (PR 20), liability disclaimer
+      capped at order value or ₹1,000, termination, change-notice
+      flow, governing-law placeholder `[CITY TBD before launch]`,
+      and contact email.
+- [x] **Static HTML builder** at
+      `@/scripts/build-legal-html.ts`. Hand-rolled
+      markdown-to-HTML converter (no `marked` dep — the docs use a
+      simple subset: headings, bold, italic, lists, ordered lists,
+      tables, hr, code, links). Wraps each in a `<!DOCTYPE html>`
+      shell with viewport meta + inline CSS (system font stack,
+      `max-width: 720px`, `prefers-color-scheme` dark mode, table
+      borders). Idempotent — re-run any time the markdown changes.
+      Wired up as `npm run build-legal` in `@/package.json:22`.
+- [x] **Generated HTML** at `@/dist/privacy.html` and
+      `@/dist/terms.html`. `.gitignore` updated to allow these
+      two paths through the existing `dist/` ignore rule.
+- [x] **Firebase Hosting rewrites** at `@/firebase.json:44-50`.
+      New `/privacy` → `/privacy.html` and `/terms` → `/terms.html`
+      rules added BEFORE the existing SPA-style `**` catch-all so
+      the dedicated routes take precedence.
+- [x] **Centralized URLs** in `@/app.json:98-101` under
+      `extra.legal` (`privacyUrl` + `termsUrl`) — same pattern as
+      `extra.firebase` and `extra.sentry`.
+- [x] **`getLegalUrls()` accessor** at
+      `@/src/constants/legal.ts`. Reads from `expo-constants` with
+      a hard-coded fallback that points at the dev project's
+      `.web.app` domain (so a misconfigured release never leaves
+      the user staring at a broken link).
+- [x] **`openLegal` util** at `@/src/utils/openLegal.ts`. Exports
+      `openPrivacy()` + `openTerms()`. Native → `expo-web-browser`'s
+      `openBrowserAsync` (SFSafariViewController / Chrome Custom
+      Tabs). Web → `Linking.openURL` (`window.open()`-style new
+      tab; `expo-web-browser` on web opens a useless `about:blank`).
+- [x] **LoginScreen legal footer** at
+      `@/src/screens/LoginScreen.tsx:179-195`. Below the Send-OTP
+      button on the `enter_phone` phase only. Reads: "By
+      continuing, you agree to our Terms of Service and Privacy
+      Policy." with both phrases tappable. Deliberately omitted
+      on `enter_otp` per ToS §2 — by tapping Send OTP the user
+      has already accepted.
+- [x] **ProfileScreen "Legal" section** at
+      `@/src/screens/ProfileScreen.tsx:341-365`. Sits above
+      "Account" so a user can read the policy before deciding to
+      sign out / delete. Two `Pressable` rows ("Terms of Service",
+      "Privacy Policy") with chevrons, reusing the existing
+      `chevron` style.
+- [x] **4 unit tests** at `@/tests/utils/openLegal.test.ts`.
+      `openPrivacy` + `openTerms` route to `WebBrowser.openBrowserAsync`
+      on native with the configured URL; web platform routes to
+      `Linking.openURL` instead; fallback URLs are returned when
+      `extra.legal` is absent. Each test uses `jest.isolateModulesAsync`
+      so module-level `expo-constants` reads re-evaluate against
+      fresh mocks. Total project tests: **606 / 606 passing** (was
+      602; +4).
+- [x] **`expo-web-browser` already in deps** at
+      `@/package.json:61` (`~15.0.10`); no install step needed.
+      No native rebuild required — `expo-web-browser` wraps
+      system APIs (no additional bridge code).
+- [x] **PRELAUNCH_CHECKLIST entries flipped** — the Privacy Policy
+      and Terms of Service items under "📝 Compliance & Distribution"
+      are now `[x] [Shipped — PR 25]` with the hosted URLs noted.
+      `[CITY TBD before launch]` follow-up captured inline on the
+      ToS entry.
+- [x] **No new `useState`** — every change is static JSX + tap
+      handlers. Hooks order unchanged in both screens.
+- [x] **No new `DO NOT REMOVE` markers** (15-PR clean streak).
+
+#### Verification done in-session
+
+- `npx tsc --noEmit` (root) — **0 errors**.
+- `npm test` — **606 / 606 passing**.
+- `npm run build-legal` — successful; both HTML files generated.
+- Inspected generated HTML — semantic markup, tables render, dark
+  mode CSS present, viewport meta set, footer-note line shows
+  hosted URL.
+
+#### Manual smoke-test steps (for the user)
+
+These are the steps you should walk through after the
+hosting-first deploy below. Each step exercises one user-visible
+piece of PR 25.
+
+1. **Hosted URLs reachable** — after `firebase deploy --only hosting`,
+   open these two URLs in any browser:
+   - `https://grocery-mvp-dev.web.app/privacy`
+   - `https://grocery-mvp-dev.web.app/terms`
+   Both should return the policy text rendered as mobile-friendly
+   HTML (no horizontal scroll on a phone-width viewport). On a
+   dark-mode device the page flips to dark colours via
+   `prefers-color-scheme`.
+2. **HTML rebuild is idempotent** — run `npm run build-legal`
+   twice. Second run produces the same files; no errors.
+3. **Login footer renders + works** — `npm run android` (or `ios`),
+   sign out, hit Login. On "Enter your phone number" you should
+   see a small grey footer with "Terms of Service" and "Privacy
+   Policy" in green underlined text. Tap each — opens
+   SFSafariViewController on iOS / Chrome Custom Tab on Android
+   without leaving the app. Close brings you back to the login
+   screen with the phone number preserved.
+4. **Footer absent on OTP screen** — enter a phone, tap Send OTP.
+   On the "Enter the OTP" screen, the legal footer is **not**
+   visible.
+5. **Profile "Legal" section** — sign in, go to Profile. Scroll
+   down. Above the red "Sign out" button there's a "Legal"
+   section header with two rows ("Terms of Service",
+   "Privacy Policy"), each with a `›` chevron. Tap each — same
+   in-app browser tab behaviour as the login footer.
+6. **Web build** — `npm run web`, navigate to /login. Tapping
+   the legal links opens new browser tabs (not the in-app
+   browser, since we're already in a browser).
+7. **Reviewer-walkthrough rehearsal** — pretend to be Apple App
+   Review: you have only the App Store listing URL we'll submit
+   (pointing at the Firebase Hosting privacy URL). Hit it. Read
+   the policy. Verify the contact email is real and clickable.
+   You should be able to convince yourself, in 60 seconds, that
+   this is a legitimate policy from a real operator.
+8. **TypeScript clean** — `npx tsc --noEmit` returns no errors.
+9. **Unit suite green** — `npm test` reports 606 / 606 passing.
+
+#### Deploy (hosting-first)
+
+```powershell
+$env:NODE_OPTIONS = "--use-system-ca"
+
+# 1. Local audit + rebuild HTML.
+npm test
+npm run build-legal
+
+# 2. Hosting FIRST so the URLs are live before the OTA ships.
+firebase deploy --only hosting
+
+# Verify both URLs return 200:
+curl -I https://grocery-mvp-dev.web.app/privacy
+curl -I https://grocery-mvp-dev.web.app/terms
+
+# 3. Client OTA.
+eas update --branch production --message "PR 25 — privacy policy + ToS"
+```
+
+No Cloud Functions deploy. No native rebuild.
+
+#### Rollback
+
+- **Hosting**: the previous Firebase Hosting release is one
+  click away in the Firebase Console (Hosting → Release history
+  → Rollback). Or `firebase hosting:clone` the prior version.
+- **Client**: `git revert` the screen edits + OTA. The hosted
+  URLs remain reachable; just no in-app entry points until the
+  next deploy.
+
+#### Follow-ups (out of scope this PR)
+
+- [ ] **Custom domain.** Move to `kiranamart.in/privacy` (or
+      similar) once the domain is procured. Two-line change in
+      `app.json` `extra.legal`. [PR 28-ish]
+- [ ] **Replace `[CITY TBD before launch]`** in
+      `docs/terms-of-service.md` §13 with the real operating-entity
+      city before App Store submission. [pre-launch]
+- [ ] **Translated versions** (Hindi, Tamil) once multi-language
+      UI is on the roadmap. [post-MVP]
+- [ ] **Cookie banner / DPDP consent UI** if/when we expand
+      beyond India-only beta. [post-MVP]
+- [ ] **Privacy Policy / ToS version-bump push** — the ToS §12
+      promises in-app notification on material updates. The
+      acceptance flow is out of scope here; build it the next
+      time we materially change a policy. [post-MVP]
+
+### PR 24 — Push token cleanup on sign-out — ✅ CODE COMPLETE May 22 2026
+
+Closes the `[Phase 12a-v2-iv-followup]` push-token-on-signout item
+logged 79 PRs ago. After sign-out the device's Expo push token used
+to linger in the previous user's `users/{prev-uid}.fcmTokens` array,
+so every push the server sent to that account continued arriving on
+the same physical device — even after a new user signed in.
+Customer pickup addresses + delivery partner names + payment status
+were leaking across account boundaries on shared phones (a real
+scenario for kirana family devices and QuickSwitch testers).
+
+PR 24 adds a server-side `unregisterPushToken` callable, a sibling
+`pushService.unregisterPushToken()` client method, and wires both
+into the sign-out orchestrator. As a side effect it routes
+QuickSwitchModal through the same orchestrator, closing a separate
+pre-existing cart-leak between test-account switches.
+
+#### What shipped
+
+- [x] **Server callable `unregisterPushToken`** at
+      `@/functions/src/index.ts:2217-2237`. Mirror of
+      `registerPushToken` — auth gate, loose string validation,
+      `FieldValue.arrayRemove(token)` with merge. Idempotent
+      (no-op on token not found). Multi-device safe (only removes
+      the exact token string passed in).
+- [x] **Client `pushService.unregisterPushToken`** at
+      `@/src/services/pushService.ts:156-187`. Mirrors the
+      registration flow's early-out cascade: web → bail,
+      simulator → bail, permission denied → bail, missing
+      projectId → bail, `getExpoPushTokenAsync` failure → warn
+      and bail. Never throws — the orchestrator depends on this.
+- [x] **`SignOutDeps` extended** at
+      `@/src/services/signOutAndClearLocalState.ts:38-62` with
+      optional `unregisterPushToken?: () => Promise<void>`. The
+      orchestrator runs it BEFORE `signOut` (the callable
+      requires auth) inside a try/catch that warn-logs failures
+      instead of aborting sign-out — user's "get me out" intent
+      takes priority.
+- [x] **File-header comment updated** — the "Known follow-up
+      (NOT addressed here)" paragraph that documented this exact
+      bug is replaced with a "Push token cleanup (PR 24)"
+      paragraph explaining the new ordering + failure-isolation
+      contract.
+- [x] **ProfileScreen wiring** at
+      `@/src/screens/ProfileScreen.tsx:202-209`. Adds the
+      `pushService` import + the new dep line in the existing
+      `signOutAndClearLocalState` call.
+- [x] **QuickSwitchModal routed through orchestrator** at
+      `@/src/components/dev/QuickSwitchModal.tsx:58-73`. Used to
+      call `authService.signOut()` directly — bypassed both PR
+      24's new token cleanup AND the pre-existing cart-clear. Now
+      uses `signOutAndClearLocalState` with the same deps as
+      ProfileScreen (sans `resetNavigation`; the AuthBootstrap
+      re-render handles routing on next sign-in).
+- [x] **3 new tests** at
+      `@/tests/services/authService.signOut.test.ts:77-124`:
+      order (`unregisterPushToken` before `signOut`),
+      failure-isolation (`unregisterPushToken` throw → signOut
+      still completes), and optional-dep backward-compat. Total
+      tests: 602 / 602 passing (was 599; +3).
+- [x] **No new `useState`** — the change is dep-injection only.
+      Hooks order unchanged everywhere.
+- [x] **No new `DO NOT REMOVE` markers** (14-PR clean streak).
+
+#### Verification done in-session
+
+- `npx tsc --noEmit` (root) — 0 errors.
+- `npx tsc --noEmit -p functions` — 0 errors.
+- `npm test` — **602 / 602 passing**.
+- Deliberate-break test: confirmed the new "BEFORE signOut" test
+  pins the ordering (flipping the order in the orchestrator
+  fails exactly that test).
+
+#### Deploy
+
+Server-first per `.windsurf/deploy-discipline.md`:
+
+```bash
+# 1. Local audit
+npm test
+
+# 2. Server FIRST
+cd functions && npm run build && cd ..
+firebase deploy --only functions:unregisterPushToken
+firebase functions:list | Select-String "unregisterPushToken"
+
+# 3. Client OTA
+eas update --branch production --message "PR 24 — push token cleanup on sign-out"
+```
+
+#### Rollback
+
+- **Server**: callable is purely additive; nothing reads from it.
+  Safe to leave deployed even if the client is reverted. If a bug
+  surfaces server-side, `git revert` the index.ts edit + redeploy.
+- **Client**: `git revert` + OTA. The callable continues
+  accepting requests; just no one calls it.
+
+#### Manual smoke-test runbook (post-deploy)
+
+1. Sign in as User A; confirm `users/A.fcmTokens` has this
+   device's token. Sign out via Profile. `fcmTokens` length
+   decreases by 1 (or array gone). Sign in as User B → push for
+   B arrives on this device, push for A does NOT.
+2. Offline sign-out: airplane mode → tap Sign Out. Warn log
+   surfaces, sign-out completes, cart cleared, navigation reset.
+3. QuickSwitch from A → B. Verify A's `fcmTokens` array no
+   longer contains this device's token AND the cart is empty
+   (previously the cart leaked).
+4. Multi-device: A on Device 1 + Device 2; sign out on Device 1.
+   Device 2's token still in A's array. Push to A still reaches
+   Device 2.
+5. Re-sign-in re-registers fresh: sign in as A again → on the
+   next push event A receives notifications on this device once
+   `registerForPushNotifications` re-runs at launch.
+
+#### Follow-ups (out of scope)
+
+- [ ] **Server-side GC of orphaned tokens.** Expo Push returns
+      `DeviceNotRegistered` when sending to a token whose
+      install was deleted. The send-side code should
+      `arrayRemove` on that error so uninstalled devices don't
+      accumulate dead tokens. Candidate PR 25. [post-MVP]
+- [ ] **Push token cleanup on account deletion.** When the
+      "delete my account" flow lands it will need to clear ALL
+      the user's tokens (not just this device's). Out of scope
+      now (no deletion flow yet). [post-MVP]
+- [ ] **Migrate from Expo Push to RNFB messaging.** Existing
+      pushService comment explains why we still use Expo Push;
+      consider once we need richer notification payloads /
+      data-only messages for background processing. [post-MVP]
+- [ ] **Telemetry: `push_token_unregistered`** event with
+      success / failure dimension so we can see the
+      orchestrator's warn-log rate in production. [PR 24 follow]
+
+### PR 23 — Delivery "Heads up — coming soon" regression fix — ✅ CODE COMPLETE May 22 2026
+
+A delivery-partner family tester reported that tapping any card in
+the dashboard's "Heads up — coming soon" rail opened the detail
+screen with **"Already taken — Another partner claimed this
+pickup."** — even though no partner had claimed it. PR 12 added
+the rail (server returns `accepted | preparing | ready_for_pickup`
+to `listAvailableDeliveries`) but the screen's `deriveDeliveryFlags`
+used a catch-all `!isAssignedToMe && !isAvailableForClaim` formula
+for `isTerminalForOthers`, sweeping the new preview states into the
+"already taken" branch.
+
+PR 23 narrows `isTerminalForOthers` to its original intent
+(claimed-by-another OR delivered-by-someone-else) and adds a new
+`isComingSoon` flag plus a yellow "⏳ Not yet ready for pickup"
+banner. Client-only, no server / rules / schema change.
+
+#### What shipped
+
+- [x] **`DeliveryFlags` type extended** at
+      `@/src/screens/delivery/DeliveryOrderDetailScreen.useDeliveryOrderDetail.ts:63-92`
+      with `isComingSoon: boolean`. `FLAGS_NULL_ORDER` includes
+      `isComingSoon: false`.
+- [x] **`deriveDeliveryFlags` rewritten** at
+      `@/src/screens/delivery/DeliveryOrderDetailScreen.useDeliveryOrderDetail.ts:103-145`.
+      Adds `isComingSoon = isDelivery && unassigned && !mine &&
+      status in {accepted, preparing}`. Narrows
+      `isTerminalForOthers = isClaimedByOther ||
+      (isDelivered && !isAssignedToMe)` — the catch-all is gone.
+- [x] **Tests rewritten** at
+      `@/tests/hooks/useDeliveryOrderDetail.test.ts`. The buggy
+      "preparing → terminal for others" test was removed; 4 new
+      PR-23 tests added: preparing → coming-soon, accepted →
+      coming-soon, accepted+claimed → terminal-precedence,
+      coming-soon requires delivery role. Suite is now 22 tests
+      (was 19; +4 / −1).
+- [x] **Screen destructures `isComingSoon`** at
+      `@/src/screens/delivery/DeliveryOrderDetailScreen.tsx:55`
+      from `useDeliveryOrderDetail`.
+- [x] **`headerTitle` widened** to render "Pickup details" for
+      coming-soon as well as available-for-claim.
+- [x] **Coming-soon JSX banner** inserted at the top of the
+      ScrollView, gated on `isComingSoon`. Shows the shop's state
+      ("preparing your order" / "just accepted") + an optional
+      "Ready by HH:MM" line when `order.readyByEstimate` is set
+      (reuses existing `formatOrderTime` import).
+- [x] **Four new styles** added — `comingSoonCard`,
+      `comingSoonTitle`, `comingSoonBody`, `comingSoonEta`. Same
+      yellow family (`#FEF9E7` bg, `#F4D03F` border) as the
+      dashboard HeadsUpCard.
+- [x] **No new `useState`** — the new flag rides through
+      `useDeliveryOrderDetail`'s return value, hooks order
+      undisturbed.
+- [x] **No new `DO NOT REMOVE` markers** (13-PR clean streak).
+
+#### Verification done in-session
+
+- `npx tsc --noEmit` — 0 errors.
+- `npm test` — **599 / 599 passing** (was 596; +3 net from the
+  test rewrite).
+- Deliberate-break test: flipped one new assertion to
+  `false`, confirmed exactly 1 fail on the named PR-23 test,
+  reverted.
+
+#### Manual smoke-test runbook (post-OTA)
+
+1. Place a COD order; from delivery account, dashboard surfaces
+   it under "Heads up — coming soon" while shop is
+   accepted/preparing. Tap → yellow banner, **no "Already
+   taken"**, no Accept button.
+2. Shop sets `readyByEstimate` → within ~5s the banner shows a
+   third line "Ready by HH:MM".
+3. Shop flips to `ready_for_pickup` → within ~5s banner
+   disappears, Accept button appears.
+4. Genuine race: two delivery accounts; A taps Accept on a
+   `ready_for_pickup` order; B's screen refreshes → still shows
+   the legitimate "Already taken" EmptyState. PR 23 does not
+   regress this path.
+5. Customer / shop accounts opening the same order see no
+   PR-23 surface (delivery-only).
+
+#### Deploy
+
+Client-only. No `firebase deploy`. Just:
+
+```bash
+npm test
+eas update --branch production --message "PR 23 — fix Already Taken on coming-soon orders"
+```
+
+Testers force-close + reopen.
+
+#### Rollback
+
+`git revert` the three touched files; OTA. No server state to
+unwind.
+
+#### Follow-ups (out of scope)
+
+- [ ] **Polish "just accepted" copy.** Reads slightly awkwardly
+      ("The shop is just accepted…"). Change to "looking at it"
+      or "reviewing your order" if a family tester flags it.
+      [PR 23 follow]
+- [ ] **PII tighter on coming-soon.** Currently the
+      delivery-instructions card renders before claim. Probably
+      fine (the partner already saw the address on the
+      HeadsUpCard) but worth a security pass once we expand
+      beyond family testers. [post-MVP]
+- [ ] **Push notification when status flips to
+      ready_for_pickup.** Partner currently polls (5s). For
+      multi-shop city scale, a push would beat the watcher
+      latency. [post-MVP]
+- [ ] **Telemetry `coming_soon_card_tapped`** to confirm the
+      rail's tap-through-rate after the fix. [PR 23 follow]
 
 ### PR 22 — Customer delivery instructions per address — ✅ CODE COMPLETE May 21 2026
 

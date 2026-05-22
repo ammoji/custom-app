@@ -36,7 +36,6 @@
       "distribution": "store",
       "autoIncrement": true,
       "env": {
-        "SENTRY_DISABLE_AUTO_UPLOAD": "true",
         "EXPO_PUBLIC_FIREBASE_API_KEY": "AIzaSyCM3piNPbjhICyRIYVaWyWrBplslYsVa9I",
         "EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN": "grocery-mvp-dev.firebaseapp.com",
         "EXPO_PUBLIC_FIREBASE_PROJECT_ID": "grocery-mvp-dev",
