@@ -50,6 +50,24 @@ import {
 // / 'validateBulkMenuRequest'", re-add THESE TWO LINES below.
 import { AuditLogInput, buildAuditLogEntry } from './auditLogHelpers';
 import { validateBulkMenuRequest } from './bulkMenuHelpers';
+// PR 32 — DO NOT REMOVE. Used by `addCustomMenuItem` (since PR 6),
+// `addExtractedMenuItems`, and `extractMenuFromImage` to validate
+// the `category` field against the canonical 10-value whitelist.
+import { VALID_CATEGORIES } from './categoryConstants';
+// PR 32 — DO NOT REMOVE. Used by `extractMenuFromImage` callable.
+// `ANTHROPIC_API_KEY` must also be passed in the callable's
+// `secrets:` option for Firebase to mount the Secret Manager value
+// at invocation time. Auto-formatter risk per code-discipline.
+import {
+  ANTHROPIC_API_KEY,
+  estimateCostInr,
+  runClaudeVision,
+} from './aiHelpers';
+import {
+  MENU_EXTRACTION_SYSTEM_PROMPT,
+  MENU_EXTRACTION_USER_PROMPT,
+  parseExtractionResponse,
+} from './menuExtractionHelpers';
 // PR 8 — DO NOT REMOVE. Used by writeAuditLog wrapper + the
 // listRecentAuditEntries + bulkUpdateMenuAvailability callables.
 // Auto-formatter has stripped helper imports in PRs 4, 5, 6, 6.1, 7;
@@ -4187,18 +4205,12 @@ export const getOnlineDeliveryCount = onCall(
 // "GLOBAL items: only price/available/stock editable" invariant in
 // one place. firestore.rules denies direct client writes.
 
-const VALID_CATEGORIES = new Set<string>([
-  'atta_rice_dal',
-  'oil_ghee',
-  'dairy_eggs',
-  'bakery',
-  'masala_spices',
-  'snacks_biscuits',
-  'beverages',
-  'personal_care',
-  'household',
-  'fruits_vegetables',
-]);
+// PR 32 — VALID_CATEGORIES moved to a dedicated module
+// (`categoryConstants.ts`) so menuExtractionHelpers + the new
+// extraction callables can import the same whitelist instead of
+// duplicating the literal. The behavior is unchanged from the
+// original local Set; `addCustomMenuItem` below validates against
+// this same import.
 
 // Internal helper — NOT exported as a callable. Used by approveShop
 // and by scripts/backfill-shop-menus.ts (which re-implements the
@@ -5372,6 +5384,340 @@ export const submitOrderRating = onCall<{
     );
 
     return { ok: true, stars: validStars, comment: validComment };
+  },
+);
+
+// ────────────────────────────────────────────────────────────
+// PR 32 — AI photo-to-catalog (menu extraction)
+// ────────────────────────────────────────────────────────────
+//
+// `extractMenuFromImage` — accepts a base64-encoded photo of a
+// rate-list / shelf, calls Claude vision, returns the parsed list of
+// items for the shop owner to review on-device.
+// `addExtractedMenuItems` — second leg: after the owner reviews +
+// edits, this batch-writes the approved subset using the same
+// validation gates as `addCustomMenuItem`.
+//
+// Cost guardrails (per docs/ROADMAP.md Section 3 AI policy):
+//   - Auth check: shopOwner claim + shopId.
+//   - Per-shop daily quota: 5 extractions, tracked in
+//     aiQuotas/{uid}_{YYYY-MM-DD}.menuExtraction. Counter ticks
+//     INSIDE the transaction that checks the limit, so two
+//     concurrent calls cannot both pass the gate.
+//   - Per-feature kill switch: `aiFeatures/menuExtraction.enabled`
+//     (missing or true → enabled; explicit false → reject).
+//   - Audit log entry per call to `aiAuditLog/` — uid, shopId,
+//     feature, model, token counts, costInr estimate, item counts.
+//
+// No image is persisted: base64 stays in the callable payload,
+// processed in memory, never written to a bucket. Privacy win +
+// no storage cleanup + no IAM signBlob path (which would re-
+// trigger the PR 31 IAM gotcha if we tried). Image cap of 2 MB
+// base64 (~1.5 MB raw) at the server protects against runaway
+// uploads bypassing the client-side resize.
+const MENU_EXTRACTION_DAILY_QUOTA = 5;
+const MAX_IMAGE_BYTES = 2_000_000;
+
+export const extractMenuFromImage = onCall<{
+  imageBase64: string;
+  imageMediaType?: 'image/jpeg' | 'image/png' | 'image/webp';
+}>(
+  {
+    cors: true,
+    enforceAppCheck: false,
+    secrets: [ANTHROPIC_API_KEY],
+    // Claude vision calls routinely take 10–30s on a real
+    // rate-list; 120s leaves headroom for network jitter + image
+    // decode without crowding the platform max.
+    timeoutSeconds: 120,
+    // base64 + Claude SDK both want headroom; 512MiB is the safe
+    // minimum for a 1.5 MB image + 4k token response buffer.
+    memory: '512MiB',
+  },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+    if (auth.token?.shopOwner !== true) {
+      throw new HttpsError('permission-denied', 'Shop owner role required');
+    }
+    const shopId = auth.token.shopId as string | undefined;
+    if (!shopId) {
+      throw new HttpsError('failed-precondition', 'No shopId on your account');
+    }
+
+    // Kill-switch check. Missing doc OR enabled:true → enabled.
+    // Explicit enabled:false → reject. Lets ops disable the
+    // feature in one click via Firebase Console without redeploying.
+    const killSwitchSnap = await db.doc('aiFeatures/menuExtraction').get();
+    const enabled = killSwitchSnap.exists
+      ? killSwitchSnap.data()?.enabled !== false
+      : true;
+    if (!enabled) {
+      throw new HttpsError(
+        'failed-precondition',
+        'Menu extraction is temporarily disabled. Try again later.',
+      );
+    }
+
+    // Validate image payload.
+    const data = request.data ?? ({} as Record<string, unknown>);
+    const imageBase64 = data.imageBase64;
+    const imageMediaType = data.imageMediaType as
+      | 'image/jpeg'
+      | 'image/png'
+      | 'image/webp'
+      | undefined;
+    if (typeof imageBase64 !== 'string' || imageBase64.length === 0) {
+      throw new HttpsError('invalid-argument', 'imageBase64 required');
+    }
+    if (imageBase64.length > MAX_IMAGE_BYTES) {
+      throw new HttpsError(
+        'invalid-argument',
+        `Image too large (${Math.round(imageBase64.length / 1024)}KB). Try a smaller photo or crop tighter.`,
+      );
+    }
+
+    // Per-shop daily quota — atomic increment in a transaction so
+    // two concurrent calls cannot both pass the gate.
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const quotaRef = db.doc(`aiQuotas/${auth.uid}_${today}`);
+    const usedToday = await db.runTransaction(async tx => {
+      const snap = await tx.get(quotaRef);
+      const current =
+        (snap.data()?.menuExtraction as number | undefined) ?? 0;
+      if (current >= MENU_EXTRACTION_DAILY_QUOTA) {
+        return -1; // sentinel: quota exhausted
+      }
+      tx.set(
+        quotaRef,
+        {
+          menuExtraction: current + 1,
+          updatedAt: FieldValue.serverTimestamp(),
+          uid: auth.uid,
+        },
+        { merge: true },
+      );
+      return current + 1;
+    });
+    if (usedToday < 0) {
+      throw new HttpsError(
+        'resource-exhausted',
+        `Daily limit reached (${MENU_EXTRACTION_DAILY_QUOTA} scans). Try again tomorrow.`,
+      );
+    }
+
+    // Call Claude.
+    let claudeResult;
+    try {
+      claudeResult = await runClaudeVision({
+        systemPrompt: MENU_EXTRACTION_SYSTEM_PROMPT,
+        userText: MENU_EXTRACTION_USER_PROMPT,
+        imageBase64,
+        imageMediaType: imageMediaType ?? 'image/jpeg',
+        // 4k tokens fits a long rate-list (60–100 SKUs) with
+        // headroom for the per-item JSON envelope.
+        maxTokens: 4000,
+      });
+    } catch (e) {
+      const message =
+        e instanceof Error ? e.message : String(e);
+      console.error(
+        '[extractMenuFromImage] Claude call failed:',
+        message,
+      );
+      // Don't refund the quota — calls that hit Claude still cost
+      // something on the Anthropic side. If we see this become a
+      // common failure mode we can revisit.
+      throw new HttpsError(
+        'internal',
+        'Could not read the image. Try retaking with better lighting or angle.',
+      );
+    }
+
+    // Parse + validate.
+    const parsed = parseExtractionResponse(claudeResult.text);
+    if (!parsed.ok) {
+      console.warn(
+        `[extractMenuFromImage] parse failed for shop ${shopId}: ${parsed.reason}`,
+      );
+      throw new HttpsError(
+        'internal',
+        'AI returned an unexpected response. Try again or retake the photo.',
+      );
+    }
+
+    // Audit log (non-fatal — a failed audit write must not break
+    // the user-visible action, same pattern as the PR 8
+    // writeAuditLog wrapper). Fire-and-forget; if it fails, log
+    // to function logs and move on.
+    const costInr = estimateCostInr(
+      claudeResult.inputTokens,
+      claudeResult.outputTokens,
+    );
+    db.collection('aiAuditLog')
+      .add({
+        uid: auth.uid,
+        shopId,
+        feature: 'menuExtraction',
+        model: claudeResult.model,
+        inputTokens: claudeResult.inputTokens,
+        outputTokens: claudeResult.outputTokens,
+        costInr,
+        itemsExtracted: parsed.items.length,
+        droppedCount: parsed.droppedCount,
+        timestamp: FieldValue.serverTimestamp(),
+      })
+      .catch(e =>
+        console.warn('[extractMenuFromImage] audit log failed:', e),
+      );
+
+    return {
+      ok: true as const,
+      items: parsed.items,
+      droppedCount: parsed.droppedCount,
+      usedTodayCount: usedToday,
+      dailyQuota: MENU_EXTRACTION_DAILY_QUOTA,
+    };
+  },
+);
+
+// Batch-write the shop-owner-approved subset of an extraction.
+// Mirrors `addCustomMenuItem` validation field-for-field; each
+// row produces a `custom_<ts>_<rand>_<idx>` menu item doc tagged
+// with `addedVia: 'menuExtraction'` so we can later compute the
+// "% of menu added via AI" analytic from Firestore alone.
+//
+// Returns counts so the UI can show "Added 47 items; 3 skipped
+// (mrp must be >= price)." Per-item skip reasons are returned so
+// the owner can fix the bad rows on the review screen and retry.
+//
+// Hard cap of 100 items per batch — Firestore batched writes
+// allow 500 ops, so a 100-item cap leaves room without bumping
+// the limit. Extraction passes that exceed this would have hit
+// Claude's `maxTokens` limit first, so 100 is generous.
+const ADD_EXTRACTED_BATCH_CAP = 100;
+
+export const addExtractedMenuItems = onCall<{
+  items: Array<{
+    name: string;
+    price: number;
+    mrp: number;
+    packLabel: string;
+    category: string;
+  }>;
+}>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+    if (auth.token?.shopOwner !== true) {
+      throw new HttpsError('permission-denied', 'Shop owner role required');
+    }
+    const shopId = auth.token.shopId as string | undefined;
+    if (!shopId) {
+      throw new HttpsError('failed-precondition', 'No shopId on your account');
+    }
+
+    const items = request.data?.items;
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new HttpsError('invalid-argument', 'items array required');
+    }
+    if (items.length > ADD_EXTRACTED_BATCH_CAP) {
+      throw new HttpsError(
+        'invalid-argument',
+        `Too many items (max ${ADD_EXTRACTED_BATCH_CAP} per batch). Got ${items.length}.`,
+      );
+    }
+
+    const batch = db.batch();
+    const added: string[] = [];
+    const skipped: Array<{ index: number; reason: string }> = [];
+    const now = Date.now();
+    const fallbackImage =
+      'https://placehold.co/400x400/e2e8f0/64748b?text=Custom+Item';
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const trimmedName =
+        typeof item?.name === 'string' ? item.name.trim() : '';
+      if (!trimmedName) {
+        skipped.push({ index: i, reason: 'name required' });
+        continue;
+      }
+      if (
+        typeof item.price !== 'number' ||
+        !Number.isFinite(item.price) ||
+        item.price <= 0
+      ) {
+        skipped.push({ index: i, reason: 'price must be a positive number' });
+        continue;
+      }
+      if (
+        typeof item.mrp !== 'number' ||
+        !Number.isFinite(item.mrp) ||
+        item.mrp < item.price
+      ) {
+        skipped.push({ index: i, reason: 'mrp must be >= price' });
+        continue;
+      }
+      if (typeof item.packLabel !== 'string' || !item.packLabel.trim()) {
+        skipped.push({ index: i, reason: 'packLabel required' });
+        continue;
+      }
+      if (
+        typeof item.category !== 'string' ||
+        !VALID_CATEGORIES.has(item.category)
+      ) {
+        skipped.push({
+          index: i,
+          reason: `unknown category: ${String(item.category)}`,
+        });
+        continue;
+      }
+
+      const rand = Math.random().toString(36).slice(2, 8);
+      const menuItemId = `custom_${now}_${rand}_${i}`;
+
+      batch.set(db.doc(`shops/${shopId}/menu/${menuItemId}`), {
+        id: menuItemId,
+        shopId,
+        productId: null,
+        name: trimmedName,
+        imageUrl: fallbackImage,
+        packLabel: item.packLabel.trim(),
+        category: item.category,
+        price: item.price,
+        mrp: item.mrp,
+        available: true,
+        stock: null,
+        // Match `addCustomMenuItem`'s schema — `isCustom: true`
+        // marks the row as shop-authored (no productId link).
+        // `addedVia` is the PR 32 analytics tag for "how did this
+        // SKU enter the catalog?"; older custom items predate this
+        // field, which the menu-render path treats as undefined.
+        isCustom: true,
+        addedVia: 'menuExtraction',
+        createdAt: now,
+        updatedAt: now,
+      });
+      added.push(menuItemId);
+    }
+
+    if (added.length === 0) {
+      throw new HttpsError(
+        'invalid-argument',
+        `All ${items.length} items failed validation. First error: ${skipped[0]?.reason}`,
+      );
+    }
+
+    await batch.commit();
+
+    return {
+      ok: true as const,
+      added: added.length,
+      skipped,
+      menuItemIds: added,
+    };
   },
 );
 

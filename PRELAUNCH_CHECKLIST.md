@@ -421,6 +421,114 @@ callables piecemeal.
       would be nicer UX but adds a heavy native dep purely for
       admin convenience. Justify once a customer-facing map need
       lands (Phase D PR 53).
+- [x] **AI photo-to-catalog (Phase A2 differentiator)** —
+      [Shipped — PR 32]. Shop owners can photograph their printed
+      or handwritten rate-list and the app extracts a structured
+      list of SKUs via Claude Sonnet vision, then batch-writes the
+      shop-owner-approved subset to their menu. Collapses 4 hours
+      of manual SKU entry into ~15 minutes of review.
+      **Substrate (reused by Phase C AI PRs 44–49):**
+      `@react-native-firebase/app` already present; added
+      `@anthropic-ai/sdk ^0.98.0` to `functions/package.json`. New
+      `functions/src/aiHelpers.ts` exports `runClaudeVision` +
+      `estimateCostInr` + the `ANTHROPIC_API_KEY` secret handle.
+      Lazy-init Anthropic client + structured-output text
+      concatenation. Default model `claude-sonnet-4-5`.
+      **Pure helpers:** `functions/src/menuExtractionHelpers.ts`
+      exports `MENU_EXTRACTION_SYSTEM_PROMPT` (embeds the 10
+      canonical CategoryIds), `MENU_EXTRACTION_USER_PROMPT`, and
+      `parseExtractionResponse` — strips ```json fences, drops
+      rows with unknown category / missing name / blank packSize,
+      coerces non-number prices to null, defaults missing
+      confidence to 'medium'. 9 unit tests in
+      `tests/functions/menuExtractionHelpers.test.ts` covering
+      every drop reason + parse failure.
+      **Callables:** `extractMenuFromImage` (auth + shopOwner +
+      shopId + `aiFeatures/menuExtraction.enabled` kill switch +
+      per-shop 5/day `aiQuotas/{uid}_{YYYY-MM-DD}` transactional
+      counter + 2MB image cap + 120s timeout + 512MiB memory +
+      `secrets: [ANTHROPIC_API_KEY]` + `aiAuditLog/` fire-and-
+      forget audit entry with token counts + costInr).
+      `addExtractedMenuItems` (mirrors `addCustomMenuItem`
+      validation field-for-field; batch-writes up to 100 items
+      tagged `addedVia: 'menuExtraction'` so future analytics can
+      compute "% of menu via AI"). Server-first deploy with one
+      new Firebase Functions secret manually created by Sudhir
+      via `firebase functions:secrets:set ANTHROPIC_API_KEY`.
+      **Client:** new `ScanMenuScreen` (4-phase wizard: pick →
+      processing → review → committing) with progressive copy
+      during the ~15s Claude wait, per-row include-checkbox + edit
+      fields + 10-chip category picker + low-confidence
+      indicator. `usePressGuard` on the commit CTA. Image is
+      resized to 1024px longest edge at JPEG quality 0.7 via
+      `expo-image-manipulator` with `base64: true` (no new client
+      dep, no `expo-file-system`). CTA on `ShopMenuScreen` above
+      the existing "+ Add custom item" row. Route registered in
+      `AppNavigator`. Schema-additive only — three new
+      collections (`aiQuotas/`, `aiFeatures/`, `aiAuditLog/`)
+      written exclusively via Admin SDK; no `firestore.rules`
+      change needed. **No image persistence** — base64 stays in
+      the callable payload, processed in memory, never written
+      to any bucket (privacy win + no storage cleanup needed +
+      no IAM signBlob gotcha à la PR 31).
+      **Analytics:** 3 new events on `Analytics` (per Strategic
+      Principle 8 in `docs/ROADMAP.md`): `scan_menu_started`
+      (source: camera|gallery), `scan_menu_extracted`
+      (item_count + dropped_count), `scan_menu_committed`
+      (added_count + skipped_count). Funnel observability ships
+      with the feature so we don't have to retrofit before
+      PR 38.
+      **Verification:** root + functions tsc both clean; 636
+      tests pass (+9 from menuExtractionHelpers); deliberate-
+      break (`validateExtractedItem` returns rows with unknown
+      categories) produced expected assertion failure on the
+      "drops items with invalid category" test, reverted.
+      **Pre-deploy reminder:** secret MUST be created before
+      first invocation, or the function will fail with
+      `Secret ANTHROPIC_API_KEY not found`. Kill-switch doc at
+      `aiFeatures/menuExtraction` should be seeded `{enabled:
+      true}` via Firestore Console before OTA.
+- [ ] **PR 33 — master product catalog matching** — every PR 32
+      extraction currently lands as a custom menu item (productId:
+      null, isCustom: true, addedVia: 'menuExtraction'). PR 33's
+      job is to introduce a master product catalog, match each
+      extracted SKU against it during the review step, and let the
+      admin curate the unmatched ones. Without PR 33, two
+      different shops scanning the same Aashirvaad Atta produce
+      two unrelated custom items, breaking the "compare prices
+      across shops" customer journey when we get there.
+- [ ] **AI cost dashboard / admin spend report** — `aiAuditLog/`
+      is the substrate; PR 32 writes one entry per successful
+      extraction with `costInr`, `inputTokens`, `outputTokens`,
+      `feature`, `model`, `shopId`. An admin report showing
+      daily/weekly AI spend per feature is worth building once
+      total monthly spend crosses ~₹1000.
+- [ ] **Anthropic API key rotation** — manual `firebase functions:
+      secrets:set ANTHROPIC_API_KEY` (with the new value) works
+      today but there's no scheduled reminder. Document a
+      quarterly rotation cadence somewhere ops can see; for now
+      this PRELAUNCH bullet is the reminder.
+- [ ] **Re-scan as price-update (not always-add)** — PR 32 is
+      add-only. Re-scanning a rate-list a month later duplicates
+      every SKU rather than reconciling prices on the existing
+      menu. Future PR: "Reconcile with existing menu" toggle on
+      the review screen that diffs each draft against the shop's
+      current menu by name+pack similarity, surfaces an update
+      path for matches, and only creates new items for the
+      unmatched rows.
+- [ ] **Multi-photo extraction in one draft** — single photo per
+      call in PR 32. Shop owners with very long rate-lists do
+      multiple scans (each counts against the 5/day quota). A
+      future flow would let the owner take 3–4 photos of a long
+      list and combine them into a single review draft.
+- [ ] **PDF rate-list ingestion** — vision API supports JPEG/PNG/
+      WebP only. PR 32 takes a photo-of-PDF as an acceptable
+      workaround. Native PDF would need server-side conversion to
+      images, which adds complexity. Defer.
+- [ ] **Per-extracted-row image preview thumbnail** — Claude
+      doesn't return crop coords, so attaching the original photo
+      region to each draft row would require client-side cropping
+      inference. Heavy. Defer.
 - [ ] **Audit-log "admin viewed KYC docs" event** — privacy
       consideration worth tracking once we add real customer
       disputes / regulator review. Today the access is silent.

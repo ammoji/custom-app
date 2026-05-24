@@ -417,3 +417,39 @@ export type OrderRating = {
   comment?: string;
   ratedAt: number;
 };
+
+// PR 32 — AI menu extraction.
+//
+// `ExtractedMenuItem` mirrors the server's `ExtractedItem` shape
+// from `functions/src/menuExtractionHelpers.ts`. The server has
+// already validated `category` against the canonical 10-value
+// whitelist, so this is typed as `CategoryId` on the client.
+// `mrp` and `sellPrice` are nullable because Claude returns null
+// for illegible prices; the review screen forces the shop owner
+// to fill them in before committing.
+export type ExtractedMenuItem = {
+  name: string;
+  brand: string | null;
+  packSize: string;
+  mrp: number | null;
+  sellPrice: number | null;
+  category: CategoryId;
+  confidence: 'high' | 'medium' | 'low';
+};
+
+// `ExtractedMenuDraft` is the client-side, editable wrapper around
+// `ExtractedMenuItem`. The review screen renders a list of these
+// and mutates `selected` + `edited*` in place. Only the approved
+// rows (selected=true and price/mrp valid) are translated into the
+// `addExtractedMenuItems` payload at commit time.
+//
+// `tempId` is a local-only React key; never sent to the server.
+export type ExtractedMenuDraft = ExtractedMenuItem & {
+  tempId: string;
+  selected: boolean;
+  editedName: string;
+  editedPackLabel: string;
+  editedMrp: number;
+  editedSellPrice: number;
+  editedCategory: CategoryId;
+};

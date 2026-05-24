@@ -330,6 +330,17 @@ export default function ShopMenuScreen() {
           ))}
         </View>
         <View style={styles.addBtn}>
+          {/* PR 32 — AI photo-to-catalog CTA. Placed above the
+              "Add custom item" row so it's the first option a shop
+              owner sees when bulk-adding items; the manual form
+              path stays for fixups + one-offs. Disabled in selectMode
+              for consistency with the other add path. */}
+          <Button
+            title="📸 Scan rate-list (AI)"
+            onPress={() => nav.navigate('ScanMenu')}
+            disabled={selectMode}
+          />
+          <View style={{ height: spacing.sm }} />
           {/* PR 8 Part B — Add + Select buttons share this row.
               Select toggles selectMode; in selectMode the chips above
               still work as filters but row presses toggle selection. */}

@@ -18,6 +18,7 @@ import type {
     Address,
     CartItem,
     DeliveryRequest,
+    ExtractedMenuItem,
     MenuItem,
     NewMenuItemInput,
     Order,
@@ -568,6 +569,83 @@ export const orderService = {
     const fn = httpsCallable(functions, 'addCustomMenuItem');
     const result = await fn(input);
     return result.data as { menuItemId: string };
+  },
+
+  // PR 32 — AI menu extraction (leg 1 of 2). Sends a base64-encoded
+  // photo of a rate-list / shelf, receives a parsed item list for
+  // the shop owner to review. Server enforces auth + per-shop daily
+  // quota (5/day) + feature kill-switch + 2MB image cap. Errors
+  // surface as `code/message` from the callable for the screen to
+  // render verbatim — they're already shop-owner-friendly.
+  async extractMenuFromImage(input: {
+    imageBase64: string;
+    imageMediaType?: 'image/jpeg' | 'image/png' | 'image/webp';
+  }): Promise<{
+    ok: true;
+    items: ExtractedMenuItem[];
+    droppedCount: number;
+    usedTodayCount: number;
+    dailyQuota: number;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('extractMenuFromImage');
+      const result = await fn(input);
+      return result.data as {
+        ok: true;
+        items: ExtractedMenuItem[];
+        droppedCount: number;
+        usedTodayCount: number;
+        dailyQuota: number;
+      };
+    }
+    const fn = httpsCallable(functions, 'extractMenuFromImage');
+    const result = await fn(input);
+    return result.data as {
+      ok: true;
+      items: ExtractedMenuItem[];
+      droppedCount: number;
+      usedTodayCount: number;
+      dailyQuota: number;
+    };
+  },
+
+  // PR 32 — AI menu extraction (leg 2 of 2). After the shop owner
+  // reviews + edits, this batch-writes the approved subset. Server
+  // mirrors `addCustomMenuItem` validation per item; rows that fail
+  // come back in `skipped` with a human-readable reason so the
+  // screen can show "Added 47; skipped 3 (mrp must be >= price)."
+  async addExtractedMenuItems(input: {
+    items: Array<{
+      name: string;
+      price: number;
+      mrp: number;
+      packLabel: string;
+      category: string;
+    }>;
+  }): Promise<{
+    ok: true;
+    added: number;
+    skipped: Array<{ index: number; reason: string }>;
+    menuItemIds: string[];
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('addExtractedMenuItems');
+      const result = await fn(input);
+      return result.data as {
+        ok: true;
+        added: number;
+        skipped: Array<{ index: number; reason: string }>;
+        menuItemIds: string[];
+      };
+    }
+    const fn = httpsCallable(functions, 'addExtractedMenuItems');
+    const result = await fn(input);
+    return result.data as {
+      ok: true;
+      added: number;
+      skipped: Array<{ index: number; reason: string }>;
+      menuItemIds: string[];
+    };
   },
 
   async removeMenuItem(input: {
