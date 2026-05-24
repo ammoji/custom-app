@@ -16,6 +16,7 @@ import Button from '../../components/common/Button';
 import ScreenHeader from '../../components/common/ScreenHeader';
 import { CATEGORIES, CategoryId } from '../../constants/categories';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
+import { Analytics } from '../../services/analytics';
 import { orderService } from '../../services/orderService';
 // PR 6 — image upload pipeline. DO NOT REMOVE: auto-formatter has
 // stripped these in past PRs (1, 2, 4, 5, 6) AND once already during
@@ -124,6 +125,16 @@ export default function AddCustomMenuItemScreen() {
         imageUrl: imageUrl.trim() || undefined,
         stock,
       });
+      // PR 38 — merchant-active funnel event. `source: 'custom'`
+      // distinguishes from PR 32's `addedVia: 'menuExtraction'`
+      // (which fires `scan_menu_committed` instead). Logged AFTER
+      // the server confirms so failed adds don't pollute counts.
+      if (shopId) {
+        Analytics.shop_menu_item_added({
+          shop_id: shopId,
+          source: 'custom',
+        });
+      }
       // Pop back to ShopMenuScreen, which refetches on focus.
       nav.goBack();
     } catch (e: any) {

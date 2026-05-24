@@ -1,5 +1,6 @@
 import * as Notifications from 'expo-notifications';
 import { useEffect } from 'react';
+import { Analytics } from '../services/analytics';
 import { authService } from '../services/authService';
 import { pushService } from '../services/pushService';
 import { useAuthStore } from '../store/useAuthStore';
@@ -68,6 +69,21 @@ export default function AuthBootstrap() {
           if (refreshed) useAuthStore.getState().setUser(refreshed);
         } catch (err) {
           console.warn('[auth] refreshAdminClaim failed:', err);
+        }
+
+        // PR 38 — role-arrival sign-in events. Fire once per app
+        // session AFTER the claim refresh above so the role flags
+        // reflect server truth (otherwise a freshly-promoted shop
+        // owner would log as 'customer' until the next launch).
+        // Anonymous users + plain customers get no event — Firebase
+        // Analytics' built-in `first_open` covers them.
+        const s = useAuthStore.getState();
+        if (s.isAdmin) {
+          Analytics.admin_signed_in();
+        } else if (s.isShopOwner && s.shopId) {
+          Analytics.shop_signed_in({ shop_id: s.shopId });
+        } else if (s.isDelivery) {
+          Analytics.delivery_signed_in();
         }
       }
 

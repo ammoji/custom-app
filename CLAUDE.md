@@ -191,34 +191,92 @@ file (currently PR 23 is the most recent), `docs/pr-N-<slug>-windsurf-prompt.md`
 6. Ask Sudhir what he wants to work on. Don't assume — even if context
    suggests an obvious next step, confirm before doing anything destructive.
 
-## Current state — 2026-05-22 (post-PR-27 OTA; PR 26 code committed, build pending)
+## Current state — 2026-05-24 (PR 34 native build live + tested; PR 26 source-map status TBD)
 
 **Branch:** `main`, up to date with `origin/main`.
 
-**Last commit:** `PR 26: Sentry source-map upload enabled on
-production builds` (May 22). Previous: `PR 27: usePressGuard hook +
-tap protection on order-flow buttons`, `PR 25: Privacy Policy + ToS
-hosted on Firebase Hosting + linked in-app`, `PR 24: push token
-cleanup on sign-out`.
+**Last commit:** `PR 34: voice + Hindi onboarding assist (Google
+STT + Claude Haiku field parser)` (`27f22ac`, May 24). Previous:
+`PR 32`, `PR 31.1`, `PR 31`, `PR 26`, `PR 27`, `PR 25`.
 
-**OTA status:** PR 27 + PR 25 are live on production via
-`eas update --branch production`. **PR 26 is intentionally NOT
-OTA'd** — it's a build-time-only config change; OTAs don't run
-the source-map upload step. The Sentry source-map upload starts
-working on the **next native production build**
-(`eas build --profile production`). Required pre-step before that
-build: create the `SENTRY_AUTH_TOKEN` EAS secret on the production
-environment (Sudhir runs this once via
-`eas secret:create --scope project --name SENTRY_AUTH_TOKEN ...`).
-Until the next build, prod Sentry stack traces stay minified;
-that's an accepted state because the next build will happen during
-App Store submission prep regardless. Unit suite 615/615 passing
-(+4 from `tests/services/sentry.test.ts`).
+**Deploy state:**
+- **PR 34** — voice + Hindi onboarding assist. ✅ **Live on
+  iOS (build 15) as of May 24.** Native build shipped after
+  the OTA-fingerprint-mismatch diagnostic; submitted via
+  `eas submit --profile production --platform ios --latest`;
+  installed via TestFlight; tested end-to-end (language picker,
+  big 🎙 button, per-field mics all visible on Step 1 of
+  RegisterShopScreen). Server callable +
+  `aiFeatures/voiceOnboarding.enabled = true` kill-switch +
+  10/day quota all live. Android build status pending — verify
+  with `eas build:list --platform android --limit 3`; if no
+  PR 34 Android build exists yet, run
+  `eas build --profile production --platform android` when
+  ready (not blocking iOS-side pilot).
+- **PR 26** — Sentry source-map upload. Status TBD on build 15:
+  `SENTRY_AUTH_TOKEN` EAS secret was NOT set before build 15
+  ran (`eas secret:list | findstr SENTRY_AUTH_TOKEN` returned
+  empty on May 24). The build succeeded, which means the Sentry
+  plugin gracefully skipped the upload step rather than
+  failing the build. Net effect: build 15's stack traces in
+  Sentry will remain minified. **Action for next build:**
+  set the secret first via
+  `eas secret:create --scope project --name SENTRY_AUTH_TOKEN
+  --value <token> --type string --visibility secret
+  --environment production`, then any subsequent `eas build`
+  will activate PR 26 properly. Until then, prod crash
+  diagnostics on build 15 remain limited.
+- **PR 32** — first shipping AI feature. Two new callables
+  deployed + client OTA pushed. Smoke-tested end-to-end on
+  phone: scanning a real rate-list returns structured menu
+  items in ~15s. **Mission North Star metric moved materially:
+  time-to-first-menu-item is now ~15 min vs. 4 hours.**
+  `ANTHROPIC_API_KEY` Firebase Functions secret;
+  `aiFeatures/menuExtraction.enabled = true` kill-switch.
+  Collections: `aiQuotas/` (5/day per-shop cap), `aiAuditLog/`
+  (cost + token + items tracking).
+- **PR 31.1** — admin shop-review polish (tappable lat/lng,
+  rejection reason card, KYC docs post-approval). Live.
+- **PR 31** — shop KYC upload. Live. IAM fix unblocked PR 6.1
+  menu image upload as a side effect.
+- **PR 27 + PR 25** — live on production OTA channel.
+- **PR 26** — code committed; activates on next native build
+  (which is now in flight to also deliver PR 34 — same build,
+  two unblocks at once).
 
-PR 25 (Privacy Policy + ToS hosting) is still live at
-`grocery-mvp-dev.web.app/{privacy,terms}`. PR 24 (push token
-cleanup) and PR 23 (delivery heads-up fix) also live on the same
-production channel.
+**Unit suite:** 636/636 passing (+9 from PR 32's
+`menuExtractionHelpers.test.ts`).
+
+**AI substrate now in place** (`functions/src/aiHelpers.ts`):
+every Phase C customer-side AI PR (PR 47–53) reuses the same
+`runClaudeVision` wrapper + `estimateCostInr` audit helper +
+`ANTHROPIC_API_KEY` secret + cost-guardrail pattern (quota +
+kill-switch + audit log). Built right once; cost of every
+later AI PR is now just "write the prompt + the typed response
+shape."
+
+**IAM fix logged (one-time, never repeat):** Firebase Cloud
+Functions Gen 2's runtime service account
+(`333323701016-compute@developer.gserviceaccount.com`) needed the
+`Service Account Token Creator` role granted on itself before any
+`getSignedUrl` call could succeed. Failure mode was `SigningError:
+Permission 'iam.serviceAccounts.signBlob' denied`. Surfaced as
+`INTERNAL` on the client. Fix is documented in
+`.windsurf/deploy-discipline.md` under the new "Signed-URL IAM"
+section so future Gen 2 + signed-URL PRs don't re-discover it.
+
+**OTA-vs-eas-build rule logged (PR 34 hard lesson):** Adding any
+`expo-*` library WITH a config plugin in `app.json` (e.g.
+`expo-audio`, `expo-camera`, `expo-notifications`), OR adding /
+changing permissions in `ios.infoPlist` / `android.permissions`,
+OR touching the `plugins` array, OR changing `runtimeVersion` —
+all require a fresh `eas build`. OTAs silently won't apply because
+the runtime fingerprint changes. PR 34 incorrectly claimed
+"OTA-only" and consumed ~1 hour of debugging before the fingerprint
+mismatch was diagnosed. Full decision table + diagnostic pattern
+in `.windsurf/deploy-discipline.md` under the new "OTA vs
+`eas build`" section. **Every future PR's deploy plan must
+classify against the table before claiming OTA-only.**
 
 **Uncommitted local changes — large bundle, 28 files, ~4200 insertions:**
 - `PRELAUNCH_CHECKLIST.md` (+1857 lines — new sections appended)
@@ -282,10 +340,20 @@ Worth clarifying with Sudhir before touching this code.
   first, so there's no risk of silent skip. Smoke tests 1–4 from
   `docs/pr-26-sentry-sourcemap-upload-windsurf-prompt.md` run after
   the build completes.
-- **One drafted Windsurf prompt still waiting to be picked up:**
-  PR 31 (shop KYC document upload — already re-scoped on the
-  ROADMAP from "the foundation" to "the actual KYC-doc gap", since
-  `registerShop`/`approveShop` shipped in Phase 12a-v2-i).
+- **Pilot-blocking sequence (post-PR-34):** PR 38 (admin
+  feature-usage dashboard, ~2 days, must land before pilot for
+  day-1 data capture) → PR 36 (Customer CRM, ~1–1.5 days, the
+  primary merchant daily-use hook for pilot) → start pilot.
+- **PR 37 + PR 37.1 (Digital Udhaar / Khata) deferred from
+  pilot** (Sudhir's call May 24). Build on demand if pilot
+  shop owners request credit-tracking. Prompts preserved at
+  `docs/pr-37-digital-udhaar-khata-ledger-windsurf-prompt.md`
+  for fast pickup. See ROADMAP.md Section 4 deferral table.
+- **PR 35 (field-rep assisted onboarding) + PR 33 (master
+  catalog) deferred** — both Phase A2 nice-to-haves, not
+  pilot-blocking. PR 35 is the Trust Principle 5 escape hatch;
+  PR 33 is master-catalog dedup. Defer until pilot signal
+  demands them.
 - **Production Firebase project** (`grocery-mvp-prod`) not yet created.
   Documented workstream in `PRELAUNCH_CHECKLIST.md`. Trigger: family
   testing reports quiet for 1–2 weeks + ready to commit to launch date.

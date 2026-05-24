@@ -21,6 +21,7 @@ import Loader from '../../components/common/Loader';
 import ScreenHeader from '../../components/common/ScreenHeader';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
 import type { RootStackParamList } from '../../navigation/AppNavigator';
+import { Analytics } from '../../services/analytics';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
 import type { Shop, ShopKycDocKind, UserInfo } from '../../types';
@@ -168,6 +169,10 @@ export default function ShopRegistrationDetailScreen() {
             setActionPending('approve');
             try {
               await orderService.approveShop({ shopId: shop.id });
+              // PR 38 — log AFTER server success so failed attempts
+              // don't pollute the funnel. Same posture for every
+              // PR-38 event wired in this file.
+              Analytics.admin_shop_approved({ shop_id: shop.id });
               Alert.alert('Approved', `${shop.name} is now live.`, [
                 { text: 'OK', onPress: () => nav.goBack() },
               ]);
@@ -194,6 +199,10 @@ export default function ShopRegistrationDetailScreen() {
     setActionPending('reject');
     try {
       await orderService.rejectShop({ shopId: shop.id, reason });
+      Analytics.admin_shop_rejected({
+        shop_id: shop.id,
+        reason_length: reason.length,
+      });
       setShowRejectModal(false);
       Alert.alert(
         'Rejected',

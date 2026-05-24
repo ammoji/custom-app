@@ -22,6 +22,7 @@ import ScreenHeader from '../../components/common/ScreenHeader';
 import ShopRatingBadge from '../../components/shop/ShopRatingBadge';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
 import type { RootStackParamList } from '../../navigation/AppNavigator';
+import { Analytics } from '../../services/analytics';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
 import type { Shop, ShopKycDocKind } from '../../types';
@@ -145,6 +146,7 @@ export default function ShopDetailManagementScreen() {
             setPending('unsuspend');
             try {
               await orderService.unsuspendShop({ shopId: shop.id });
+              Analytics.admin_shop_unsuspended({ shop_id: shop.id });
               Alert.alert('Done', `${shop.name} is active again.`, [
                 {
                   text: 'OK',
@@ -178,6 +180,7 @@ export default function ShopDetailManagementScreen() {
     setPending('suspend');
     try {
       await orderService.suspendShop({ shopId: shop.id, reason: trimmed });
+      Analytics.admin_shop_suspended({ shop_id: shop.id });
       setShowSuspendModal(false);
       Alert.alert('Suspended', `${shop.name} has been suspended.`, [
         {

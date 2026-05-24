@@ -484,6 +484,18 @@ export default function HomeScreen() {
                 <Text style={styles.adminChevron}>›</Text>
               </Pressable>
             )}
+            {/* PR 38 — feature usage dashboard tile. */}
+            {isAdmin && (
+              <Pressable
+                style={styles.adminRow}
+                onPress={() => nav.navigate('AdminUsage')}
+                accessibilityRole="button"
+                accessibilityLabel="Feature usage"
+              >
+                <Text style={styles.adminText}>📊  Feature usage</Text>
+                <Text style={styles.adminChevron}>›</Text>
+              </Pressable>
+            )}
           </>
         )}
 

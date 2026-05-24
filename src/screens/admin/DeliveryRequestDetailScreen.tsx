@@ -20,6 +20,7 @@ import Loader from '../../components/common/Loader';
 import ScreenHeader from '../../components/common/ScreenHeader';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
 import type { RootStackParamList } from '../../navigation/AppNavigator';
+import { Analytics } from '../../services/analytics';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
 import type { DeliveryRequest } from '../../types';
@@ -88,6 +89,9 @@ export default function DeliveryRequestDetailScreen() {
             setActionPending('approve');
             try {
               await orderService.approveDeliveryRole(request.uid);
+              // PR 38 — admin funnel event. Logged AFTER server
+              // success so failed approvals don't pollute counts.
+              Analytics.admin_delivery_approved({ uid: request.uid });
               Alert.alert(
                 'Approved',
                 `${request.name || request.phone} is now a delivery partner.`,
@@ -116,6 +120,7 @@ export default function DeliveryRequestDetailScreen() {
     setActionPending('reject');
     try {
       await orderService.rejectDeliveryRole({ uid: request.uid, reason });
+      Analytics.admin_delivery_rejected({ uid: request.uid });
       setShowRejectModal(false);
       Alert.alert(
         'Rejected',

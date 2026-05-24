@@ -21,6 +21,7 @@ import { colors, radii, shadow, spacing, typography } from '../../constants/them
 // imports twice during this PR — if you save and tsc complains
 // about Cannot find name 'handleRoleAuthError' / 'authService' /
 // 'shouldRollbackOptimistic', re-add this block.
+import { Analytics } from '../../services/analytics';
 import { authService } from '../../services/authService';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
@@ -223,6 +224,10 @@ export default function DeliveryDashboardScreen() {
       await orderService.setDeliveryStatus({
         status: next ? 'online' : 'offline',
       });
+      // PR 38 — logged AFTER server confirms so a flapping
+      // network doesn't double-count toggles. is_online reflects
+      // the FINAL state (post-success), not the optimistic flip.
+      Analytics.delivery_online_toggled({ is_online: next });
     } catch (e: any) {
       setOnline(!next);
       Alert.alert(
@@ -257,6 +262,7 @@ export default function DeliveryDashboardScreen() {
     );
     try {
       await orderService.markPickedUp({ orderId: order.id });
+      Analytics.delivery_picked_up({ order_id: order.id });
     } catch (e: any) {
       setMine(prev => {
         const current = prev.find(o => o.id === order.id);
@@ -300,6 +306,19 @@ export default function DeliveryDashboardScreen() {
     );
     try {
       await orderService.markDelivered({ orderId: order.id });
+      // PR 38 — minutes-since-pickup powers the delivery-time
+      // distribution chart (future PR). Compute from the
+      // optimistic pickedUpAt; if the watcher already updated it,
+      // the server's deliveredAt is the source of truth elsewhere.
+      const pickedUpAt = order.pickedUpAt ?? optimisticDeliveredAt;
+      const minutesSincePickup = Math.max(
+        0,
+        Math.round((optimisticDeliveredAt - pickedUpAt) / 60_000),
+      );
+      Analytics.delivery_delivered({
+        order_id: order.id,
+        minutes_since_pickup: minutesSincePickup,
+      });
     } catch (e: any) {
       setMine(prev => {
         const current = prev.find(o => o.id === order.id);

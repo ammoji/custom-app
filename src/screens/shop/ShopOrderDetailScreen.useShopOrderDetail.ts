@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Analytics } from '../../services/analytics';
 import { orderService } from '../../services/orderService';
 import type { Order } from '../../types';
 // PR 3 — concurrency cleanup (item 3a). Race-guard rollbacks so a
@@ -185,6 +186,51 @@ export function useShopOrderDetail(
         newStatus,
         readyByEstimate,
       );
+      if (result.ok) {
+        // PR 38 — merchant-active funnel events. Logged ONLY on
+        // server success; rollback path below stays unchanged so
+        // failed transitions don't pollute counts.
+        const shopId = state.order?.shopId;
+        if (shopId && previousStatus) {
+          Analytics.shop_order_status_changed({
+            shop_id: shopId,
+            order_id: orderId,
+            from_status: previousStatus,
+            to_status: newStatus,
+          });
+        }
+        // shop_order_accepted: the first "pending → accepted"
+        // transition. createdAt drives minutes_to_accept — powers
+        // the time-to-accept dashboard chart in a future PR.
+        if (
+          shopId &&
+          previousStatus === 'pending' &&
+          newStatus === 'accepted' &&
+          state.order?.createdAt
+        ) {
+          const minutesToAccept = Math.max(
+            0,
+            Math.round((Date.now() - state.order.createdAt) / 60_000),
+          );
+          Analytics.shop_order_accepted({
+            shop_id: shopId,
+            order_id: orderId,
+            minutes_to_accept: minutesToAccept,
+          });
+        }
+        // shop_eta_set: any transition that carried a readyByEstimate.
+        if (shopId && readyByEstimate !== undefined) {
+          const etaMinutes = Math.max(
+            0,
+            Math.round((readyByEstimate - Date.now()) / 60_000),
+          );
+          Analytics.shop_eta_set({
+            shop_id: shopId,
+            order_id: orderId,
+            eta_minutes: etaMinutes,
+          });
+        }
+      }
       if (!result.ok && previousStatus) {
         // PR 3 — concurrency cleanup. Only roll back to
         // previousStatus if the current order's status is STILL the

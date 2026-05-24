@@ -73,6 +73,30 @@
         { "fieldPath": "shopId", "order": "ASCENDING" },
         { "fieldPath": "available", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "featureUsageLog",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "date", "order": "DESCENDING" },
+        { "fieldPath": "feature", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "featureUsageLog",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "date", "order": "DESCENDING" },
+        { "fieldPath": "role", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "featureUsageLog",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "shopId", "order": "ASCENDING" },
+        { "fieldPath": "date", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []
