@@ -219,5 +219,25 @@ service cloud.firestore {
       allow read: if isAdmin();
       allow write: if false;
     }
+
+    // PR 38 + PR 38.1 — Feature usage log. Server-mediated only
+    // (same posture as `aiAuditLog/` and `auditLog/`).
+    //
+    // PR 38 originally allowed direct client creates with a uid-
+    // match check, but on native the Web SDK Firestore client
+    // can't see RNFB's auth context — same root cause as PR 6.1's
+    // signed-upload-URL fix for Storage. Result: client writes
+    // silently failed (rule sees `request.auth == null`) and the
+    // collection never accumulated data.
+    //
+    // PR 38.1 routes both writes and reads through callables
+    // (`logFeatureUsageEvent` / `queryFeatureUsageLog`), which
+    // use the Admin SDK and validate auth via the callable's
+    // HTTPS auth header (works cross-SDK). Direct client ops
+    // are now denied as defense-in-depth against a forged-event
+    // debug client.
+    match /featureUsageLog/{eventId} {
+      allow read, write: if false;
+    }
   }
 }

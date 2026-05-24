@@ -192,6 +192,190 @@ auto-set it from Windsurf — environment mutations should be visible.
 | Functions | `firebase deploy --only functions` | 5–15 min | **Yes** (deletions) |
 | Verify | `firebase functions:list` | 5 s | No |
 
+## OTA vs `eas build` — what requires a native rebuild
+
+**Hard-learned during PR 34 (2026-05-24).** The PR 34 prompt
+incorrectly stated "no native rebuild needed" because
+`expo-audio` is autolinked. The actual requirement is set by
+the `app.json` plugin block: `expo-audio` adds a
+`microphonePermission` string, which becomes
+`NSMicrophoneUsageDescription` in iOS `Info.plist` and
+permission entries in the Android Manifest. **That's a native
+config change.** The runtime fingerprint changes; the OTA
+silently doesn't apply to devices running the older fingerprint.
+
+Symptom: you `eas update --branch production`, the dashboard
+shows the OTA published with N downloads and at least 1
+"known launch," but your test device — even after reinstall
+from TestFlight — still runs the old bundle. The downloads
+counter was likely a different device (or an Expo internal
+probe) whose fingerprint happens to match the new one. Your
+device's installed app has the old fingerprint, and Expo
+Updates correctly refuses to cross-apply.
+
+The diagnostic is: in the Expo Updates dashboard for the OTA
+group, the "Fingerprint" column for each platform is the hash
+of the runtime native config that the OTA targets. If your
+installed app was built with different native config (e.g.
+no expo-audio plugin yet), the fingerprints don't match.
+
+### Decision table
+
+When writing a Windsurf prompt's "Deploy plan" section, classify
+the changes against this table FIRST, before claiming
+"OTA-only":
+
+| Change | OTA sufficient? |
+|---|---|
+| JS-only logic, screen edits, callable additions | ✅ OTA |
+| Pure-JS npm dep (lodash, date-fns, etc.) | ✅ OTA |
+| New `expo-*` / RN library WITHOUT a config plugin in `app.json` (e.g. `expo-image-manipulator`, `expo-web-browser`) | ✅ OTA |
+| **`expo-*` library WITH a config plugin** (`expo-audio`, `expo-camera`, `expo-image-picker`, `expo-notifications`, `expo-location`, `expo-tracking-transparency`, etc.) | ❌ **eas build required** |
+| New entry in `app.json` `plugins` array | ❌ **eas build required** |
+| Permission string added to `app.json` `ios.infoPlist` or `android.permissions` | ❌ **eas build required** |
+| Change to `app.json` `ios.bundleIdentifier`, `android.package`, runtime version, scheme | ❌ **eas build required** |
+| Changes to existing plugin's config options | ❌ **eas build required** |
+| New `expo-build-properties` entries | ❌ **eas build required** |
+
+### Quick check before writing the deploy plan
+
+```powershell
+# Compare app.json against main; any diff in plugins / infoPlist /
+# android.permissions means native build.
+git diff main -- app.json | findstr -i "plugin infoPlist permissions"
+```
+
+If that returns lines, the prompt's deploy section must call for
+`eas build`, not `eas update`.
+
+### Multi-stage deploy when a PR needs both server + native
+
+Example sequence for a PR that touches Cloud Functions AND adds
+a native dep (PR 34 shape):
+
+1. `firebase deploy --only functions:<name>` — server first per
+   Rule 1.
+2. `git commit + push` the working tree (including the
+   `app.json` plugin change).
+3. `eas build --profile production --platform ios` AND
+   `--platform android` — produces new native builds with the
+   matching fingerprint.
+4. Wait for builds to complete (~15–20 min each); install via
+   TestFlight / EAS Build APK download.
+5. `eas update --branch production` is **optional** — the
+   embedded JS in the fresh build already includes the new
+   code. Run it only if you want a JS-only follow-up patch
+   without another native build.
+
+The PR's "Smoke tests" section must specify which install
+method is required — "on the next TestFlight build" vs. "on
+the next OTA." Don't conflate.
+
+## Signed-URL IAM gotcha (Cloud Functions Gen 2)
+
+**Symptom:** A callable that uses `getSignedUrl({ version: 'v4',
+action: 'write' | 'read' })` to mint Storage URLs throws to the
+client as `INTERNAL`. The server log shows:
+
+```
+Error: Permission 'iam.serviceAccounts.signBlob' denied on resource
+   (or it may not exist).
+   ...
+   at async sign (.../@google-cloud/storage/build/cjs/src/signer.js)
+   { name: 'SigningError' }
+```
+
+**Cause:** Cloud Functions Gen 2 runs on Cloud Run. Its runtime
+service account (`<project-number>-compute@developer.gserviceaccount.com`)
+does NOT have permission to call `signBlob` on itself by default.
+v4 signed URLs require self-signing. Gen 1 had implicit signing
+capability; Gen 2 tightened it for least-privilege.
+
+**Fix (one-time, project-wide — never repeat):**
+
+Grant the runtime SA the `Service Account Token Creator` role
+**on itself**. Two paths:
+
+```powershell
+# Option A — gcloud CLI
+gcloud iam service-accounts add-iam-policy-binding `
+  <project-number>-compute@developer.gserviceaccount.com `
+  --member="serviceAccount:<project-number>-compute@developer.gserviceaccount.com" `
+  --role="roles/iam.serviceAccountTokenCreator" `
+  --project=<project-id>
+```
+
+```
+Option B — Google Cloud Console UI
+https://console.cloud.google.com/iam-admin/iam?project=<project-id>
+→ find the compute SA row → pencil → Add role
+→ "Service Account Token Creator" → Save
+```
+
+Propagation: ~30 seconds. No code redeploy needed.
+
+**Affected features in this project:** `getMenuImageUploadUrl`
+(PR 6.1), `getShopKycUploadUrl`, `recordShopKycUpload`,
+`getShopKycReadUrls` (all PR 31). Any future PR using v4 signed URLs
+will inherit the fix.
+
+**Future-proofing:** when the prod Firebase project lands (PR 28),
+this IAM grant must be applied to the **prod** compute SA too.
+Document in the PR 28 windsurf prompt; the project number will be
+different.
+
+## Web SDK Firestore + RNFB auth — the silent-failure trap
+
+**Hard-learned during PR 38.1 (2026-05-24, the second hit of the
+PR 6.1 problem).** Any direct Firestore read or write from client
+code that requires auth (rule references `request.auth != null` /
+role checks / uid match) will silently fail or hard-fail on
+**native**, because the Web SDK Firestore client
+(`firebase/firestore`) does **not** share auth context with
+`@react-native-firebase/auth`. The Cloud Function callable path
+DOES work because callables transmit the auth token via the HTTPS
+auth header, which both client SDKs populate identically.
+
+**Symptoms:**
+
+- **Writes:** no docs in the target collection, the
+  `permission-denied` swallowed by the catch block as a
+  `console.warn` only visible in dev menu, no Sentry events.
+  Looks like the feature works in dev (web). Looks broken in the
+  pilot (native).
+- **Reads:** visible "Missing or insufficient permissions" error
+  in the UI on tap. At least these fail loudly.
+
+**Fix:** route both reads and writes through Cloud Function
+callables. The callable uses the Admin SDK against Firestore
+(bypasses rules), and validates auth via `request.auth` (which
+works correctly cross-SDK because the auth token rides on the
+HTTPS header). Mirror the `orderService.ts` web/native dispatch
+pattern. Tighten the corresponding rule to
+`allow read, write: if false` — server-mediated only — as
+defense-in-depth against forged-event debug clients.
+
+**When writing a Windsurf prompt:** any time the prompt proposes
+direct Firestore operations from the client AND those ops require
+auth, the deploy plan must specify the callable-routed approach
+from the start. Direct client → Firestore writes should be
+reserved for unauthenticated or rules-open collections (none
+exist in this project today). Re-using the Web SDK client for
+Firestore should always raise this question first.
+
+**Affected features so far:**
+
+- **Storage uploads (PR 6 → fixed by PR 6.1)** — direct
+  `uploadBytes()` against signed-rules paths failed silently on
+  native; fix was server-minted v4 signed PUT URLs.
+- **Firestore writes + reads to `featureUsageLog/` (PR 38 →
+  fixed by PR 38.1)** — direct `addDoc` / `getDocs` failed
+  silently (writes) or hard (reads) on native; fix was
+  `logFeatureUsageEvent` + `queryFeatureUsageLog` callables.
+- **Likely any future write-from-client to authenticated
+  collections.** Prevent at prompt-writing time, not at
+  pilot-deploy time.
+
 ## Cross-references
 
 This doc is referenced from `PRELAUNCH_CHECKLIST.md` under the

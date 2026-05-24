@@ -489,9 +489,18 @@ callables piecemeal.
       `aiFeatures/menuExtraction` should be seeded `{enabled:
       true}` via Firestore Console before OTA.
 - [x] **AI voice + Hindi onboarding (Phase A2 accessibility)** —
-      [Shipped — PR 34]. Closes the typing-fluency gap for
-      non-English-fluent kirana shopkeepers: they can now register
-      their shop by speaking instead of typing. Two access
+      [CODE SHIPPED — PR 34. **Native build in flight as of
+      2026-05-24** because the PR added the `expo-audio` config
+      plugin to `app.json`, which adds `NSMicrophoneUsageDescription`
+      to iOS `Info.plist` (a native config change → runtime
+      fingerprint shifted → OTA silently couldn't apply to the
+      pre-PR-34 TestFlight build installed on devices). Server
+      callable + Firestore + OTA all live; PR 34 will activate on
+      devices once the new TestFlight / APK build is installed.
+      Same build also unblocks PR 26 Sentry source-map upload (two
+      pending items resolved together).] Closes the typing-fluency
+      gap for non-English-fluent kirana shopkeepers: they can now
+      register their shop by speaking instead of typing. Two access
       patterns share one server callable.
       **Substrate (extends PR 32):** new `runClaude` text-only
       method on `functions/src/aiHelpers.ts` (defaults to
@@ -632,7 +641,145 @@ callables piecemeal.
       per-call cost across PR 32 (`menuExtraction`) and PR 34
       (`voiceOnboarding`) features. An admin screen rolling up
       daily/weekly spend per feature is worth building once
-      total monthly spend crosses ~₹1000.
+      total monthly spend crosses ~₹1000. PR 38 ships the UI
+      shell (`AdminUsageScreen`) so this becomes a small layer
+      on top — same screen, different aggregation source.
+- [x] **Admin feature-usage dashboard + analytics expansion
+      (Strategic Principle 8)** — [Shipped — PR 38 + PR 38.1].
+      **PR 38.1 follow-up (2026-05-24).** PR 38 originally wired
+      both writes (`addDoc(featureUsageLog, ...)`) and reads
+      (`getDocs(query(...))`) via the Web SDK Firestore client.
+      On native that fails because the Web SDK Firestore can't
+      see RNFB's auth context — same root cause as PR 6.1's
+      signed-upload-URL fix for Storage. Result: writes silently
+      failed (rule saw `request.auth == null`, the silent catch
+      in `writeFeatureUsageLog` swallowed the permission-denied
+      to a console.warn), and the admin dashboard hard-failed
+      with a visible "Missing or insufficient permissions"
+      error on tap. PR 38.1 routed both ops through new Cloud
+      Function callables (`logFeatureUsageEvent` —
+      authenticated-only, server resolves uid+role+timestamp,
+      validates feature name; `queryFeatureUsageLog` — admin-
+      only, returns events array + truncated flag) mirroring
+      `orderService` dispatch shape, and tightened the
+      `featureUsageLog/{eventId}` rule to
+      `allow read, write: if false` (server-mediated only —
+      same posture as `aiAuditLog/` and `auditLog/`). Direct
+      client reads + writes are now defense-in-depth denied.
+      The previous 16 rules tests collapsed to 12 (all expecting
+      `deny` for any direct client op). Removed from
+      `analytics.ts`: `addDoc` / `collection` / `serverTimestamp`
+      / `db` imports + the `currentRole()` helper (server
+      resolves role from custom claims). Removed from
+      `AdminUsageScreen.tsx`: every `firebase/firestore` import
+      + the `db` import. PR 6.1 + PR 38.1 together establish
+      the **second instance** of the cross-SDK auth-context
+      trap — `.windsurf/deploy-discipline.md` got a new
+      "Web SDK Firestore + RNFB auth — the silent-failure trap"
+      section to ensure the *third* instance never ships.
+      **Verification (PR 38.1):** root + functions tsc both
+      0 errors; `npm test` 658/658 (66 suites); `npm run
+      test:rules` 92/92 (8 suites; the 12 featureUsageLog
+      tests in the new posture). Deliberate-break confirmed
+      by flipping the rule to `allow read, write: if request
+      .auth != null` → 12 "everyone is denied" assertions
+      failed; reverted.
+      **Deploy posture (PR 38.1):** rules first
+      (`firebase deploy --only firestore:rules`), then each
+      callable one-per-command per deploy-discipline rule 1
+      (`firebase deploy --only functions:logFeatureUsageEvent`,
+      `firebase deploy --only functions:queryFeatureUsageLog`),
+      then `eas update --branch production`. OTA-eligible (no
+      native changes; no new deps).
+- [x] **Admin feature-usage dashboard — original ship**
+      (Strategic Principle 8) — [Shipped — PR 38]. Closes the
+      "did anyone use feature X" question for the pilot.
+      **Substrate:** every `Analytics.*` call now fires twice —
+      Firebase Analytics (unchanged, web-only, sampled) AND a
+      parallel append-only Firestore write to
+      `featureUsageLog/{eventId}` (uid + role + feature + date +
+      shopId + serverTimestamp). Fire-and-forget — observability
+      writes never block UX, anonymous sessions short-circuit
+      because rules require uid match. Append-only by rule
+      (`allow update, delete: if false`); admin-only read for
+      the dashboard.
+      **New event surface (~20 events covering shop / delivery /
+      admin):** `shop_menu_item_added` (source: custom|extracted|
+      bootstrap), `shop_menu_item_edited`,
+      `shop_menu_item_disabled`, `shop_menu_bulk_toggle`,
+      `shop_order_accepted` (minutes_to_accept),
+      `shop_order_status_changed` (from/to),
+      `shop_eta_set` (eta_minutes), `shop_settings_updated`,
+      `shop_signed_in`; `delivery_online_toggled`,
+      `delivery_pickup_accepted`, `delivery_picked_up`,
+      `delivery_delivered` (minutes_since_pickup),
+      `delivery_signed_in`; `admin_shop_approved`,
+      `admin_shop_rejected` (reason_length),
+      `admin_shop_suspended`, `admin_shop_unsuspended`,
+      `admin_delivery_approved`, `admin_delivery_rejected`,
+      `admin_user_role_set`, `admin_signed_in`. Wired into the
+      natural success moment of each action (AFTER the server
+      callable returns ok — failed attempts never log).
+      **Wire sites:** `AuthBootstrap.tsx` (role-arrival
+      `*_signed_in`, fires once after the post-mount claim
+      refresh), `ShopRegistrationDetailScreen` (admin approve/
+      reject), `ShopDetailManagementScreen` (suspend/unsuspend),
+      `DeliveryRequestDetailScreen` (delivery approve/reject),
+      `AddCustomMenuItemScreen` (custom add),
+      `ShopOrderDetailScreen.useShopOrderDetail.ts` (status
+      change + accepted + ETA — gated on `result.ok` so the
+      rollback path stays uninstrumented),
+      `DeliveryDashboardScreen` (online toggle, picked up,
+      delivered).
+      **Dashboard:** `src/screens/admin/AdminUsageScreen.tsx`
+      reachable from HomeScreen "📊 Feature usage" admin tile.
+      4 summary tiles (total events, unique users, unique shops,
+      top feature) + by-feature bar list (top 20 / show all
+      toggle, % of total) + by-role bar chart. Period selector
+      7d/30d. Single fetch on mount + period change (no
+      `onSnapshot` — admin re-visits this rarely; live counters
+      add no decision-relevant info). Query capped at 10 000 docs
+      / period — fine at pilot scale; if exceeded, the next move
+      is a scheduled Cloud Function pre-computing daily counters
+      (out of scope here).
+      **Pure helpers:** `src/screens/admin/adminUsageHelpers.ts`
+      exports `topFeatures`, `byRole`, `uniqueUsers`,
+      `uniqueShops`, `filterAfter`. Zero React, zero Firestore —
+      every aggregation is a data → data transform so the
+      dashboard logic is fully unit-testable. 10 helper tests in
+      `tests/screens/admin/adminUsageHelpers.test.ts` (pin sort
+      order + tie-break, limit/Infinity, empty-input,
+      pct-against-full-list-not-truncated-top-N, defensive
+      handling of legacy/missing fields).
+      **Rules + indexes:** new `match /featureUsageLog/{eventId}`
+      block (allow create with uid match, no update/delete,
+      admin-only read); 3 composite indexes (date desc + feature,
+      date desc + role, shopId + date desc) cover the
+      dashboard's queries.
+      **Verification:** `npx tsc --noEmit` (root): 0 errors.
+      `npm test`: 658/658 pass (66 suites; +10 from PR 38).
+      `npm run test:rules`: 92/92 pass (8 suites; +17 from PR 38
+      — 16 new featureUsageLog cases + the existing suite).
+      **Deliberate-break confirmed:** flipped the rule's
+      `allow create` to `if false` → the 3 "user/shop owner/
+      admin CAN create with own uid" tests failed; reverted.
+      **Mission impact:** Strategic Principle 7's three pilot
+      metrics are now queryable — time-to-first-menu-item =
+      delta between `shop_signed_in` and the first
+      `shop_menu_item_added` per shop; merchant weekly active =
+      distinct shopIds with any shop_* event in 7d; customer
+      repeat-order = distinct customer uids with ≥ 2
+      `place_order` events in 30d. Strategic Principle 8 is
+      fully honored project-wide — every future PR's "wire
+      `Analytics.*`" step has events to wire and a dashboard to
+      verify against.
+      **Deploy posture:** OTA-eligible (no plugin / permission /
+      native dep changes). Server-first deploy:
+      `firebase deploy --only firestore:rules` then
+      `firebase deploy --only firestore:indexes` (indexes
+      take 30 s – 2 min to build; dashboard returns empty
+      results until "Building" → "Enabled" in console), then
+      `eas update --branch production`.
 - [ ] **PR 33 — master product catalog matching** — every PR 32
       extraction currently lands as a custom menu item (productId:
       null, isCustom: true, addedVia: 'menuExtraction'). PR 33's

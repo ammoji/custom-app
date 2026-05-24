@@ -6082,3 +6082,131 @@ export const transcribeShopOnboardingAudio = onCall<{
   },
 );
 
+// ─────────────────────────────────────────────────────────────────────
+// PR 38.1 — featureUsageLog callables.
+//
+// Background: PR 38 shipped client-side direct-Firestore reads + writes
+// against `featureUsageLog/`. On native that fails because the Web SDK
+// Firestore (`firebase/firestore`) doesn't share auth context with
+// `@react-native-firebase/auth`. Same root cause as PR 6.1's signed-
+// upload-URL fix for Storage. Same fix shape: route through callables,
+// which carry auth via the HTTPS header and work cross-SDK.
+//
+// Both callables here use the Admin SDK to read/write the collection,
+// so the rule for `featureUsageLog/{eventId}` is now
+// `allow read, write: if false` (server-mediated only — same posture
+// as `aiAuditLog/` and `auditLog/`).
+// ─────────────────────────────────────────────────────────────────────
+
+export const logFeatureUsageEvent = onCall<{
+  feature: string;
+  shopId?: string;
+}>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    if (!auth) {
+      // Silent — anonymous events don't write. Mirrors the client-side
+      // `writeFeatureUsageLog` short-circuit. Returning ok:false instead
+      // of throwing keeps fire-and-forget callers quiet (no Sentry
+      // noise from the swallow-and-log path).
+      return { ok: false as const, reason: 'unauthenticated' as const };
+    }
+
+    const data = request.data ?? ({} as { feature?: unknown; shopId?: unknown });
+    const feature = typeof data.feature === 'string' ? data.feature : '';
+    if (!feature) {
+      // Guard against schema-drift / debug-tool noise. The client
+      // wrapper always sets feature; missing == garbage call, drop it.
+      return { ok: false as const, reason: 'invalid-feature' as const };
+    }
+
+    // Resolve role from custom claims. Mirrors the priority order
+    // in the client's `currentRole()` helper (admin > shop_owner >
+    // delivery > customer). Anonymous would have been short-circuited
+    // above, so 'anonymous' is unreachable here — collapse to
+    // 'customer' if no role flag is set.
+    let role: 'admin' | 'shop_owner' | 'delivery' | 'customer' = 'customer';
+    if (auth.token?.admin === true) role = 'admin';
+    else if (auth.token?.shopOwner === true) role = 'shop_owner';
+    else if (auth.token?.delivery === true) role = 'delivery';
+
+    const date = new Date().toISOString().slice(0, 10);
+    const doc: Record<string, unknown> = {
+      uid: auth.uid,
+      role,
+      feature,
+      date,
+      timestamp: FieldValue.serverTimestamp(),
+    };
+    const shopId = typeof data.shopId === 'string' ? data.shopId : '';
+    if (shopId) {
+      doc.shopId = shopId;
+    }
+
+    await db.collection('featureUsageLog').add(doc);
+    return { ok: true as const };
+  },
+);
+
+export const queryFeatureUsageLog = onCall<{
+  period: '7d' | '30d';
+}>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+    if (auth.token?.admin !== true) {
+      throw new HttpsError('permission-denied', 'Admin role required');
+    }
+
+    const period = request.data?.period;
+    if (period !== '7d' && period !== '30d') {
+      throw new HttpsError(
+        'invalid-argument',
+        "period must be '7d' or '30d'",
+      );
+    }
+
+    const days = period === '7d' ? 7 : 30;
+    const startDate = new Date(Date.now() - days * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+
+    // Same query AdminUsageScreen previously ran client-side. Limit
+    // 10_000 mirrors the PR 38 cap; if pilot scale exceeds it, the
+    // follow-up is a scheduled-function daily rollup (already noted
+    // in PR 38's PRELAUNCH follow-ups).
+    const snap = await db
+      .collection('featureUsageLog')
+      .where('date', '>=', startDate)
+      .orderBy('date', 'desc')
+      .limit(10_000)
+      .get();
+
+    // Normalize Timestamp → epoch-ms so the client can render dates
+    // without pulling in firebase-admin types. The client doesn't
+    // currently use `timestamp` (the date string drives the chart),
+    // but exposing it lets future drilldown UI sort by exact moment.
+    const events = snap.docs.map(d => {
+      const raw = d.data() as Record<string, unknown>;
+      const ts = raw.timestamp as { toMillis?: () => number } | undefined;
+      return {
+        ...raw,
+        timestamp:
+          typeof ts?.toMillis === 'function'
+            ? ts.toMillis()
+            : typeof raw.timestamp === 'number'
+              ? raw.timestamp
+              : null,
+      };
+    });
+
+    return {
+      ok: true as const,
+      events,
+      truncated: snap.size === 10_000,
+    };
+  },
+);
+

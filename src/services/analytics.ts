@@ -1,15 +1,79 @@
 import { logEvent as fbLogEvent } from 'firebase/analytics';
+// PR 38 — DO NOT REMOVE. `useAuthStore` is read inside `track()` to
+// short-circuit the parallel-write for anonymous sessions before the
+// callable round-trip. Stripping this import (auto-formatter risk
+// per code-discipline) defeats that gate and would push every anon
+// event through the network.
+import { useAuthStore } from '../store/useAuthStore';
 import { analytics } from './firebase';
+// PR 38.1 — DO NOT REMOVE. featureUsageLog writes now route through
+// `orderService.logFeatureUsageEvent` (a Cloud Function callable)
+// instead of the Web SDK's `addDoc`. The Web SDK Firestore client
+// cannot see RNFB's auth on native (same root cause as PR 6.1's
+// signed-upload-URL fix), so direct writes silently failed and the
+// collection never accumulated data.
+import { orderService } from './orderService';
 
 type EventParams = Record<string, string | number | boolean | undefined>;
 
+/**
+ * PR 38 — every analytics event fires through `track()` twice:
+ *
+ *   1. Firebase Analytics (unchanged from PR 32/34) — feeds
+ *      DebugView and BigQuery export. 24–48hr latency, sampling,
+ *      no per-user/per-shop queries.
+ *   2. Firestore `featureUsageLog/` parallel write — exact, low-
+ *      latency, queryable by uid/shopId/role/date for the new
+ *      admin dashboard. Fire-and-forget — failure (offline,
+ *      rules reject, network blip) is non-fatal and silent
+ *      because observability writes must never block UX.
+ *
+ * The Firestore write is gated by `useAuthStore.uid` — anonymous
+ * sessions skip the log (rules require uid match anyway). The
+ * `analytics` SDK is web-only and may be null on native; the
+ * Firestore write fires on both platforms because `db` always
+ * resolves.
+ */
 function track(name: string, params: EventParams) {
-  if (!analytics) return;
-  // Strip undefined values — Firebase Analytics rejects them.
-  const clean = Object.fromEntries(
-    Object.entries(params).filter(([, v]) => v !== undefined),
-  ) as Record<string, string | number | boolean>;
-  fbLogEvent(analytics, name, clean as Record<string, string | number>);
+  // Firebase Analytics (web-only — `analytics` is null on native).
+  if (analytics) {
+    // Strip undefined values — Firebase Analytics rejects them.
+    const clean = Object.fromEntries(
+      Object.entries(params).filter(([, v]) => v !== undefined),
+    ) as Record<string, string | number | boolean>;
+    fbLogEvent(analytics, name, clean as Record<string, string | number>);
+  }
+  // PR 38 — Firestore parallel write. Fire-and-forget.
+  void writeFeatureUsageLog(name, params);
+}
+
+async function writeFeatureUsageLog(
+  name: string,
+  params: EventParams,
+): Promise<void> {
+  try {
+    // Anonymous + unauthenticated callers skip the write entirely.
+    // The callable would also short-circuit (returns
+    // `{ ok:false, reason:'unauthenticated' }`), but skipping client-
+    // side avoids a wasted callable round-trip per anon event.
+    const uid = useAuthStore.getState().uid;
+    if (!uid) return;
+    // PR 38.1 — server resolves uid + role + date from `request.auth`
+    // and serverTimestamp; the client only forwards the feature name
+    // and an optional shopId pulled from the event params.
+    const shopId =
+      typeof params.shop_id === 'string' ? params.shop_id : undefined;
+    await orderService.logFeatureUsageEvent({
+      feature: name,
+      ...(shopId ? { shopId } : {}),
+    });
+  } catch (e) {
+    // Silent — observability writes never block UX. console.warn
+    // (not Sentry-capture) so the noise stays local and offline
+    // sessions don't spam the error pipeline.
+    // eslint-disable-next-line no-console
+    console.warn('[analytics] featureUsageLog write failed:', e);
+  }
 }
 
 export const Analytics = {
@@ -99,4 +163,109 @@ export const Analytics = {
     mode: 'single_field' | 'multi_field';
     error_code: string;
   }) => track('voice_onboarding_error', params),
+
+  // ───────────────────────────────────────────────────────────
+  // PR 38 — Shop owner core actions.
+  // ───────────────────────────────────────────────────────────
+  //
+  // The events that determine whether a shop owner is using the
+  // platform on a typical non-AI day. Mission North Star
+  // Strategic Principle 7's "merchant weekly active" pilot metric
+  // is computed from these firing or not firing — distinct
+  // shopIds with at least one shop_* event in the last 7 days.
+  //
+  // Time-to-first-menu-item (another Principle 7 metric) is the
+  // delta between `shop_signed_in` and the first
+  // `shop_menu_item_added` per shop. Both events MUST fire at
+  // the natural success moment of the underlying action — log
+  // AFTER the server callable returns ok, never before, so
+  // failed attempts don't pollute the funnel.
+  shop_menu_item_added: (params: {
+    shop_id: string;
+    source: 'custom' | 'extracted' | 'bootstrap';
+  }) => track('shop_menu_item_added', params),
+  shop_menu_item_edited: (params: {
+    shop_id: string;
+    field_changed:
+      | 'price'
+      | 'mrp'
+      | 'stock'
+      | 'available'
+      | 'name'
+      | 'image'
+      | 'other';
+  }) => track('shop_menu_item_edited', params),
+  shop_menu_item_disabled: (params: { shop_id: string }) =>
+    track('shop_menu_item_disabled', params),
+  shop_menu_bulk_toggle: (params: {
+    shop_id: string;
+    count: number;
+    action: 'enable' | 'disable';
+  }) => track('shop_menu_bulk_toggle', params),
+  shop_order_accepted: (params: {
+    shop_id: string;
+    order_id: string;
+    minutes_to_accept: number;
+  }) => track('shop_order_accepted', params),
+  shop_order_status_changed: (params: {
+    shop_id: string;
+    order_id: string;
+    from_status: string;
+    to_status: string;
+  }) => track('shop_order_status_changed', params),
+  shop_eta_set: (params: {
+    shop_id: string;
+    order_id: string;
+    eta_minutes: number;
+  }) => track('shop_eta_set', params),
+  shop_settings_updated: (params: {
+    shop_id: string;
+    field:
+      | 'delivery_fee'
+      | 'min_order'
+      | 'hours'
+      | 'description'
+      | 'image'
+      | 'other';
+  }) => track('shop_settings_updated', params),
+  shop_signed_in: (params: { shop_id: string }) =>
+    track('shop_signed_in', params),
+
+  // ───────────────────────────────────────────────────────────
+  // PR 38 — Delivery partner actions.
+  // ───────────────────────────────────────────────────────────
+  delivery_online_toggled: (params: { is_online: boolean }) =>
+    track('delivery_online_toggled', params),
+  delivery_pickup_accepted: (params: {
+    order_id: string;
+    shop_id: string;
+  }) => track('delivery_pickup_accepted', params),
+  delivery_picked_up: (params: { order_id: string }) =>
+    track('delivery_picked_up', params),
+  delivery_delivered: (params: {
+    order_id: string;
+    minutes_since_pickup: number;
+  }) => track('delivery_delivered', params),
+  delivery_signed_in: () => track('delivery_signed_in', {}),
+
+  // ───────────────────────────────────────────────────────────
+  // PR 38 — Admin actions.
+  // ───────────────────────────────────────────────────────────
+  admin_shop_approved: (params: { shop_id: string }) =>
+    track('admin_shop_approved', params),
+  admin_shop_rejected: (params: { shop_id: string; reason_length: number }) =>
+    track('admin_shop_rejected', params),
+  admin_shop_suspended: (params: { shop_id: string }) =>
+    track('admin_shop_suspended', params),
+  admin_shop_unsuspended: (params: { shop_id: string }) =>
+    track('admin_shop_unsuspended', params),
+  admin_delivery_approved: (params: { uid: string }) =>
+    track('admin_delivery_approved', params),
+  admin_delivery_rejected: (params: { uid: string }) =>
+    track('admin_delivery_rejected', params),
+  admin_user_role_set: (params: {
+    uid: string;
+    role: 'admin' | 'shop_owner' | 'delivery';
+  }) => track('admin_user_role_set', params),
+  admin_signed_in: () => track('admin_signed_in', {}),
 };

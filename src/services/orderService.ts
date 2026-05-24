@@ -1063,6 +1063,50 @@ export const orderService = {
     return result.data as { entries: any[]; hasMore: boolean };
   },
 
+  // PR 38.1 — featureUsageLog callables. The Web SDK Firestore
+  // client cannot see RNFB's auth on native (same root cause as
+  // PR 6.1's signed-upload-URL fix), so direct addDoc / getDocs
+  // against `featureUsageLog/` silently failed (writes) or hard-
+  // failed (reads) on the phone. These wrappers route both
+  // operations through the standard cross-SDK callable dispatch.
+  async logFeatureUsageEvent(args: {
+    feature: string;
+    shopId?: string;
+  }): Promise<void> {
+    // Fire-and-forget on the caller side — analytics writes never
+    // block UX. The callable returns `{ ok: false }` silently for
+    // unauthenticated / invalid input; we don't surface either.
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('logFeatureUsageEvent');
+      await fn(args);
+      return;
+    }
+    const fn = httpsCallable(functions, 'logFeatureUsageEvent');
+    await fn(args);
+  },
+
+  async queryFeatureUsageLog(args: { period: '7d' | '30d' }): Promise<{
+    ok: true;
+    events: Array<{
+      uid: string;
+      role: string;
+      feature: string;
+      date: string;
+      timestamp: number | null;
+      shopId?: string;
+    }>;
+    truncated: boolean;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('queryFeatureUsageLog');
+      const result = await fn(args);
+      return result.data as any;
+    }
+    const fn = httpsCallable(functions, 'queryFeatureUsageLog');
+    const result = await fn(args);
+    return result.data as any;
+  },
+
   // Returns shops with no current owner (ownerUid null/missing).
   // Powers the BecomeShopOwner picker.
   async listAvailableShops(): Promise<
