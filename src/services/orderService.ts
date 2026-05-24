@@ -22,6 +22,7 @@ import type {
     MenuItem,
     NewMenuItemInput,
     Order,
+    ParsedShopFields,
     PaymentMethod,
     Shop,
     SubstitutionPreference,
@@ -645,6 +646,57 @@ export const orderService = {
       added: number;
       skipped: Array<{ index: number; reason: string }>;
       menuItemIds: string[];
+    };
+  },
+
+  // PR 34 — voice + Hindi onboarding. Sends a base64-encoded audio
+  // clip (≤ 30s, ≤ 2 MB base64) plus the recording's encoding +
+  // sample rate + the user's selected UI language + the mode:
+  //   - 'multi_field' — server runs STT + Claude Haiku parse, returns
+  //     7 form fields ready to pre-fill (with ✨ markers + transcript
+  //     review banner on the client).
+  //   - 'single_field' — server runs STT only and returns the
+  //     transcript; the screen confirms with the user before
+  //     assigning to a single field.
+  // Errors arrive as `code/message` from the callable in the
+  // user-selected language (Hindi if languageCode === 'hi-IN').
+  async transcribeShopOnboardingAudio(input: {
+    audioBase64: string;
+    encoding: 'WEBM_OPUS' | 'LINEAR16' | 'FLAC' | 'AMR_WB';
+    sampleRateHertz?: number;
+    languageCode: 'hi-IN' | 'en-IN';
+    mode: 'single_field' | 'multi_field';
+  }): Promise<{
+    ok: true;
+    transcript: string;
+    fields: ParsedShopFields | null;
+    parseError?: string;
+    usedTodayCount: number;
+    dailyQuota: number;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'transcribeShopOnboardingAudio',
+      );
+      const result = await fn(input);
+      return result.data as {
+        ok: true;
+        transcript: string;
+        fields: ParsedShopFields | null;
+        parseError?: string;
+        usedTodayCount: number;
+        dailyQuota: number;
+      };
+    }
+    const fn = httpsCallable(functions, 'transcribeShopOnboardingAudio');
+    const result = await fn(input);
+    return result.data as {
+      ok: true;
+      transcript: string;
+      fields: ParsedShopFields | null;
+      parseError?: string;
+      usedTodayCount: number;
+      dailyQuota: number;
     };
   },
 

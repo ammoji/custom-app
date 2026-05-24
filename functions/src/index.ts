@@ -61,6 +61,7 @@ import { VALID_CATEGORIES } from './categoryConstants';
 import {
   ANTHROPIC_API_KEY,
   estimateCostInr,
+  runClaude,
   runClaudeVision,
 } from './aiHelpers';
 import {
@@ -68,6 +69,20 @@ import {
   MENU_EXTRACTION_USER_PROMPT,
   parseExtractionResponse,
 } from './menuExtractionHelpers';
+// PR 34 — DO NOT REMOVE. Used by `transcribeShopOnboardingAudio`
+// callable for the Hindi/English voice → 7 onboarding fields
+// pipeline. Auto-formatter risk per code-discipline (PR 32 +
+// kycUploadHelpers + bulkMenuHelpers all had imports stripped).
+import {
+  VOICE_ONBOARDING_SYSTEM_PROMPT,
+  parseVoiceOnboardingResponse,
+} from './voiceOnboardingHelpers';
+// PR 34 — DO NOT REMOVE. Cloud Speech-to-Text client. STT uses
+// Application Default Credentials (the function's runtime SA),
+// so there's no API key + no `defineSecret` like Anthropic.
+// IMPORTANT: enabling speech.googleapis.com in the GCP project
+// is a one-time manual step — see docs/pr-34-* deploy plan.
+import { SpeechClient } from '@google-cloud/speech';
 // PR 8 — DO NOT REMOVE. Used by writeAuditLog wrapper + the
 // listRecentAuditEntries + bulkUpdateMenuAvailability callables.
 // Auto-formatter has stripped helper imports in PRs 4, 5, 6, 6.1, 7;
@@ -5553,6 +5568,7 @@ export const extractMenuFromImage = onCall<{
     const costInr = estimateCostInr(
       claudeResult.inputTokens,
       claudeResult.outputTokens,
+      claudeResult.model,
     );
     db.collection('aiAuditLog')
       .add({
@@ -5717,6 +5733,351 @@ export const addExtractedMenuItems = onCall<{
       added: added.length,
       skipped,
       menuItemIds: added,
+    };
+  },
+);
+
+// ────────────────────────────────────────────────────────────
+// PR 34 — Voice + Hindi onboarding assist
+// ────────────────────────────────────────────────────────────
+//
+// Lets a non-English-fluent kirana shopkeeper register their shop
+// by speaking instead of typing. Two flows share one callable:
+//
+//   - mode='multi_field' — shopkeeper holds the big "🎙 Speak
+//     about your shop" button and speaks a paragraph. STT
+//     transcribes; Claude Haiku parses the transcript into the
+//     7 registration fields. Client pre-fills, marks each filled
+//     field with a ✨ chip, shows a transcript review banner, and
+//     forces human review (Trust Principle 2) before commit.
+//
+//   - mode='single_field' — per-field mic icon. STT only, no
+//     Claude. Shopkeeper dictates the value of one field at a
+//     time; client confirms before assigning.
+//
+// Cost guardrails (Trust Principle 3 / docs/ROADMAP.md):
+//   - Auth: any signed-in user. NO shopOwner claim — voice
+//     onboarding runs BEFORE the shop is registered.
+//   - Per-uid daily quota: 10 calls/day at
+//     aiQuotas/{uid}_{YYYY-MM-DD}.voiceOnboarding (PR 32 already
+//     uses this collection for the menuExtraction counter; this
+//     just adds a second field to the same per-day doc).
+//   - Kill switch: aiFeatures/voiceOnboarding.enabled
+//     (missing or true → enabled; explicit false → reject).
+//   - Audio cap: 2 MB base64.
+//   - Audit log: aiAuditLog/ entry per call with feature,
+//     subFeature (mode), languageCode, sttBillableSeconds,
+//     llmModel + token counts (multi_field only), costInr.
+//
+// Trust Principle 4 — every error message that surfaces to the
+// shopkeeper is rendered in the language they picked at the
+// language switcher (hi-IN or en-IN). The callable receives the
+// language and returns Hindi messages when languageCode='hi-IN'.
+//
+// No persistence: audio bytes stay in the callable payload,
+// processed in memory, never written to a bucket. Same privacy
+// posture as PR 32's image flow + zero storage cleanup needed.
+
+const VOICE_ONBOARDING_DAILY_QUOTA = 10;
+const MAX_AUDIO_BYTES = 2_000_000; // ~2 MB base64
+
+// Lazy-init the STT client so cold-starting unrelated functions
+// doesn't pay this cost. Reused across warm invocations.
+let speechClient: SpeechClient | null = null;
+function getSpeechClient(): SpeechClient {
+  if (!speechClient) speechClient = new SpeechClient();
+  return speechClient;
+}
+
+export const transcribeShopOnboardingAudio = onCall<{
+  audioBase64: string;
+  // PR 34 — three encodings cover the platforms expo-audio
+  // supports out of the box: WEBM_OPUS for web (default web
+  // preset), LINEAR16 (PCM 16-bit in WAV) for iOS, AMR_WB for
+  // Android (the only STT-friendly format Android MediaRecorder
+  // can produce without a native module). FLAC stays accepted
+  // for future use / debugging — no client path emits it today.
+  encoding: 'WEBM_OPUS' | 'LINEAR16' | 'FLAC' | 'AMR_WB';
+  sampleRateHertz?: number;
+  languageCode: 'hi-IN' | 'en-IN';
+  mode: 'single_field' | 'multi_field';
+}>(
+  {
+    cors: true,
+    enforceAppCheck: false,
+    // ANTHROPIC_API_KEY only used in multi_field mode. Listed
+    // unconditionally because Firebase only mounts the secret
+    // when it's declared at deploy time; switching modes
+    // mid-flight is a runtime concern.
+    secrets: [ANTHROPIC_API_KEY],
+    // STT (~3–8s) + optional Haiku call (~1–2s) + payload up/down
+    // fits in 60s with comfortable headroom.
+    timeoutSeconds: 60,
+    memory: '512MiB',
+  },
+  async request => {
+    const auth = request.auth;
+    if (!auth) {
+      throw new HttpsError('unauthenticated', 'Sign in required');
+    }
+    // No shopOwner gate — voice onboarding runs BEFORE the shop
+    // is registered. Any authenticated user can call this.
+
+    const data = request.data ?? ({} as Record<string, unknown>);
+    const audioBase64 = data.audioBase64;
+    const encoding = data.encoding as
+      | 'WEBM_OPUS'
+      | 'LINEAR16'
+      | 'FLAC'
+      | undefined;
+    const sampleRateHertz = data.sampleRateHertz as number | undefined;
+    const languageCode = data.languageCode as 'hi-IN' | 'en-IN' | undefined;
+    const mode = data.mode as 'single_field' | 'multi_field' | undefined;
+
+    // Validate the language up front so we can use it for the
+    // localised error messages below.
+    if (languageCode !== 'hi-IN' && languageCode !== 'en-IN') {
+      throw new HttpsError(
+        'invalid-argument',
+        'languageCode must be hi-IN or en-IN',
+      );
+    }
+    const isHi = languageCode === 'hi-IN';
+
+    // Kill switch.
+    const killSwitchSnap = await db
+      .doc('aiFeatures/voiceOnboarding')
+      .get();
+    const enabled = killSwitchSnap.exists
+      ? killSwitchSnap.data()?.enabled !== false
+      : true;
+    if (!enabled) {
+      throw new HttpsError(
+        'failed-precondition',
+        isHi
+          ? 'आवाज़ से रजिस्ट्रेशन अभी बंद है। कृपया लिखकर भरें।'
+          : 'Voice onboarding is temporarily disabled. Please type your shop details instead.',
+      );
+    }
+
+    // Validate audio + mode.
+    if (typeof audioBase64 !== 'string' || !audioBase64) {
+      throw new HttpsError('invalid-argument', 'audioBase64 required');
+    }
+    if (audioBase64.length > MAX_AUDIO_BYTES) {
+      throw new HttpsError(
+        'invalid-argument',
+        isHi
+          ? 'रिकॉर्डिंग बहुत लंबी है। 30 सेकंड से छोटी रिकॉर्ड करें।'
+          : 'Audio file too large. Please record a shorter clip (under 30 seconds).',
+      );
+    }
+    if (
+      encoding !== 'WEBM_OPUS' &&
+      encoding !== 'LINEAR16' &&
+      encoding !== 'FLAC' &&
+      encoding !== 'AMR_WB'
+    ) {
+      throw new HttpsError('invalid-argument', 'Unsupported audio encoding');
+    }
+    if (mode !== 'single_field' && mode !== 'multi_field') {
+      throw new HttpsError(
+        'invalid-argument',
+        'mode must be single_field or multi_field',
+      );
+    }
+
+    // Per-uid daily quota — atomic increment in a transaction so
+    // two concurrent calls cannot both pass the gate. Reuses the
+    // PR 32 `aiQuotas/{uid}_{YYYY-MM-DD}` doc with a sibling
+    // `voiceOnboarding` field; merge:true keeps the existing
+    // `menuExtraction` field intact.
+    const today = new Date().toISOString().slice(0, 10);
+    const quotaRef = db.doc(`aiQuotas/${auth.uid}_${today}`);
+    const usedToday = await db.runTransaction(async tx => {
+      const snap = await tx.get(quotaRef);
+      const current =
+        (snap.data()?.voiceOnboarding as number | undefined) ?? 0;
+      if (current >= VOICE_ONBOARDING_DAILY_QUOTA) return -1;
+      tx.set(
+        quotaRef,
+        {
+          voiceOnboarding: current + 1,
+          updatedAt: FieldValue.serverTimestamp(),
+          uid: auth.uid,
+        },
+        { merge: true },
+      );
+      return current + 1;
+    });
+    if (usedToday < 0) {
+      throw new HttpsError(
+        'resource-exhausted',
+        isHi
+          ? `आज की ${VOICE_ONBOARDING_DAILY_QUOTA} कोशिशें खत्म हो गईं। कल फिर कोशिश करें।`
+          : `Daily limit reached (${VOICE_ONBOARDING_DAILY_QUOTA} attempts). Try again tomorrow.`,
+      );
+    }
+
+    // Run STT.
+    let transcript: string;
+    let sttBillableSeconds = 0;
+    try {
+      const stt = getSpeechClient();
+      const [response] = await stt.recognize({
+        audio: { content: audioBase64 },
+        config: {
+          encoding,
+          // Default 16 kHz matches expo-audio's PCM/WAV preset
+          // and the OPUS sample rate. Caller can override if
+          // they record at a different rate.
+          sampleRateHertz: sampleRateHertz ?? 16000,
+          languageCode,
+          enableAutomaticPunctuation: true,
+          // `latest_short` is tuned for clips ≤ 60s — perfect
+          // for our 30s cap. `latest_long` would handle longer
+          // audio but is slower + more expensive per second.
+          model: 'latest_short',
+        },
+      });
+      transcript = (response.results ?? [])
+        .map(r => r.alternatives?.[0]?.transcript ?? '')
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+      // Approximate billable seconds via base64 length.
+      // OPUS at 16 kHz ≈ 16 KB/sec. Used purely for the audit
+      // log's cost estimate; STT bills in 15s increments anyway.
+      sttBillableSeconds = Math.ceil(audioBase64.length / 16_000);
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.error(
+        '[transcribeShopOnboardingAudio] STT failed:',
+        message,
+      );
+      // The first deploy after enabling the API can still see
+      // PERMISSION_DENIED until IAM propagates (~1 min). Same
+      // diagnostic pattern as PR 31's signBlob role grant —
+      // surface a friendly message; the server log shows the
+      // root cause.
+      throw new HttpsError(
+        'internal',
+        isHi
+          ? 'आपकी आवाज़ साफ़ नहीं आई। फिर से कोशिश करें।'
+          : 'Could not understand the audio. Please try again with less background noise.',
+      );
+    }
+    if (!transcript) {
+      throw new HttpsError(
+        'internal',
+        isHi
+          ? 'कुछ भी सुनाई नहीं दिया। माइक के पास बोलें।'
+          : 'No speech detected. Please speak closer to the microphone.',
+      );
+    }
+
+    // single_field: STT-only — return the transcript and let the
+    // client decide which field to assign it to.
+    if (mode === 'single_field') {
+      const sttCostInr =
+        Math.round(sttBillableSeconds * 0.033 * 100) / 100;
+      db.collection('aiAuditLog')
+        .add({
+          uid: auth.uid,
+          feature: 'voiceOnboarding',
+          subFeature: 'single_field',
+          languageCode,
+          sttBillableSeconds,
+          costInr: sttCostInr,
+          timestamp: FieldValue.serverTimestamp(),
+        })
+        .catch(e =>
+          console.warn(
+            '[transcribeShopOnboardingAudio] audit log failed:',
+            e,
+          ),
+        );
+
+      return {
+        ok: true as const,
+        transcript,
+        fields: null,
+        usedTodayCount: usedToday,
+        dailyQuota: VOICE_ONBOARDING_DAILY_QUOTA,
+      };
+    }
+
+    // multi_field: STT + Claude Haiku parse → 7 fields.
+    let claudeResult;
+    try {
+      claudeResult = await runClaude({
+        systemPrompt: VOICE_ONBOARDING_SYSTEM_PROMPT,
+        userText: transcript,
+        // 500 tokens is plenty for 7-field JSON; cheaper than the
+        // 1000-token default at Haiku rates.
+        maxTokens: 500,
+      });
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.error(
+        '[transcribeShopOnboardingAudio] Claude parse failed:',
+        message,
+      );
+      // Don't fail the whole call — the transcript is still
+      // useful (the client shows it in the review banner so the
+      // shopkeeper can copy parts into individual fields).
+      return {
+        ok: true as const,
+        transcript,
+        fields: null,
+        parseError: isHi
+          ? 'अभी फ़ील्ड्स नहीं भरी जा सकीं। ऊपर लिखे शब्दों से हर फ़ील्ड पर माइक दबाकर बोलें।'
+          : 'Could not parse fields from transcript. The text is above; please tap each field mic to dictate individually.',
+        usedTodayCount: usedToday,
+        dailyQuota: VOICE_ONBOARDING_DAILY_QUOTA,
+      };
+    }
+
+    const parsed = parseVoiceOnboardingResponse(claudeResult.text);
+    const fields = parsed.ok ? parsed.fields : null;
+
+    // Audit log (non-fatal, fire-and-forget).
+    const sttCostInr =
+      Math.round(sttBillableSeconds * 0.033 * 100) / 100;
+    const llmCostInr = estimateCostInr(
+      claudeResult.inputTokens,
+      claudeResult.outputTokens,
+      claudeResult.model,
+    );
+    db.collection('aiAuditLog')
+      .add({
+        uid: auth.uid,
+        feature: 'voiceOnboarding',
+        subFeature: 'multi_field',
+        languageCode,
+        sttBillableSeconds,
+        sttCostInr,
+        llmModel: claudeResult.model,
+        llmInputTokens: claudeResult.inputTokens,
+        llmOutputTokens: claudeResult.outputTokens,
+        llmCostInr,
+        costInr:
+          Math.round((sttCostInr + llmCostInr) * 100) / 100,
+        timestamp: FieldValue.serverTimestamp(),
+      })
+      .catch(e =>
+        console.warn(
+          '[transcribeShopOnboardingAudio] audit log failed:',
+          e,
+        ),
+      );
+
+    return {
+      ok: true as const,
+      transcript,
+      fields,
+      usedTodayCount: usedToday,
+      dailyQuota: VOICE_ONBOARDING_DAILY_QUOTA,
     };
   },
 );

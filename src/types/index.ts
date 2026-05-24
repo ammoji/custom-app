@@ -437,6 +437,30 @@ export type ExtractedMenuItem = {
   confidence: 'high' | 'medium' | 'low';
 };
 
+// PR 34 — Voice + Hindi onboarding.
+//
+// `ParsedShopFields` mirrors the server's same-named shape from
+// `functions/src/voiceOnboardingHelpers.ts`. The server has
+// already validated each field individually (phone digits, HH:mm
+// format, GSTIN regex, FSSAI digits) so any non-null value is
+// safe to drop straight into the matching form input. Null means
+// "the shopkeeper didn't say this field, OR Claude couldn't
+// extract it confidently" — the form input stays at its default.
+export type ParsedShopFields = {
+  name: string | null;
+  address: string | null;
+  phone: string | null;
+  openTime: string | null;
+  closeTime: string | null;
+  gstNumber: string | null;
+  fssaiLicense: string | null;
+};
+
+// PR 34 — UI language for the registration form. Two values in
+// MVP (Hindi + English); add `pa-IN` / `ta-IN` / `te-IN` /
+// `bn-IN` as pilot shops surface in those regions.
+export type UiLanguage = 'hi-IN' | 'en-IN';
+
 // `ExtractedMenuDraft` is the client-side, editable wrapper around
 // `ExtractedMenuItem`. The review screen renders a list of these
 // and mutates `selected` + `edited*` in place. Only the approved

@@ -488,6 +488,151 @@ callables piecemeal.
       `Secret ANTHROPIC_API_KEY not found`. Kill-switch doc at
       `aiFeatures/menuExtraction` should be seeded `{enabled:
       true}` via Firestore Console before OTA.
+- [x] **AI voice + Hindi onboarding (Phase A2 accessibility)** —
+      [Shipped — PR 34]. Closes the typing-fluency gap for
+      non-English-fluent kirana shopkeepers: they can now register
+      their shop by speaking instead of typing. Two access
+      patterns share one server callable.
+      **Substrate (extends PR 32):** new `runClaude` text-only
+      method on `functions/src/aiHelpers.ts` (defaults to
+      `claude-haiku-4-5`, ~3× cheaper than Sonnet for the parsing
+      task), and `estimateCostInr` now takes an optional `model`
+      argument so Haiku calls log Haiku rates instead of being
+      billed as Sonnet (without this fix the audit log would
+      overstate PR 34 cost ~3×). PR 32's call site was updated
+      to pass the model so Sonnet pricing keeps tracking
+      correctly. New `@google-cloud/speech ^7.3.1` server dep —
+      STT uses ADC (the function's runtime SA), so **no new
+      Firebase secret type** is needed; the only manual GCP step
+      is enabling the Cloud Speech-to-Text API in the project.
+      **Pure helpers:** `functions/src/voiceOnboardingHelpers.ts`
+      exports `VOICE_ONBOARDING_SYSTEM_PROMPT` (instructs Claude
+      to extract the 7 registration fields with strict JSON
+      output, null-when-unmentioned, +91/leading-0 stripped from
+      phone, hours converted to 24-hour HH:mm, "GST nahi hai" →
+      null), `parseVoiceOnboardingResponse` (strips ```json
+      fences, validates each field individually — phone digits,
+      HH:mm regex, GSTIN 15-char regex, FSSAI 14-digit regex —
+      drops invalid fields to null rather than rejecting the
+      whole response). 12 unit tests in
+      `tests/functions/voiceOnboardingHelpers.test.ts` covering
+      every validator branch + the "no GST" → null mapping +
+      top-level error paths.
+      **Callable:** `transcribeShopOnboardingAudio` — auth (any
+      signed-in user; **no shopOwner gate** since voice
+      onboarding runs BEFORE the shop is registered) +
+      `aiFeatures/voiceOnboarding.enabled` kill switch +
+      per-uid 10/day quota (`aiQuotas/{uid}_{YYYY-MM-DD}
+      .voiceOnboarding`, sibling field to PR 32's
+      `menuExtraction` counter, merge:true preserves both) +
+      2 MB audio cap + 60s timeout + 512MiB memory +
+      `secrets: [ANTHROPIC_API_KEY]`. Mode `'multi_field'` runs
+      STT then Claude Haiku parse → 7 fields; mode
+      `'single_field'` runs STT only and returns the transcript.
+      `aiAuditLog/` entries record `feature`, `subFeature`
+      (mode), `languageCode`, `sttBillableSeconds`, llm token
+      counts (multi_field), and `costInr` (~₹0.5–₹2 per call).
+      **Localised errors (Trust Principle 4):** every server
+      error message is rendered in Hindi when `languageCode ==
+      'hi-IN'` (kill switch, audio-too-large, quota, no-speech,
+      STT failure, parse fallback all have Hindi twins).
+      **Encoding picker:** server accepts `WEBM_OPUS` (web),
+      `LINEAR16` (iOS — PCM 16-bit WAV), `AMR_WB` (Android —
+      the only STT-friendly format Android `MediaRecorder` can
+      produce), `FLAC` reserved for future. Client picks based
+      on `Platform.OS`.
+      **Client:** new `src/components/VoiceInputButton.tsx`
+      (reusable mic, two sizes — `lg` for the big "🎙 Speak about
+      your shop" CTA, `sm` for per-field icons), built on
+      `expo-audio` (`useAudioRecorder` + `useAudioRecorderState`
+      hooks; tap-to-start / tap-to-stop UX with a 30s automatic
+      cap and a pulsing red dot during recording). 16 kHz mono
+      PCM/AMR_WB/WebM keeps a 30s clip well under 1 MB
+      (HIGH_QUALITY 44.1 kHz stereo would have busted the 2 MB
+      server cap). `usePressGuard` wraps the upload-and-callable
+      path so a frantic re-tap during the 5–15s server wait
+      can't fire two concurrent transcribes.
+      **RegisterShopScreen integration:** language picker
+      (Hindi/English pill buttons, Hindi default), big "🎙 Speak
+      about your shop" CTA above the form, per-field mic icons
+      via `Field`'s new `voice` prop, ✨ "AI" chip + yellow
+      left-border on every field the multi_field flow filled,
+      review banner showing the raw transcript (Trust Principle
+      2 — every AI output gets human review before commit). The
+      ✨ chip clears the moment the user edits the field,
+      signalling "I've reviewed and adjusted." All four new
+      `useState` hooks (`uiLanguage`, `aiFilledFields`,
+      `voiceTranscript`, `voiceParseError`) sit ABOVE the
+      `if (isAnonymous)` early return per Rules-of-Hooks
+      discipline (PR 12 / PR 27 lineage). New `ParsedShopFields`
+      and `UiLanguage` types in `src/types/index.ts`.
+      **Analytics:** 3 new events on `Analytics` (Strategic
+      Principle 8): `voice_onboarding_started` (language, mode),
+      `voice_onboarding_filled` (language, mode, fields_filled,
+      transcript_length), `voice_onboarding_error` (language,
+      mode, error_code). Funnel observability ships with the
+      feature so dropoff per cause + per language + per mode is
+      visible from day one.
+      **app.json plugins:** added the `expo-audio` plugin block
+      with a Hindi-friendly `microphonePermission` string. No
+      native rebuild needed — `expo-audio` autolinks via the
+      next OTA on SDK 54.
+      **No persistence:** audio bytes stay in the callable
+      payload, processed in memory, never bucketed (same privacy
+      posture as PR 32; zero storage cleanup needed; no IAM
+      signBlob path).
+      **Verification:** root tsc clean, functions tsc clean, all
+      648 tests pass (+12 from new helpers). Deliberate-break
+      removed the `+91` strip step in `validatePhone` and the
+      "strips +91 prefix" test failed exactly as documented;
+      reverted. `git grep -i 'sk-ant-'` returned only doc
+      references (zero key material). `git grep "GOOGLE_"` in
+      `functions/src/` returned only the comment confirming we
+      did NOT define a `GOOGLE_*` secret — STT uses ADC.
+      **Pre-deploy reminders:** (a) **enable Cloud Speech-to-Text
+      API** in the GCP project before the first invocation, or
+      the function returns INTERNAL with the server log
+      `PERMISSION_DENIED: Cloud Speech-to-Text API has not been
+      used` — same diagnostic pattern as PR 31's signBlob role;
+      (b) seed `aiFeatures/voiceOnboarding` Firestore doc with
+      `{enabled: true}` via Console before OTA;
+      (c) `ANTHROPIC_API_KEY` secret already exists from PR 32 —
+      no new secret create needed.
+- [ ] **More languages: Punjabi, Tamil, Telugu, Bengali** —
+      MVP ships Hindi + English only. Add `pa-IN`, `ta-IN`,
+      `te-IN`, `bn-IN` as soon as a pilot shop in one of those
+      regions requests it. Server-side STT supports them today;
+      the client-side language picker + localised error
+      messages are the only changes.
+- [ ] **i18n system for the whole app** — PR 34 hand-translated
+      ~10 UI strings between two languages. A real i18n setup
+      (`expo-localization` + a string-table per language) is a
+      future workstream once 3+ languages are supported and
+      the hand-translation cost stops being trivial.
+- [ ] **Voice on customer side (search, dictate address)** —
+      out of scope for PR 34; needs separate UX work
+      (search-by-voice has a different latency profile, and
+      address dictation overlaps with the saved-address book).
+- [ ] **Streaming STT** — PR 34 uses the simple `recognize`
+      (batch) flow. Streaming would give live transcripts as
+      the user speaks but is significant extra plumbing. Defer
+      until the 5–15s post-recording wait surfaces as a real
+      drop-off cause in funnel analytics.
+- [ ] **Voice for menu add (single-item)** — "Aashirvaad atta
+      5 kilo, MRP 305 rupaye, sell 295 rupaye" → one menu item.
+      Reuses the same `runClaude` substrate from PR 34 + a
+      tweaked system prompt. Pairs naturally with PR 32's
+      ScanMenuScreen as a fallback when the rate-list photo
+      fails OCR.
+- [ ] **Offline / on-device STT fallback** — when the network
+      is patchy, drop to a smaller on-device model. Out of
+      scope for MVP; revisit if pilot shops in poor-coverage
+      regions report transcription failures.
+- [ ] **AI cost dashboard rollup** — `aiAuditLog/` collects
+      per-call cost across PR 32 (`menuExtraction`) and PR 34
+      (`voiceOnboarding`) features. An admin screen rolling up
+      daily/weekly spend per feature is worth building once
+      total monthly spend crosses ~₹1000.
 - [ ] **PR 33 — master product catalog matching** — every PR 32
       extraction currently lands as a custom menu item (productId:
       null, isCustom: true, addedVia: 'menuExtraction'). PR 33's

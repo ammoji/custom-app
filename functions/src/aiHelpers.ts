@@ -120,19 +120,92 @@ export async function runClaudeVision(
 }
 
 /**
- * Cost estimate in INR for an audit log entry. Approximate; tracks
- * Sonnet 4.5 published pricing (Anthropic public list at May 2026).
- * If pricing changes meaningfully, update here in one place and
- * every callable's audit log catches up automatically.
+ * PR 34 — text-only Claude input. No image, just a system prompt
+ * + user text. Used by `voiceOnboardingHelpers` and any future
+ * text-only feature (review summarisation, support assistant).
  *
- * Sonnet 4.5: $3/M input tokens, $15/M output tokens. INR
- * conversion at ₹83/USD. Result rounded to ₹0.01.
+ * Defaults to Haiku 4.5 because text-only tasks are usually
+ * narrow + fast — a 3x–4x cost win over Sonnet, and quality is
+ * sufficient for structured-output extraction at the prompt
+ * sophistication PR 34 needs (single transcript → 7 fields).
+ */
+export type ClaudeTextInput = {
+  systemPrompt: string;
+  userText: string;
+  maxTokens?: number;
+  model?: string;
+};
+
+const DEFAULT_TEXT_MODEL = 'claude-haiku-4-5';
+
+/**
+ * Sibling of `runClaudeVision` for text-only tasks. Same return
+ * shape so callers can pass the result straight into
+ * `estimateCostInr`. The function uses `getClient()` which is
+ * shared with the vision path — single SDK instance per warm
+ * function instance, no extra cold-start cost.
+ */
+export async function runClaude(
+  input: ClaudeTextInput,
+): Promise<ClaudeVisionResult> {
+  const c = getClient();
+  const model = input.model ?? DEFAULT_TEXT_MODEL;
+  const maxTokens = input.maxTokens ?? 1000;
+
+  const response = await c.messages.create({
+    model,
+    max_tokens: maxTokens,
+    system: input.systemPrompt,
+    messages: [
+      {
+        role: 'user',
+        content: [{ type: 'text', text: input.userText }],
+      },
+    ],
+  });
+
+  let text = '';
+  for (const block of response.content) {
+    if (block.type === 'text') text += block.text;
+  }
+
+  return {
+    text,
+    inputTokens: response.usage.input_tokens,
+    outputTokens: response.usage.output_tokens,
+    model,
+  };
+}
+
+/**
+ * Cost estimate in INR for an audit log entry. Approximate; tracks
+ * Anthropic published pricing (public list at May 2026). Routes
+ * by model family — without this, PR 34's Haiku calls would log
+ * 3x their actual cost (the original implementation pegged Sonnet
+ * pricing). If pricing changes meaningfully, update here in one
+ * place and every callable's audit log catches up automatically.
+ *
+ * Pricing snapshot (per million tokens, USD):
+ *   Sonnet 4.5 / 4.6 :  $3 in,  $15 out
+ *   Haiku  4.5       :  $1 in,  $ 5 out
+ *
+ * Unknown / future model strings fall back to Sonnet rates so we
+ * over-estimate (safer than under-reporting). INR conversion at
+ * ₹83/USD. Result rounded to ₹0.01.
+ *
+ * The `model` parameter is optional so the PR 32 callsite (which
+ * always uses Sonnet vision) keeps working without a code change.
  */
 export function estimateCostInr(
   inputTokens: number,
   outputTokens: number,
+  model?: string,
 ): number {
+  const isHaiku = !!model && model.toLowerCase().includes('haiku');
+  const inRate = isHaiku ? 1 : 3;
+  const outRate = isHaiku ? 5 : 15;
   const usd =
-    (inputTokens / 1_000_000) * 3 + (outputTokens / 1_000_000) * 15;
+    (inputTokens / 1_000_000) * inRate +
+    (outputTokens / 1_000_000) * outRate;
   return Math.round(usd * 83 * 100) / 100;
 }

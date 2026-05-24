@@ -62,4 +62,41 @@ export const Analytics = {
     added_count: number;
     skipped_count: number;
   }) => track('scan_menu_committed', params),
+  // PR 34 — Voice + Hindi onboarding funnel.
+  //   - `voice_onboarding_started` — shopkeeper tapped a mic
+  //     (either the big "Speak about your shop" CTA or a per-field
+  //     mic). Tells us which mode + which language is actually
+  //     used in production; if `single_field` dominates, the next
+  //     UX iteration leans on per-field; if `multi_field`
+  //     dominates, lean on the big CTA.
+  //   - `voice_onboarding_filled` — server returned at least
+  //     one field (multi_field) or a transcript (single_field).
+  //     `fields_filled` is the count of non-null values from the
+  //     7 target fields; for single_field we set it to 1 so
+  //     funnel analyses can blend modes. `transcript_length`
+  //     gives us a rough proxy for "how long the shopkeeper
+  //     actually spoke" without having to PII-scrape the
+  //     aiAuditLog.
+  //   - `voice_onboarding_error` — any failure path: permission
+  //     denial, no-speech, quota, kill-switch, parse fallback.
+  //     `error_code` is one of a small whitelist so funnel
+  //     dropoff per cause is groupable.
+  // Per Strategic Principle 8 in docs/ROADMAP.md — instrument
+  // the funnel at ship time so we don't have to retrofit
+  // observability before PR 38.
+  voice_onboarding_started: (params: {
+    language: 'hi-IN' | 'en-IN';
+    mode: 'single_field' | 'multi_field';
+  }) => track('voice_onboarding_started', params),
+  voice_onboarding_filled: (params: {
+    language: 'hi-IN' | 'en-IN';
+    mode: 'single_field' | 'multi_field';
+    fields_filled: number;
+    transcript_length: number;
+  }) => track('voice_onboarding_filled', params),
+  voice_onboarding_error: (params: {
+    language: 'hi-IN' | 'en-IN';
+    mode: 'single_field' | 'multi_field';
+    error_code: string;
+  }) => track('voice_onboarding_error', params),
 };

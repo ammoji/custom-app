@@ -18,12 +18,21 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../../components/common/Button';
 import EmptyState from '../../components/common/EmptyState';
 import ScreenHeader from '../../components/common/ScreenHeader';
+// PR 34 — DO NOT REMOVE. VoiceInputButton powers the big "Speak
+// about your shop" CTA + every per-field mic icon below. If this
+// import is gone the screen falls back to type-only and the
+// Phase A2 accessibility gap re-opens.
+import VoiceInputButton from '../../components/VoiceInputButton';
 import { colors, radii, spacing, typography } from '../../constants/theme';
 import type { RootStackParamList } from '../../navigation/AppNavigator';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
 import { useLocationStore } from '../../store/useLocationStore';
-import type { ShopKycDocKind } from '../../types';
+import type {
+    ParsedShopFields,
+    ShopKycDocKind,
+    UiLanguage,
+} from '../../types';
 
 // PR 31 — One slot's upload state. The four slots (storefront, GST,
 // FSSAI, owner ID) each carry an independent copy. `localPreviewUri`
@@ -102,6 +111,24 @@ export default function RegisterShopScreen() {
   const [gstDoc, setGstDoc] = useState<KycSlotState>(initialSlotState);
   const [fssaiDoc, setFssaiDoc] = useState<KycSlotState>(initialSlotState);
   const [ownerIdDoc, setOwnerIdDoc] = useState<KycSlotState>(initialSlotState);
+
+  // PR 34 — Voice + Hindi onboarding state. Hindi is the default
+  // because the audience that benefits the most from voice
+  // assistance is non-English-fluent shopkeepers; English speakers
+  // can switch with a single tap. `aiFilledFields` records which
+  // fields the multi_field flow filled — the form renders a ✨ "AI"
+  // chip + yellow left-border on those, signalling "review me
+  // before continuing" (Trust Principle 2). The chip clears the
+  // moment the user edits the field (see clearAiMark in handlers).
+  // `transcript` powers the review banner shown after multi_field.
+  // All four hooks sit ABOVE the `if (isAnonymous)` early return
+  // — Rules-of-Hooks discipline (PR 12 / PR 27 lineage).
+  const [uiLanguage, setUiLanguage] = useState<UiLanguage>('hi-IN');
+  const [aiFilledFields, setAiFilledFields] = useState<
+    Set<keyof ParsedShopFields>
+  >(new Set());
+  const [voiceTranscript, setVoiceTranscript] = useState<string | null>(null);
+  const [voiceParseError, setVoiceParseError] = useState<string | null>(null);
 
   if (isAnonymous) {
     return (
@@ -252,6 +279,79 @@ export default function RegisterShopScreen() {
     });
   };
 
+  // PR 34 — clear the ✨ AI chip on a field as soon as the user
+  // edits it. Returning a typed setter keeps the per-field handler
+  // boilerplate to one line per Field below. The "user has
+  // reviewed" semantics rest entirely on the chip clearing —
+  // Trust Principle 2 in action.
+  const clearAiMark = (field: keyof ParsedShopFields) => {
+    if (!aiFilledFields.has(field)) return;
+    setAiFilledFields(prev => {
+      if (!prev.has(field)) return prev;
+      const next = new Set(prev);
+      next.delete(field);
+      return next;
+    });
+  };
+
+  // PR 34 — assigner used by the big "Speak about your shop" CTA.
+  // The server has already validated each field; non-null values
+  // drop straight into the matching state. Track which fields got
+  // a non-null value so the form can render the ✨ chip.
+  const applyParsedFields = (parsed: ParsedShopFields) => {
+    const filled = new Set<keyof ParsedShopFields>();
+    if (parsed.name) {
+      setName(parsed.name);
+      filled.add('name');
+    }
+    if (parsed.address) {
+      setAddress(parsed.address);
+      filled.add('address');
+    }
+    if (parsed.phone) {
+      setPhone(parsed.phone);
+      filled.add('phone');
+    }
+    if (parsed.openTime) {
+      setOpenTime(parsed.openTime);
+      filled.add('openTime');
+    }
+    if (parsed.closeTime) {
+      setCloseTime(parsed.closeTime);
+      filled.add('closeTime');
+    }
+    if (parsed.gstNumber) {
+      setGstNumber(parsed.gstNumber);
+      filled.add('gstNumber');
+    }
+    if (parsed.fssaiLicense) {
+      setFssaiLicense(parsed.fssaiLicense);
+      filled.add('fssaiLicense');
+    }
+    setAiFilledFields(filled);
+  };
+
+  // PR 34 — small helper to localise headings + the review banner.
+  // We deliberately do NOT swap the field labels (Shop name *,
+  // Phone *, etc.) since shopkeepers picking Hindi UI may still
+  // recognise the English field labels from form precedent. A
+  // future PR can swap to a real i18n system; for MVP, keeping
+  // the form labels in English while localising voice CTAs +
+  // review messaging is the minimum viable Hindi UX.
+  const t = (key: 'reviewHeading' | 'reviewHint' | 'langPickerLabel') => {
+    const isHi = uiLanguage === 'hi-IN';
+    if (key === 'reviewHeading') {
+      return isHi ? 'मैंने सुना:' : 'I heard:';
+    }
+    if (key === 'reviewHint') {
+      return isHi
+        ? 'जो भी ग़लत हो उसे ठीक करें, फिर "Continue" दबाएँ।'
+        : 'Please correct anything wrong before continuing.';
+    }
+    // langPickerLabel
+    return isHi ? 'भाषा' : 'Language';
+  };
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <ScreenHeader title="Register your shop" onBack={() => nav.goBack()} />
@@ -300,6 +400,89 @@ export default function RegisterShopScreen() {
 
           {step === 1 && (
             <>
+          {/* PR 34 — Language picker. Hindi default for the
+              audience that benefits most from voice; English speaker
+              taps once to switch. Affects every voice CTA + the
+              review banner + every server-side error message. */}
+          <View style={styles.langPickerRow}>
+            <Text style={styles.langPickerLabel}>{t('langPickerLabel')}</Text>
+            <Pressable
+              onPress={() => setUiLanguage('hi-IN')}
+              style={[
+                styles.langPill,
+                uiLanguage === 'hi-IN' && styles.langPillActive,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.langPillText,
+                  uiLanguage === 'hi-IN' && styles.langPillTextActive,
+                ]}
+              >
+                हिंदी
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={() => setUiLanguage('en-IN')}
+              style={[
+                styles.langPill,
+                uiLanguage === 'en-IN' && styles.langPillActive,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.langPillText,
+                  uiLanguage === 'en-IN' && styles.langPillTextActive,
+                ]}
+              >
+                English
+              </Text>
+            </Pressable>
+          </View>
+
+          {/* PR 34 — Big "Speak about your shop" CTA. Pre-fills
+              up to 7 fields in one shot. Trust Principle 2: every
+              filled field is marked with a ✨ chip and the
+              transcript shows in the review banner — the user
+              MUST see the AI output before tapping Continue. */}
+          <VoiceInputButton
+            languageCode={uiLanguage}
+            mode="multi_field"
+            size="lg"
+            onResult={r => {
+              setVoiceTranscript(r.transcript);
+              setVoiceParseError(r.parseError ?? null);
+              if (r.fields) applyParsedFields(r.fields);
+            }}
+            onError={(_code, message) => {
+              Alert.alert(
+                uiLanguage === 'hi-IN' ? 'त्रुटि' : 'Error',
+                message,
+              );
+            }}
+          />
+
+          {/* Review banner. Shows the raw transcript so the user
+              can spot dictation errors at a glance. If Claude's
+              parse fell back, surfaces the friendly hint asking
+              them to use per-field mics. */}
+          {voiceTranscript ? (
+            <View style={styles.reviewBanner}>
+              <Text style={styles.reviewBannerHeading}>
+                {t('reviewHeading')}
+              </Text>
+              <Text style={styles.reviewBannerTranscript}>
+                &ldquo;{voiceTranscript}&rdquo;
+              </Text>
+              <Text style={styles.reviewBannerHint}>{t('reviewHint')}</Text>
+              {voiceParseError ? (
+                <Text style={styles.reviewBannerError}>
+                  {voiceParseError}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
+
           <Text style={styles.intro}>
             Tell us about your shop. An admin will review your registration
             and notify you within 24 hours.
@@ -308,15 +491,47 @@ export default function RegisterShopScreen() {
           <Field
             label="Shop name *"
             value={name}
-            onChangeText={setName}
+            onChangeText={v => {
+              setName(v);
+              clearAiMark('name');
+            }}
             placeholder="e.g. Sharma Provision Store"
+            aiFilled={aiFilledFields.has('name')}
+            voice={{
+              languageCode: uiLanguage,
+              onTranscript: txt => {
+                setName(txt);
+                clearAiMark('name');
+              },
+              onError: (_c, m) =>
+                Alert.alert(
+                  uiLanguage === 'hi-IN' ? 'त्रुटि' : 'Error',
+                  m,
+                ),
+            }}
           />
           <Field
             label="Shop address *"
             value={address}
-            onChangeText={setAddress}
+            onChangeText={v => {
+              setAddress(v);
+              clearAiMark('address');
+            }}
             placeholder="Building, street, area, city, pincode"
             multiline
+            aiFilled={aiFilledFields.has('address')}
+            voice={{
+              languageCode: uiLanguage,
+              onTranscript: txt => {
+                setAddress(txt);
+                clearAiMark('address');
+              },
+              onError: (_c, m) =>
+                Alert.alert(
+                  uiLanguage === 'hi-IN' ? 'त्रुटि' : 'Error',
+                  m,
+                ),
+            }}
           />
           {location && (
             <Text style={styles.helper}>
@@ -327,9 +542,36 @@ export default function RegisterShopScreen() {
           <Field
             label="Phone *"
             value={phone}
-            onChangeText={setPhone}
+            onChangeText={v => {
+              setPhone(v);
+              clearAiMark('phone');
+            }}
             placeholder="+91XXXXXXXXXX"
             keyboardType="phone-pad"
+            aiFilled={aiFilledFields.has('phone')}
+            voice={{
+              languageCode: uiLanguage,
+              onTranscript: txt => {
+                // Strip non-digits client-side before assigning;
+                // mirrors the server's phone validator. Keeps the
+                // form consistent if the user dictates "nine eight
+                // seven six..." with extra words.
+                const digits = txt.replace(/\D/g, '');
+                const ten =
+                  digits.length === 12 && digits.startsWith('91')
+                    ? digits.slice(2)
+                    : digits.length === 11 && digits.startsWith('0')
+                      ? digits.slice(1)
+                      : digits;
+                setPhone(ten);
+                clearAiMark('phone');
+              },
+              onError: (_c, m) =>
+                Alert.alert(
+                  uiLanguage === 'hi-IN' ? 'त्रुटि' : 'Error',
+                  m,
+                ),
+            }}
           />
 
           <Text style={styles.sectionLabel}>Business hours</Text>
@@ -338,8 +580,12 @@ export default function RegisterShopScreen() {
               <Field
                 label="Opens at"
                 value={openTime}
-                onChangeText={setOpenTime}
+                onChangeText={v => {
+                  setOpenTime(v);
+                  clearAiMark('openTime');
+                }}
                 placeholder="09:00"
+                aiFilled={aiFilledFields.has('openTime')}
               />
             </View>
             <View style={{ width: spacing.md }} />
@@ -347,8 +593,12 @@ export default function RegisterShopScreen() {
               <Field
                 label="Closes at"
                 value={closeTime}
-                onChangeText={setCloseTime}
+                onChangeText={v => {
+                  setCloseTime(v);
+                  clearAiMark('closeTime');
+                }}
                 placeholder="21:00"
+                aiFilled={aiFilledFields.has('closeTime')}
               />
             </View>
           </View>
@@ -357,16 +607,24 @@ export default function RegisterShopScreen() {
           <Field
             label="GST number"
             value={gstNumber}
-            onChangeText={setGstNumber}
+            onChangeText={v => {
+              setGstNumber(v);
+              clearAiMark('gstNumber');
+            }}
             placeholder="22AAAAA0000A1Z5"
             autoCapitalize="characters"
+            aiFilled={aiFilledFields.has('gstNumber')}
           />
           <Field
             label="FSSAI license"
             value={fssaiLicense}
-            onChangeText={setFssaiLicense}
+            onChangeText={v => {
+              setFssaiLicense(v);
+              clearAiMark('fssaiLicense');
+            }}
             placeholder="14-digit FSSAI number"
             keyboardType="number-pad"
+            aiFilled={aiFilledFields.has('fssaiLicense')}
           />
 
           <View style={{ marginTop: spacing.lg }}>
@@ -509,6 +767,13 @@ function Field({
   multiline,
   keyboardType,
   autoCapitalize,
+  // PR 34 — optional voice attachments. When `voice` is supplied,
+  // the field renders a small mic button to the right of the
+  // input + an ✨ chip beside the label when `aiFilled` is true.
+  // Editing the field clears the chip via the parent's
+  // `clearAiMark` handler.
+  voice,
+  aiFilled,
 }: {
   label: string;
   value: string;
@@ -517,22 +782,57 @@ function Field({
   multiline?: boolean;
   keyboardType?: 'default' | 'phone-pad' | 'number-pad' | 'email-address';
   autoCapitalize?: 'none' | 'sentences' | 'words' | 'characters';
+  voice?: {
+    languageCode: 'hi-IN' | 'en-IN';
+    onTranscript: (transcript: string) => void;
+    onError: (errorCode: string, message: string) => void;
+  };
+  aiFilled?: boolean;
 }) {
   return (
     <View style={styles.field}>
-      <Text style={styles.fieldLabel}>{label}</Text>
-      <TextInput
-        style={[styles.input, multiline && styles.inputMultiline]}
-        value={value}
-        onChangeText={onChangeText}
-        placeholder={placeholder}
-        placeholderTextColor={colors.textSecondary}
-        multiline={multiline}
-        numberOfLines={multiline ? 3 : 1}
-        keyboardType={keyboardType}
-        autoCapitalize={autoCapitalize ?? 'sentences'}
-        autoCorrect={false}
-      />
+      <View style={styles.fieldLabelRow}>
+        <Text style={styles.fieldLabel}>{label}</Text>
+        {aiFilled ? (
+          <View style={styles.aiChip}>
+            <Text style={styles.aiChipText}>✨ AI</Text>
+          </View>
+        ) : null}
+      </View>
+      <View
+        style={[
+          styles.fieldInputRow,
+          aiFilled && styles.fieldInputRowAiFilled,
+        ]}
+      >
+        <TextInput
+          style={[
+            styles.input,
+            multiline && styles.inputMultiline,
+            voice ? styles.inputWithMic : null,
+          ]}
+          value={value}
+          onChangeText={onChangeText}
+          placeholder={placeholder}
+          placeholderTextColor={colors.textSecondary}
+          multiline={multiline}
+          numberOfLines={multiline ? 3 : 1}
+          keyboardType={keyboardType}
+          autoCapitalize={autoCapitalize ?? 'sentences'}
+          autoCorrect={false}
+        />
+        {voice ? (
+          <View style={styles.fieldMicWrap}>
+            <VoiceInputButton
+              languageCode={voice.languageCode}
+              mode="single_field"
+              size="sm"
+              onResult={r => voice.onTranscript(r.transcript)}
+              onError={voice.onError}
+            />
+          </View>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -677,6 +977,93 @@ const styles = StyleSheet.create({
   kycCardStatusEmpty: {
     ...typography.caption,
     color: colors.primary,
+    marginTop: spacing.xs,
+    fontWeight: '600',
+  },
+  // PR 34 — voice + Hindi onboarding styles.
+  fieldLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginBottom: spacing.xs,
+  },
+  fieldInputRow: { flexDirection: 'row', alignItems: 'flex-start' },
+  fieldInputRowAiFilled: {
+    borderLeftWidth: 3,
+    borderLeftColor: '#F0B400',
+    paddingLeft: spacing.sm,
+    marginLeft: -spacing.sm,
+  },
+  inputWithMic: { flex: 1 },
+  fieldMicWrap: { marginLeft: spacing.sm, paddingTop: 4 },
+  aiChip: {
+    backgroundColor: '#F0B400',
+    paddingHorizontal: spacing.xs,
+    paddingVertical: 2,
+    borderRadius: radii.sm,
+  },
+  aiChipText: {
+    ...typography.caption,
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 11,
+  },
+  langPickerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: spacing.md,
+    gap: spacing.sm,
+  },
+  langPickerLabel: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '700',
+  },
+  langPill: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  langPillActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  langPillText: {
+    ...typography.body,
+    color: colors.textPrimary,
+    fontWeight: '600',
+  },
+  langPillTextActive: { color: colors.surface },
+  reviewBanner: {
+    backgroundColor: '#FFF8E1',
+    borderRadius: radii.md,
+    borderLeftWidth: 4,
+    borderLeftColor: '#F0B400',
+    padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  reviewBannerHeading: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  reviewBannerTranscript: {
+    ...typography.body,
+    color: colors.textPrimary,
+    fontStyle: 'italic',
+    marginBottom: spacing.xs,
+  },
+  reviewBannerHint: {
+    ...typography.caption,
+    color: colors.textSecondary,
+  },
+  reviewBannerError: {
+    ...typography.caption,
+    color: colors.danger,
     marginTop: spacing.xs,
     fontWeight: '600',
   },

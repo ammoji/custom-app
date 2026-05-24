@@ -29,7 +29,6 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
     },
     "web": {
@@ -65,8 +64,8 @@
           "project": "react-native"
         }
       ],
-      "@react-native-firebase/app",
-      "@react-native-firebase/auth",
+      "./plugins/withRnFirebaseApp",
+      "./plugins/withRnFirebaseAuth",
       [
         "expo-notifications",
         {
@@ -82,7 +81,13 @@
           }
         }
       ],
-      "./plugins/withModularHeaders"
+      "./plugins/withModularHeaders",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Kirana Mart uses the microphone for voice-assisted shop registration so you can speak your details instead of typing."
+        }
+      ]
     ],
     "experiments": {},
     "extra": {
