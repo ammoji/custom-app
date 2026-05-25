@@ -7060,6 +7060,82 @@ eas update --branch preview --message "PR 1: security hardening — delivery app
 **Maintenance rule:** any time we add a temporary dev hack, env-only flag,
 disabled enforcement, or "TODO before launch" in code — add it here
 immediately. The checklist is the only thing that survives memory.
+
+## PR 36 — Customer CRM for shop owner `[Phase 36]`
+
+- [x] **`listShopCustomers` callable + pure aggregator** — server-side
+      aggregation of the shop's most-recent 1000 orders into per-
+      customer rollups (orderCount, totalSpent excluding cancelled/
+      refunded, firstOrderAt, lastOrderAt). All grouping + sorting +
+      filtering lives in `functions/src/customerCrmHelpers.ts`
+      (`aggregateShopCustomers`, `viewShopCustomers`) so it's unit-
+      tested without booting firebase-functions; the callable in
+      `functions/src/index.ts` is a thin Firestore query wrapper that
+      reuses `validateShopOrdersAccess` (same gate as
+      `listShopOrders`). Returns `{ customers, summary }` with
+      `truncated` flag when the 1000-order cap is hit. **Schema note:
+      the PR 36 prompt drafted helpers against `userId` + `address`,
+      but verified-against-source order docs use `customerUid` +
+      `deliveryAddress` (see header comment in
+      `customerCrmHelpers.ts`). Tests pin the corrected shape.**
+      Hard-cap rationale documented inline.
+
+- [x] **`ShopCustomersScreen` (client)** — three tabs (Top by revenue
+      / Recent / Stopped 30d+) over a 90d / 180d / All-time period
+      selector; tap-to-expand row reveals phone (tap-to-call on
+      native via `Linking`), full order count, total spent, first/
+      last order dates. All `useState` calls live above the early
+      returns to satisfy rules-of-hooks. Empty/loading/error/
+      truncated states handled in-tree. Uses existing
+      `formatRupees` and SafeAreaView pattern.
+
+- [x] **Wired into `ShopOwnerDashboardScreen`** as a `manageMenuTile`
+      ("👥 My customers"); `ShopCustomers` route registered in
+      `AppNavigator.tsx`. `ShopCustomer` type exported from
+      `src/types/index.ts`; client wrapper `listShopCustomers`
+      added to `src/services/orderService.ts` with web/native
+      dispatch.
+
+- [x] **Analytics** — `shop_customers_viewed` (fires on initial
+      load + every tab/period change with totalUniqueCustomers +
+      customers_shown from server) and `shop_customer_tapped`
+      (rank_in_view, 1-indexed) added to `src/services/analytics.ts`
+      under the existing `Analytics` namespace; auto-mirrored to
+      `featureUsageLog/` via PR 38.1 routing.
+
+- [x] **Unit tests** — `tests/functions/customerCrmHelpers.test.ts`
+      covers aggregation totals, cancelled/refunded exclusion from
+      `totalSpent` (kept in `orderCount`), defensive skipping of
+      malformed rows, most-recent-non-empty contact merging,
+      regression guard for blank-newer-address, and all three
+      view sorts including `stopped` default 30d. **9 passing.**
+      Deliberate-break check: removing the cancelled/refunded
+      exclusion makes the dedicated test fail; reverted.
+
+- [x] **Privacy / forbidden-actions audit** — no new collections
+      or fields written; rollups computed in-memory per request.
+      Privacy enforced via the same `validateShopOrdersAccess`
+      gate as `listShopOrders` (shop owner ↔ own shop only;
+      admin can pass `shopId`).
+
+- [ ] **Smoke tests post-deploy** — on a freshly-launched shop
+      with ≥5 past orders: verify Top sort, Recent sort matches
+      most-recent order timestamp, Stopped 30d+ behaves on an
+      older shop, period switch updates numbers, expand row
+      shows phone tap-to-call, analytics events visible in
+      DebugView. `[Phase 36-smoke]`
+
+- [ ] **Truncation UX at scale** — when a shop's history exceeds
+      1000 orders the screen surfaces a "Showing your most recent
+      1,000 orders" banner. Add an explicit date-range picker
+      (or paginated cursor) before any shop is likely to cross
+      this threshold (~100 orders/day for 10 days). `[Post-launch]`
+
+- [ ] **Customer notes / tags** — out of scope for PR 36.
+      Letting shop owners attach short notes per customer
+      (e.g. "prefers no onion", "leaves at gate") would require
+      a new `shopCustomerNotes/` collection + rules; deferred.
+      `[Post-launch]`
 ## 📈 Post-launch scaling triggers (revisit each milestone)
 
 - [ ] At 100 DAU: review Firebase costs weekly for first month

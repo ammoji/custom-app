@@ -151,6 +151,12 @@ import {
 } from './searchMenuPublicHelpers';
 import { validateShopOrdersAccess } from './shopOrdersHelpers';
 import {
+    aggregateShopCustomers,
+    viewShopCustomers,
+    type ShopOrderRaw,
+    type ShopCustomersView,
+} from './customerCrmHelpers';
+import {
     detectAmountMismatch,
     extractDedupKey,
     shouldIgnoreLatePaymentFailed,
@@ -2684,6 +2690,116 @@ export const listShopOrders = onCall<{ shopId?: string }>(
       };
     });
   },
+);
+
+// PR 36 — Customer CRM for shop owners.
+//
+// Aggregates the shop's recent orders (capped at 1000 most-recent
+// to bound read cost / latency) into per-customer rollups so the
+// shop owner can see their top customers, recent orders, and
+// lapsed customers ("stopped 30d+"). Uses the same
+// validateShopOrdersAccess gate as listShopOrders so privacy is
+// enforced consistently — shop owners only see their OWN shop's
+// customers; admins can pass an explicit `shopId`.
+//
+// All sorting / filtering happens in the pure helper
+// (`customerCrmHelpers.ts`) so it's unit-tested without booting
+// firebase-functions. The callable here is the thin Firestore-
+// query wrapper.
+export const listShopCustomers = onCall<{
+    shopId?: string;
+    sortBy?: 'top_revenue' | 'recent' | 'stopped';
+    period?: '90d' | '180d' | 'all';
+    limit?: number;
+    minDaysSinceLastOrder?: number;
+}>(
+    { cors: true, enforceAppCheck: false },
+    async request => {
+        const auth = request.auth;
+        if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+
+        const result = validateShopOrdersAccess({
+            claims: auth.token ?? {},
+            requestedShopId: request.data?.shopId,
+        });
+        if (!result.ok) {
+            throw new HttpsError(result.code, result.message);
+        }
+        const { targetShopId } = result;
+
+        const sortBy = request.data?.sortBy ?? 'top_revenue';
+        const period = request.data?.period ?? '90d';
+        const limit = Math.min(Math.max(request.data?.limit ?? 50, 1), 200);
+        const minDaysSinceLastOrder = Math.max(
+            request.data?.minDaysSinceLastOrder ?? 30,
+            1,
+        );
+
+        // Cap the working set at 1000 most-recent orders. At launch
+        // scale (8 shops, low-hundreds orders/shop) every shop's
+        // entire history fits; at scale we surface a `truncated`
+        // flag so the UI can prompt for date filtering. Same shape
+        // listAllOrders uses.
+        const HARD_CAP = 1000;
+        const snap = await db
+            .collection('orders')
+            .where('shopId', '==', targetShopId)
+            .orderBy('createdAt', 'desc')
+            .limit(HARD_CAP)
+            .get();
+
+        const allRows: ShopOrderRaw[] = snap.docs.map(d => {
+            const data = d.data() as Record<string, any>;
+            return {
+                id: d.id,
+                customerUid: data.customerUid,
+                total: typeof data.total === 'number' ? data.total : undefined,
+                status: typeof data.status === 'string' ? data.status : undefined,
+                createdAt:
+                    data.createdAt?.toMillis?.() ??
+                    (typeof data.createdAt === 'number' ? data.createdAt : undefined),
+                deliveryAddress: data.deliveryAddress
+                    ? {
+                          name: data.deliveryAddress.name,
+                          phone: data.deliveryAddress.phone,
+                      }
+                    : undefined,
+            };
+        });
+
+        const now = Date.now();
+        const periodCutoff =
+            period === '90d'
+                ? now - 90 * 86_400_000
+                : period === '180d'
+                  ? now - 180 * 86_400_000
+                  : 0;
+        const inPeriod = allRows.filter(
+            r => (r.createdAt ?? 0) >= periodCutoff,
+        );
+
+        const aggregated = aggregateShopCustomers(inPeriod);
+
+        const view: ShopCustomersView =
+            sortBy === 'stopped'
+                ? { sortBy: 'stopped', minDaysSinceLastOrder, limit }
+                : { sortBy, limit };
+        const customers = viewShopCustomers(aggregated, view, now);
+
+        return {
+            customers,
+            summary: {
+                totalUniqueCustomers: aggregated.length,
+                totalRevenue: aggregated.reduce(
+                    (sum, c) => sum + c.totalSpent,
+                    0,
+                ),
+                ordersScanned: allRows.length,
+                ordersInPeriod: inPeriod.length,
+                truncated: allRows.length >= HARD_CAP,
+            },
+        };
+    },
 );
 
 export const sendNewOrderPushToShop = onDocumentCreated(

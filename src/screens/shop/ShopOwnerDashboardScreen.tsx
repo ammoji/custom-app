@@ -325,6 +325,20 @@ export default function ShopOwnerDashboardScreen() {
               <Text style={styles.manageMenuText}>📋  Manage Menu</Text>
               <Text style={styles.manageMenuChevron}>›</Text>
             </Pressable>
+            {/* PR 36 — Customer CRM. Same visual treatment as the
+                other dashboard tiles; route registered in
+                AppNavigator. Server enforces the shopOwner /
+                shopId access gate so this is safe to expose to
+                every approved shop owner. */}
+            <Pressable
+              style={styles.manageMenuTile}
+              onPress={() => nav.navigate('ShopCustomers')}
+              accessibilityRole="button"
+              accessibilityLabel="My customers"
+            >
+              <Text style={styles.manageMenuText}>👥  My customers</Text>
+              <Text style={styles.manageMenuChevron}>›</Text>
+            </Pressable>
             <View style={styles.toggleRow}>
               <Text style={styles.sectionLabel}>
                 {showAll ? 'All orders' : 'Active orders'}

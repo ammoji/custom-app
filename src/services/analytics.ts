@@ -231,6 +231,30 @@ export const Analytics = {
   shop_signed_in: (params: { shop_id: string }) =>
     track('shop_signed_in', params),
 
+  // PR 36 — Customer CRM funnel.
+  //   - `shop_customers_viewed` fires every time the shop owner
+  //     opens the screen OR switches a tab / period (it's a "view"
+  //     in the analytics sense — what they're currently looking
+  //     at). `total_unique_customers` + `customers_shown` come
+  //     from the server response so we can see usage * activity
+  //     without joining client/server logs.
+  //   - `shop_customer_tapped` fires when a row is expanded — a
+  //     proxy for "the shop owner found this customer interesting
+  //     enough to inspect". `rank_in_view` is 1-indexed so we can
+  //     see whether the top of the list is what gets attention.
+  shop_customers_viewed: (params: {
+    shop_id: string;
+    sort_by: 'top_revenue' | 'recent' | 'stopped';
+    period: '90d' | '180d' | 'all';
+    total_unique_customers: number;
+    customers_shown: number;
+  }) => track('shop_customers_viewed', params),
+  shop_customer_tapped: (params: {
+    shop_id: string;
+    sort_by: 'top_revenue' | 'recent' | 'stopped';
+    rank_in_view: number;
+  }) => track('shop_customer_tapped', params),
+
   // ───────────────────────────────────────────────────────────
   // PR 38 — Delivery partner actions.
   // ───────────────────────────────────────────────────────────

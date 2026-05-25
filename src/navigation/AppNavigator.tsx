@@ -46,6 +46,7 @@ import ScanMenuScreen from '../screens/shop/ScanMenuScreen';
 import ShopMenuItemEditScreen from '../screens/shop/ShopMenuItemEditScreen';
 import ShopMenuScreen from '../screens/shop/ShopMenuScreen';
 import ShopOrderDetailScreen from '../screens/shop/ShopOrderDetailScreen';
+import ShopCustomersScreen from '../screens/shop/ShopCustomersScreen';
 import ShopOwnerDashboardScreen from '../screens/shop/ShopOwnerDashboardScreen';
 import ShopSettingsScreen from '../screens/shop/ShopSettingsScreen';
 
@@ -95,6 +96,8 @@ export type RootStackParamList = {
   PendingDeliveryRequests: undefined;
   DeliveryRequestDetail: { uid: string };
   ShopOwnerDashboard: undefined;
+  // PR 36 — shop owner Customer CRM (Top / Recent / Stopped tabs).
+  ShopCustomers: undefined;
   // Phase 12a-v2-iv-followup: per-order detail for shop owners.
   ShopOrderDetail: { orderId: string };
   // Phase 12a-v2-ii: per-shop menu management.
@@ -218,6 +221,7 @@ export default function AppNavigator() {
         component={AddCustomMenuItemScreen}
       />
       <Stack.Screen name="ScanMenu" component={ScanMenuScreen} />
+      <Stack.Screen name="ShopCustomers" component={ShopCustomersScreen} />
       <Stack.Screen
         name="DeliveryDashboard"
         component={DeliveryDashboardScreen}

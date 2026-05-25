@@ -477,3 +477,18 @@ export type ExtractedMenuDraft = ExtractedMenuItem & {
   editedSellPrice: number;
   editedCategory: CategoryId;
 };
+
+// PR 36 — Customer CRM rollup row, returned by the
+// `listShopCustomers` callable. One row per customerUid for ONE
+// shop. Mirrors the server-side type in
+// `functions/src/customerCrmHelpers.ts`; kept here so client
+// screens don't reach into the functions package.
+export type ShopCustomer = {
+  uid: string;
+  phone: string | null;
+  displayName: string | null;
+  orderCount: number;
+  totalSpent: number; // rupees
+  firstOrderAt: number; // epoch ms
+  lastOrderAt: number; // epoch ms
+};

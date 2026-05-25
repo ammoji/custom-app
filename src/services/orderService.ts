@@ -25,6 +25,7 @@ import type {
     ParsedShopFields,
     PaymentMethod,
     Shop,
+    ShopCustomer,
     SubstitutionPreference,
     UserInfo,
 } from '../types';
@@ -1172,6 +1173,36 @@ export const orderService = {
         cb([], err instanceof Error ? err : new Error(String(err)));
       },
     );
+  },
+
+  // PR 36 — Customer CRM rollup. Server enforces the same access
+  // gate as listShopOrders: shop owners only see their own shop;
+  // admins can pass an explicit shopId. Returns server-computed
+  // rollups + summary; nothing is persisted.
+  async listShopCustomers(input: {
+    shopId?: string;
+    sortBy?: 'top_revenue' | 'recent' | 'stopped';
+    period?: '90d' | '180d' | 'all';
+    limit?: number;
+    minDaysSinceLastOrder?: number;
+  }): Promise<{
+    customers: ShopCustomer[];
+    summary: {
+      totalUniqueCustomers: number;
+      totalRevenue: number;
+      ordersScanned: number;
+      ordersInPeriod: number;
+      truncated: boolean;
+    };
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('listShopCustomers');
+      const result = await fn(input);
+      return result.data as any;
+    }
+    const fn = httpsCallable(functions, 'listShopCustomers');
+    const result = await fn(input);
+    return result.data as any;
   },
 
   // ──────────────────────────────────────────────────────────
