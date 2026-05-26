@@ -80,6 +80,23 @@ export const Analytics = {
   view_shop_list: (params: { count: number }) => track('view_shop_list', params),
   view_shop_detail: (params: { shop_id: string; shop_name: string }) =>
     track('view_shop_detail', params),
+
+  // PR 36.1 — customer-side polish events.
+  //   - `customer_pickup_countdown_viewed` fires once per
+  //     OrderDetailScreen mount when the order has a future
+  //     readyByEstimate. Tells us whether the new countdown
+  //     surface is actually being seen.
+  //   - `customer_favorites_filter_toggled` fires on every
+  //     filter pill tap on ShopListScreen. Tells us whether
+  //     the favorites surface drives browse behaviour.
+  // Both auto-mirror to `featureUsageLog/` via PR 38.1's
+  // callable routing — no extra wiring.
+  customer_pickup_countdown_viewed: (params: {
+    order_id: string;
+    minutes_until_ready: number;
+  }) => track('customer_pickup_countdown_viewed', params),
+  customer_favorites_filter_toggled: (params: { enabled: boolean }) =>
+    track('customer_favorites_filter_toggled', params),
   add_to_cart: (params: {
     product_id: string;
     shop_id: string;

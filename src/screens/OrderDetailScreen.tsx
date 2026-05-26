@@ -16,6 +16,7 @@ import { shopService } from '../services/shopService';
 import type { Order, Shop } from '../types';
 import { usePressGuard } from '../hooks/usePressGuard';
 import { formatOrderTime, formatRupees } from '../utils/format';
+import { formatRelativeTime } from '../utils/formatRelativeTime';
 import { openRazorpayCheckout } from '../utils/razorpay';
 
 const showAlert = (title: string, message: string) => {
@@ -158,6 +159,24 @@ export default function OrderDetailScreen() {
     // refreshNonce is in deps so the pull-to-refresh handler can
     // force a re-subscribe by bumping it.
   }, [orderId, refreshNonce]);
+
+  // PR 36.1 — fire `customer_pickup_countdown_viewed` once per
+  // (order_id, readyByEstimate) pair when there's a future ETA
+  // to display. Deps include `order?.readyByEstimate` so a shop
+  // bumping the ETA mid-flight re-fires. Skipped entirely when
+  // the ETA is null or already past.
+  useEffect(() => {
+    const ready = order?.readyByEstimate;
+    if (!ready || ready <= Date.now()) return;
+    Analytics.customer_pickup_countdown_viewed({
+      order_id: order.id,
+      minutes_until_ready: Math.round((ready - Date.now()) / 60_000),
+    });
+    // We deliberately don't depend on `nowMs` — that would re-
+    // fire every second. The (orderId, readyByEstimate) tuple
+    // is the right grain for "this is a new countdown surface".
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [order?.id, order?.readyByEstimate]);
 
   // PR 17 — fetch the shop doc so the Call shop button has a
   // phone number to dial. Runs once per shopId; failures are
@@ -302,10 +321,24 @@ export default function OrderDetailScreen() {
             order.status !== 'cancelled' &&
             (order.readyByEstimate &&
             (order.status === 'accepted' || order.status === 'preparing') ? (
-              <Text style={styles.eta}>
-                Ready by {formatOrderTime(order.readyByEstimate)} at the
-                shop. Delivery partner will pick up and bring it to you.
-              </Text>
+              // PR 36.1 — two-line countdown + absolute time.
+              // Eliminates the "when's 7:30 vs now?" mental-math
+              // every customer hits when checking on their order.
+              // The relative line ticks once per minute via the
+              // existing nowMs interval (PR 7); no new timer.
+              <View style={styles.pickupRow}>
+                <Text style={styles.pickupPrimary}>
+                  {formatRelativeTime(
+                    order.readyByEstimate,
+                    nowMs,
+                    { label: 'Pickup ready' },
+                  ).primary}
+                </Text>
+                <Text style={styles.pickupSecondary}>
+                  by {formatOrderTime(order.readyByEstimate)} · delivery
+                  partner brings it to you
+                </Text>
+              </View>
             ) : (
               minutesLeft > 0 && (
                 <Text style={styles.eta}>Arriving in ~{minutesLeft} min</Text>
@@ -817,6 +850,12 @@ const styles = StyleSheet.create({
   orderId: { ...typography.caption, color: colors.textSecondary },
   placedAt: { ...typography.caption, marginTop: spacing.sm },
   eta: { ...typography.bodyBold, color: colors.primaryDark, marginTop: spacing.xs },
+  // PR 36.1 — two-line pickup countdown. Primary line is bold +
+  // primaryDark (matches the existing `eta` style). Secondary is
+  // smaller / muted so the relative time remains the visual anchor.
+  pickupRow: { marginTop: spacing.xs },
+  pickupPrimary: { ...typography.bodyBold, color: colors.primaryDark },
+  pickupSecondary: { ...typography.caption, color: colors.textSecondary, marginTop: 2 },
   sectionTitle: { ...typography.h3, marginTop: spacing.md },
   card: {
     backgroundColor: colors.surface,

@@ -11,6 +11,7 @@ import { colors, radii, spacing, typography } from '../constants/theme';
 import { Analytics } from '../services/analytics';
 import { useCartStore } from '../store/useCartStore';
 import { useLocationStore } from '../store/useLocationStore';
+import { useProfileStore } from '../store/useProfileStore';
 import type { Shop } from '../types';
 import { formatRupees } from '../utils/format';
 import { useShopListData } from './ShopListScreen.useShopListData';
@@ -18,10 +19,17 @@ import { useShopListData } from './ShopListScreen.useShopListData';
 export default function ShopListScreen() {
   const nav = useNavigation<any>();
   const [query, setQuery] = useState('');
+  // PR 36.1 — inline "Favorites only" filter. Local screen state,
+  // not persisted: resets to All on each navigation here. PR 19
+  // stored favorites as `Record<shopId, menuItemIds[]>` on the
+  // user profile; a shop counts as favorited if its key is
+  // present (server normalises empty-array entries away).
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
 
   const itemCount = useCartStore(s => s.itemCount());
   const total = useCartStore(s => s.total());
   const location = useLocationStore(s => s.location);
+  const favorites = useProfileStore(s => s.profile?.favorites ?? {});
 
   // State machine extracted to ./ShopListScreen.useShopListData so
   // the loader-stuck-forever bug class can be unit-tested without
@@ -57,7 +65,18 @@ export default function ShopListScreen() {
     const status = (s as Shop & { status?: string }).status;
     const isLive = status === undefined || status === 'active';
     if (!isLive) return false;
-    return s.name.toLowerCase().includes(query.trim().toLowerCase());
+    if (!s.name.toLowerCase().includes(query.trim().toLowerCase())) {
+      return false;
+    }
+    // PR 36.1 — favorites filter. Empty-array entries should not
+    // exist in steady state (server prunes them), but guard
+    // anyway so a transient empty array doesn't surface a shop
+    // as "favorited".
+    if (favoritesOnly) {
+      const items = favorites[s.id];
+      if (!items || items.length === 0) return false;
+    }
+    return true;
   });
 
   return (
@@ -78,6 +97,37 @@ export default function ShopListScreen() {
       />
       <View style={styles.searchWrap}>
         <Input value={query} onChangeText={setQuery} placeholder="Search shop name" />
+      </View>
+      {/* PR 36.1 — favorites-only filter pill. Above the list,
+          mirrors the visual treatment of the HomeScreen favorites
+          tile (heart emoji + pill shape). */}
+      <View style={styles.filterRow}>
+        <Pressable
+          onPress={() => {
+            const next = !favoritesOnly;
+            setFavoritesOnly(next);
+            Analytics.customer_favorites_filter_toggled({ enabled: next });
+          }}
+          style={[
+            styles.filterPill,
+            favoritesOnly && styles.filterPillActive,
+          ]}
+          accessibilityRole="button"
+          accessibilityLabel={
+            favoritesOnly ? 'Show all shops' : 'Show favorites only'
+          }
+          accessibilityState={{ selected: favoritesOnly }}
+        >
+          <Text
+            style={
+              favoritesOnly
+                ? styles.filterPillTextActive
+                : styles.filterPillText
+            }
+          >
+            {favoritesOnly ? '❤️ Favorites only' : '🏪 All shops'}
+          </Text>
+        </Pressable>
       </View>
       {error && !loading && (
         <View style={styles.errorBanner}>
@@ -107,10 +157,32 @@ export default function ShopListScreen() {
             />
           )}
           ListEmptyComponent={
-            <EmptyState
-              title={query ? 'No shops match' : 'No shops near you'}
-              subtitle={query ? 'Try clearing your search.' : "We're expanding fast — check back soon."}
-            />
+            favoritesOnly ? (
+              // PR 36.1 — dedicated empty state when the filter is
+              // on but the customer has no favorites yet. Friendlier
+              // than the generic "No shops match" copy + offers a
+              // one-tap escape hatch back to the full list.
+              <View style={styles.favEmpty}>
+                <Text style={styles.favEmptyTitle}>No favorites yet</Text>
+                <Text style={styles.favEmptyHint}>
+                  Tap the ❤️ on any shop's detail page to add it to
+                  your favorites.
+                </Text>
+                <Pressable
+                  onPress={() => setFavoritesOnly(false)}
+                  style={styles.favEmptyCta}
+                  accessibilityRole="button"
+                  accessibilityLabel="Show all shops"
+                >
+                  <Text style={styles.favEmptyCtaText}>Show all shops</Text>
+                </Pressable>
+              </View>
+            ) : (
+              <EmptyState
+                title={query ? 'No shops match' : 'No shops near you'}
+                subtitle={query ? 'Try clearing your search.' : "We're expanding fast — check back soon."}
+              />
+            )
           }
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
         />
@@ -177,4 +249,43 @@ const styles = StyleSheet.create({
     borderRadius: radii.sm,
   },
   retryText: { ...typography.bodyBold, color: '#fff' },
+  // PR 36.1 — favorites filter pill + empty state.
+  filterRow: {
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.md,
+    flexDirection: 'row',
+  },
+  filterPill: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: 999,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  filterPillActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  filterPillText: { ...typography.bodyBold, color: colors.textPrimary },
+  filterPillTextActive: { ...typography.bodyBold, color: '#fff' },
+  favEmpty: {
+    alignItems: 'center',
+    paddingVertical: spacing.xxl,
+    paddingHorizontal: spacing.lg,
+  },
+  favEmptyTitle: { ...typography.h3, marginBottom: spacing.sm },
+  favEmptyHint: {
+    ...typography.body,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    marginBottom: spacing.md,
+  },
+  favEmptyCta: {
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    borderRadius: radii.md,
+    backgroundColor: colors.primary,
+  },
+  favEmptyCtaText: { ...typography.bodyBold, color: '#fff' },
 });

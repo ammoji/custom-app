@@ -7136,6 +7136,86 @@ immediately. The checklist is the only thing that survives memory.
       (e.g. "prefers no onion", "leaves at gate") would require
       a new `shopCustomerNotes/` collection + rules; deferred.
       `[Post-launch]`
+
+## PR 36.1 — Pilot UX polish bundle `[Phase 36.1]`
+
+- [x] **Pickup countdown on customer `OrderDetailScreen`** —
+      replaces the single-line "Ready by 7:30 PM at the shop…"
+      with a two-line layout: bold relative time on top
+      (`Pickup ready in 22 minutes`) + muted absolute fallback
+      below (`by 7:30 PM · delivery partner brings it to you`).
+      Eliminates the mental-math hit every time a customer
+      checks on their order. Pure helper at
+      `src/utils/formatRelativeTime.ts` (caller-injected
+      `nowMs`, deterministic, no `Date.now()` inside) drives
+      the format. Reuses the existing PR 7 `nowMs` 1-second
+      interval (already in place for the in-window cancel
+      countdown) — **no new timer**, no leak risk.
+      Edge cases handled: no ETA → row hidden; <1 min →
+      "less than a minute"; past <2 min → "any moment now";
+      past >2 min → "X minutes ago"; ≥1 hour → "X hours Y minutes".
+
+- [x] **Favorites-only filter pill on `ShopListScreen`** —
+      pill at the top of the list (above search results),
+      defaults to "🏪 All shops", toggles to "❤️ Favorites
+      only". Filter logic checks
+      `profile.favorites?.[shopId]?.length > 0` against the
+      PR 19 `Record<shopId, menuItemIds[]>` shape (server
+      prunes empty entries; UI guards anyway). Empty state
+      surfaces a friendly "No favorites yet" panel + "Show
+      all shops" escape-hatch CTA. State is local-only — resets
+      to All on each navigation; persistence deferred.
+      `SearchScreen` is product-search-only (`{menuItem, shop}`
+      rows) so the pill ships on `ShopListScreen` only.
+
+- [x] **Analytics** — `customer_pickup_countdown_viewed`
+      (fires once per `(orderId, readyByEstimate)` tuple when
+      the ETA is in the future; deliberately NOT keyed on
+      `nowMs` to avoid second-by-second spam) and
+      `customer_favorites_filter_toggled` (fires on each pill
+      tap with `enabled: boolean`). Both auto-mirror to
+      `featureUsageLog/` via PR 38.1 routing.
+
+- [x] **Tests** — `tests/utils/formatRelativeTime.test.ts`
+      covers 22 min / 1 min singular / <1 min / 1h5m / exact
+      hours / 1 min past / 15 min past / 1h5m past / custom
+      label override (future + past). **9 passing.**
+      Deliberate-break (swap "minutes" → "hours" in the
+      sub-hour future branch) caused 3 dependent tests to
+      fail with clear assertion deltas; reverted.
+
+- [x] **OTA-eligibility audit** — `git diff HEAD -- app.json
+      package.json package-lock.json` is empty. No new SDKs,
+      no plugin changes, no permission requests, no native
+      modules. Ships via `eas update` only.
+
+- [ ] **Smoke tests post-OTA** — verify countdown ticks live
+      every minute, two-line layout renders cleanly on phone,
+      countdown handles ETA-in-the-past gracefully (any moment
+      now → X minutes ago), pickup row hidden when no ETA,
+      filter pill toggles + filters + empty state behave,
+      `featureUsageLog/` shows new event docs in Firestore
+      Console. `[Phase 36.1-smoke]`
+
+- [ ] **DEFERRED — Cold-start fix for shop-side
+      `updateOrderStatus` (~4s first tap)** — diagnosed as
+      Cloud Functions Gen 2 cold start (first tap ~4s after
+      ~15min idle, ~1s subsequently). Single-line fix:
+      `minInstances: 1` on the `updateOrderStatus` `onCall`
+      options, ~₹400/mo per warm instance. Sudhir chose the
+      pilot-cost-conservative path (accept the 2–3× daily
+      cold-start hit during pilot, revisit if it surfaces as
+      real friction). Not blocking pilot. `[Post-launch]`
+
+- [ ] **Persisted "Favorites only" filter state** — v1 resets
+      on screen mount. If pilot shows customers re-toggling to
+      favorites every session, persist via AsyncStorage.
+      `[Post-launch]`
+
+- [ ] **Customer-side Hindi i18n** for the countdown formatter
+      and other customer-facing strings. PR 34 shipped voice +
+      Hindi onboarding for shop registration; the customer-side
+      i18n is a separate workstream. `[Post-launch]`
 ## 📈 Post-launch scaling triggers (revisit each milestone)
 
 - [ ] At 100 DAU: review Firebase costs weekly for first month
