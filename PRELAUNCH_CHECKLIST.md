@@ -7287,6 +7287,79 @@ immediately. The checklist is the only thing that survives memory.
 - [ ] **Future: localize placeholder text (Hindi / regional)**
       — out of scope for v1; emoji + English is enough signal
       for the pilot. `[Post-launch]`
+
+## PR 32.2 — Placeholder URL PNG fix (RN can't render SVG) `[Phase 32.2]`
+
+- [x] **Same-day hotfix to PR 32.1.** The placehold.co URLs
+      shipped in PR 32.1 had no explicit format suffix;
+      placehold.co serves SVG by default, and React Native's
+      `<Image>` component cannot render SVG (only PNG / JPG /
+      GIF / WebP). Result on device: every category placeholder
+      rendered as an empty box — silent failure, no error
+      logged, no Sentry breadcrumb. Strictly worse than the
+      pre-PR-32.1 generic placeholder, which at least rendered
+      *something*.
+
+- [x] **Fix** — added `.png` at the **end of the path** (right
+      before `?text=`) in all **11 URLs** (10 category entries
+      in `CATEGORY_PLACEHOLDER_URLS` + 1 generic fallback
+      inside `placeholderImageForCategory`). Final pattern:
+      `https://placehold.co/400x400/<bg>/<fg>.png?text=…`.
+      **Note on the false-start:** PR 32.2's first iteration
+      put `.png` after the size segment
+      (`/400x400.png/<bg>/<fg>?text=…`) per the prompt's
+      suggested form. On-device smoke showed placeholders
+      STILL empty — placehold.co serves SVG for that path
+      shape too. Corrected by moving `.png` to the end of the
+      path. JSDoc header on the map and Rule 7 in
+      `.windsurf/code-discipline.md` both call out the
+      position requirement explicitly so the same false-start
+      doesn't recur.
+
+- [x] **Discipline rule logged** — `.windsurf/code-discipline.md`
+      now has **Rule 7: Image URLs for React Native must
+      specify a raster format**, with the placehold.co
+      example, the icon-CDN warning, and a note that the
+      failure mode is silent. PR 32.1 named as the first
+      instance so the rationale survives a future audit.
+
+- [x] **Tests** — `tests/functions/categoryPlaceholders.test.ts`
+      (6 tests from PR 32.1) **all pass unchanged**. The
+      `new URL(...)` syntactic check and the
+      `^https:\/\/placehold\.co\/` regex both accept the
+      `.png` form. No new tests added per prompt guidance —
+      the parity test already pins the map.
+
+- [x] **OTA-eligibility audit** — `git diff HEAD -- app.json
+      package.json package-lock.json functions/package.json
+      functions/package-lock.json` is empty. Server-only
+      deploy of the two callables (`addCustomMenuItem`,
+      `addExtractedMenuItems`); client OTA optional (carries
+      docs only).
+
+- [ ] **Smoke tests post-deploy** — (1) delete the broken
+      test-shop items via Firestore console, (2) re-scan via
+      "📸 Scan rate-list (AI)" or add via "+ Add custom item",
+      (3) verify the new items render the category-themed
+      placeholder image (not an empty box) on both shop-owner
+      and customer views, (4) verify a real image upload via
+      the existing PR 6.1 signed-PUT picker still overrides
+      the placeholder. `[Phase 32.2-smoke]`
+
+- [ ] **DEFERRED — Firestore backfill** of existing items'
+      `imageUrl` to the `.png` form. Pilot scale (~10–30 test
+      items per shop) makes manual delete-and-re-scan faster
+      than coding the backfill. Script sketch in PR 32.2's
+      prompt if/when scale forces it: walk
+      `collectionGroup('menu').where('imageUrl', '>=', 'https://placehold.co/400x400/')`,
+      string-replace `400x400/` → `400x400.png/`, write back.
+      `[Post-launch]`
+
+- [ ] **DEFERRED — Switch placeholder provider** to a
+      pre-generated set of PNGs hosted on Firebase Storage.
+      More work, no clear benefit at pilot scale. Revisit only
+      if placehold.co rate-limits or has reliability issues.
+      `[Post-launch]`
 ## 📈 Post-launch scaling triggers (revisit each milestone)
 
 - [ ] At 100 DAU: review Firebase costs weekly for first month

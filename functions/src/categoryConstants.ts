@@ -35,14 +35,31 @@ export const VALID_CATEGORIES = new Set<string>([
 ]);
 
 /**
- * PR 32.1 — category-themed placeholder image URLs. Used by
- * `addExtractedMenuItems` (PR 32 scan path) and `addCustomMenuItem`
- * (PR 6 manual-add path) when the shop owner adds an item without
- * supplying an `imageUrl`. Single source of truth — both callables
- * import from here. URLs are placehold.co with category emoji + a
- * theme color so a freshly-scanned 60-SKU menu looks intentionally
- * categorized instead of uniformly placeholder-gray (Trust
- * Principle 2).
+ * PR 32.1 + PR 32.2 — category-themed placeholder image URLs.
+ * Used by `addExtractedMenuItems` (PR 32 scan path) and
+ * `addCustomMenuItem` (PR 6 manual-add path) when the shop owner
+ * adds an item without supplying an `imageUrl`. Single source of
+ * truth — both callables import from here. URLs are placehold.co
+ * with category emoji + a theme color so a freshly-scanned 60-SKU
+ * menu looks intentionally categorized instead of uniformly
+ * placeholder-gray (Trust Principle 2).
+ *
+ * **The `.png` segment in each URL is LOAD-BEARING.** placehold.co
+ * serves SVG by default, and React Native's `<Image>` component
+ * cannot render SVG natively (only PNG / JPG / GIF / WebP). Without
+ * `.png` every placeholder renders as an empty box in the mobile
+ * app — silent failure, no error, no Sentry breadcrumb. Discovered
+ * during PR 32.1 on-device smoke testing; fixed in PR 32.2.
+ *
+ * **Position of `.png` matters.** placehold.co's convention is
+ * `.png` at the END of the path (right before `?text=`), NOT
+ * after the size segment. PR 32.2's first attempt put it after
+ * size (`/400x400.png/<bg>/<fg>?text=...`) and on-device smoke
+ * showed placeholders still empty — placehold.co still served
+ * SVG for that path shape. The corrected form below pins `.png`
+ * to the end of the path. **Do not strip `.png` from these URLs**
+ * and **do not move it earlier in the path.** See Rule 7 in
+ * `.windsurf/code-discipline.md`.
  *
  * Format note: placehold.co accepts `?text=...` with URL-encoded
  * characters; emoji works (UTF-8 percent-encoded). Color tuples
@@ -62,34 +79,34 @@ export const VALID_CATEGORIES = new Set<string>([
 export const CATEGORY_PLACEHOLDER_URLS: Record<string, string> = {
   // wheat/grain — cream bg, brown text
   atta_rice_dal:
-    'https://placehold.co/400x400/F5E6D3/8B4513?text=%F0%9F%8C%BE+Atta+%26+Rice',
+    'https://placehold.co/400x400/F5E6D3/8B4513.png?text=%F0%9F%8C%BE+Atta+%26+Rice',
   // oil bottle — yellow bg, brown text
   oil_ghee:
-    'https://placehold.co/400x400/FFF3B0/8B4513?text=%F0%9F%AB%92+Oil+%26+Ghee',
+    'https://placehold.co/400x400/FFF3B0/8B4513.png?text=%F0%9F%AB%92+Oil+%26+Ghee',
   // dairy carton — pale blue bg, dark blue text
   dairy_eggs:
-    'https://placehold.co/400x400/E3F2FD/1A237E?text=%F0%9F%A5%9B+Dairy+%26+Eggs',
+    'https://placehold.co/400x400/E3F2FD/1A237E.png?text=%F0%9F%A5%9B+Dairy+%26+Eggs',
   // bread — beige bg, brown text
   bakery:
-    'https://placehold.co/400x400/F5DEB3/8B4513?text=%F0%9F%8D%9E+Bakery',
+    'https://placehold.co/400x400/F5DEB3/8B4513.png?text=%F0%9F%8D%9E+Bakery',
   // spices — light red bg, dark red text
   masala_spices:
-    'https://placehold.co/400x400/FFCCBC/BF360C?text=%F0%9F%8C%B6+Masala',
+    'https://placehold.co/400x400/FFCCBC/BF360C.png?text=%F0%9F%8C%B6+Masala',
   // snacks — light brown bg, dark brown text
   snacks_biscuits:
-    'https://placehold.co/400x400/D7CCC8/4E342E?text=%F0%9F%8D%AA+Snacks',
+    'https://placehold.co/400x400/D7CCC8/4E342E.png?text=%F0%9F%8D%AA+Snacks',
   // beverages — peach bg, dark red text
   beverages:
-    'https://placehold.co/400x400/FFE0B2/E64A19?text=%F0%9F%A5%A4+Beverages',
+    'https://placehold.co/400x400/FFE0B2/E64A19.png?text=%F0%9F%A5%A4+Beverages',
   // personal care — pale lavender bg, deep purple text
   personal_care:
-    'https://placehold.co/400x400/E1BEE7/4A148C?text=%F0%9F%A7%B4+Personal+Care',
+    'https://placehold.co/400x400/E1BEE7/4A148C.png?text=%F0%9F%A7%B4+Personal+Care',
   // household — pale green bg, dark green text
   household:
-    'https://placehold.co/400x400/C8E6C9/1B5E20?text=%F0%9F%A7%BD+Household',
+    'https://placehold.co/400x400/C8E6C9/1B5E20.png?text=%F0%9F%A7%BD+Household',
   // fresh produce — bright green bg, dark green text
   fruits_vegetables:
-    'https://placehold.co/400x400/AED581/1B5E20?text=%F0%9F%A5%95+Fruits+%26+Veg',
+    'https://placehold.co/400x400/AED581/1B5E20.png?text=%F0%9F%A5%95+Fruits+%26+Veg',
 };
 
 /**
@@ -103,7 +120,10 @@ export const CATEGORY_PLACEHOLDER_URLS: Record<string, string> = {
 export function placeholderImageForCategory(categoryId: string): string {
   return (
     CATEGORY_PLACEHOLDER_URLS[categoryId] ??
-    // Legacy fallback identical to the pre-PR-32.1 generic.
-    'https://placehold.co/400x400/e2e8f0/64748b?text=Custom+Item'
+    // PR 32.2 — generic fallback also needs `.png` at the END of
+    // the path for the same RN-can't-render-SVG reason documented
+    // on the map above. Pre-PR-32.2 form (no `.png`) and the
+    // intermediate `/400x400.png/...` form both still served SVG.
+    'https://placehold.co/400x400/e2e8f0/64748b.png?text=Custom+Item'
   );
 }

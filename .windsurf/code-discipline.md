@@ -104,13 +104,43 @@ It does NOT cover the agent's internal multi-edit pipeline, which
 runs outside of save events. Rules 1–4 are still the primary
 defense. The IDE settings are the safety net for the safety net.
 
+## Rule 7 — Image URLs for React Native must specify a raster format
+
+React Native's `<Image>` component renders PNG, JPG, GIF, and WebP.
+**It does NOT render SVG.** Any external URL that might serve SVG
+(placehold.co, some CDNs that do content negotiation, SVG icon
+sets) must specify a raster format explicitly:
+
+- `placehold.co`: add `.png` at the **END of the path** (right
+  before `?text=`), e.g.
+  `https://placehold.co/400x400/F5E6D3/8B4513.png?text=...`.
+  **Position matters** — placing `.png` after the size segment
+  (`/400x400.png/<bg>/<fg>?text=...`) still serves SVG. Verified
+  on-device in PR 32.2.
+- Other placeholder services: check their docs for the format
+  query param or path segment
+- Icon CDNs: prefer `.png` exports over the SVG default
+
+When writing or reviewing any PR that adds external image URLs,
+verify the format is explicit. **The failure mode is silent** —
+RN's `<Image>` renders nothing, logs nothing, captures nothing
+in Sentry. The bug only surfaces on visual inspection of the
+device.
+
+**First instance:** PR 32.1 shipped category placeholders with
+SVG-flavor placehold.co URLs; every placeholder rendered as an
+empty box on device. PR 32.2 fixed it by adding `.png` to each
+URL. This rule exists so future placeholder/icon work doesn't
+recur the same class of bug.
+
 ## Quick reference
 
 | Layer | What it does | When it fires |
 |---|---|---|
 | Rules 1–4 | Discipline on the agent | During edits |
+| Rule 7 | RN image URLs specify raster format | During edits / review |
 | `.vscode/settings.json` | Disables organize-imports on save | On IDE save |
 | `npm run audit` | Grep for stripped DO-NOT-REMOVE imports | Before deploy |
 | `tsc --noEmit` | Compile check | Before deploy |
 
-All four must pass before a PR ships.
+All must pass before a PR ships.
