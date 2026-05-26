@@ -7360,6 +7360,99 @@ immediately. The checklist is the only thing that survives memory.
       More work, no clear benefit at pilot scale. Revisit only
       if placehold.co rate-limits or has reliability issues.
       `[Post-launch]`
+
+## PR 36.2 — Reset pilot data script `[Phase 36.2]`
+
+- [x] **Reset pilot data script shipped.** New
+      `scripts/reset-pilot-data.ts` is a destructive cleanup
+      that **keeps users** (Firestore profiles + Auth
+      accounts + the admin user's claim) and wipes everything
+      else: 11 Firestore top-level collections (`aiAuditLog`,
+      `aiQuotas`, `auditLog`, `deliveryRequests`,
+      `featureUsageLog`, `orders`, `pendingShopRequests`,
+      `products`, `razorpayWebhookEvents`, `refunds`, `shops`
+      including nested `menu/` subcollections), plus Storage
+      prefixes `shop-kyc/` and `menu/`. Non-admin users with
+      `isShopOwner` / `isDelivery` / `shopId` state get
+      Firestore role fields scrubbed AND Auth custom claims
+      rewritten (admin claim preserved when present) so the
+      app routes them to the customer home on next sign-in
+      instead of a deleted shop.
+
+- [x] **Companion to `scripts/reset-test-data.ts`.** That one
+      nukes everything including users + auth ("nuke from
+      orbit"); this one is "clean app, same testers" mode.
+      Both share the same `ALLOWED_PROJECTS` (grocery-mvp-dev
+      only) + `assertProjectAllowed` + `protectAdminFromUserList`
+      helpers via direct re-export from
+      `scripts/reset-test-data.helpers.ts`. Single source of
+      truth for the allowlist; one diff if it ever needs
+      expansion.
+
+- [x] **Pure-helper split** — `scripts/reset-pilot-data.helpers.ts`
+      owns the testable logic (flag parser, collection list,
+      storage path list, `planUserRoleCleanup`,
+      `buildClaimsAfterRoleRevoke`). The main script is
+      firebase-admin glue.
+
+- [x] **Safety guards** — dry-run by default, `--execute`
+      required to delete, typed-DELETE confirmation unless
+      `--yes`, project allowlist, admin-UID protection
+      (resolved from `--admin-uid=<uid>` flag → `ADMIN_PROTECT_UID`
+      env → Firestore `users where isAdmin==true` lookup;
+      aborts if all three fail or if multiple admins match).
+      `--skip-storage` flag short-circuits the bucket
+      cleanup for Firestore-only resets.
+
+- [x] **Audit log per run** at
+      `scripts/.cleanup-logs/{timestamp}-pilot.json` (already
+      gitignored via `scripts/.cleanup-logs/*`). Records git
+      sha, operator email, project ID, plan vs actual counts,
+      affected UIDs, any per-batch failures. Both dry-run
+      and execute write a log.
+
+- [x] **Tests** — `tests/scripts/reset-pilot-data.test.ts`
+      with **28 cases**: parseFlags coverage, COLLECTIONS_TO_WIPE
+      exclusion pins (users, aiFeatures), STORAGE_PATHS_TO_WIPE
+      shape, planUserRoleCleanup admin exclusion + field
+      tuple, buildClaimsAfterRoleRevoke admin preservation,
+      allowlist re-export parity. Two deliberate-break checks
+      run + reverted: (1) appending `'users'` to
+      `COLLECTIONS_TO_WIPE` failed the exclusion pin; (2)
+      simulating an empty admin UID failed the
+      `planUserRoleCleanup` adminUid-required test.
+      **64 / 64 passing in `tests/scripts/`** (28 new + 36
+      existing reset-test-data + others).
+
+- [x] **`package.json` script alias** — `reset:pilot-data` in
+      the `scripts` block, mirroring the `reset:test-data`
+      entry. No new dependencies.
+
+- [x] **OTA-eligibility audit** — `git diff HEAD -- app.json
+      package-lock.json functions/package.json
+      functions/package-lock.json` is empty. Only
+      `package.json` changed (one new script entry). This is
+      a **local tool — no deploy involved**, no OTA push
+      required.
+
+- [ ] **Local smoke test** — sequence per the PR 36.2 prompt:
+      (1) `npm run reset:pilot-data` against an empty target →
+      zero-count plan + "DRY RUN" exit; (2) generate test
+      data (register a shop, place an order); (3) re-run
+      dry-run → non-zero counts; (4)
+      `npm run reset:pilot-data -- --execute` → type DELETE →
+      verify in Firestore Console that `users` + `aiFeatures`
+      survived and everything else is gone; (5) verify
+      `shop-kyc/` + `menu/` Storage folders are gone; (6)
+      sign in as a previously shop-owner test user and
+      confirm they land on the customer home (no broken
+      shop-owner state); (7) check
+      `scripts/.cleanup-logs/` for the JSON log.
+      `[Phase 36.2-smoke]`
+
+- [ ] **Future: extend with `--only <names>`** for selective
+      collection wipes (e.g., "wipe only orders + analytics
+      between rounds"). Out of scope for v1. `[Post-launch]`
 ## 📈 Post-launch scaling triggers (revisit each milestone)
 
 - [ ] At 100 DAU: review Firebase costs weekly for first month

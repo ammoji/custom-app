@@ -16,6 +16,7 @@
     "revoke-extra-roles": "tsx scripts/revoke-extra-roles.ts",
     "backfill-menus": "tsx scripts/backfill-shop-menus.ts",
     "reset:test-data": "tsx scripts/reset-test-data.ts",
+    "reset:pilot-data": "tsx scripts/reset-pilot-data.ts",
     "update-order": "tsx scripts/update-order.ts",
     "import-images": "tsx scripts/import-from-openfoodfacts.ts",
     "generate-branding": "tsx scripts/generate-branding.ts",
