@@ -17,7 +17,20 @@ export default function ShopCard({ shop, onPress }: Props) {
       onPress={onPress}
       style={({ pressed }) => [styles.card, pressed && { opacity: 0.9 }]}
     >
-      <Image source={{ uri: shop.imageUrl }} style={styles.image} />
+      {/* PR 41 hotfix — guard against empty/null imageUrl. Empty-string URI
+          throws an unhandled exception on iOS in this Expo SDK, which
+          bubbled up through ShopListScreen's render and tripped the
+          ErrorBoundary ("Something went wrong"). Shops registered via
+          PR 31 self-registration land with imageUrl="" until PR 42 wires
+          kycDocs.storefront → shop.imageUrl. Until then, render a neutral
+          placeholder block instead of <Image> for any falsy imageUrl. */}
+      {shop.imageUrl ? (
+        <Image source={{ uri: shop.imageUrl }} style={styles.image} />
+      ) : (
+        <View style={[styles.image, styles.imagePlaceholder]}>
+          <Text style={styles.imagePlaceholderText}>🏪</Text>
+        </View>
+      )}
       <View style={styles.body}>
         <View style={styles.titleRow}>
           <Text style={styles.name} numberOfLines={1}>{shop.name}</Text>
@@ -58,6 +71,8 @@ const styles = StyleSheet.create({
     ...shadow.card,
   },
   image: { width: '100%', height: 140, backgroundColor: colors.surface },
+  imagePlaceholder: { alignItems: 'center', justifyContent: 'center' },
+  imagePlaceholderText: { fontSize: 56, opacity: 0.5 },
   body: { padding: spacing.md },
   titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm },
   name: { ...typography.h3, flex: 1 },

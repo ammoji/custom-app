@@ -16,6 +16,17 @@ import type { Shop } from '../types';
 import { formatRupees } from '../utils/format';
 import { useShopListData } from './ShopListScreen.useShopListData';
 
+// PR 41 hotfix — stable empty-favorites reference. Without this,
+// `useProfileStore(s => s.profile?.favorites ?? {})` returns a new
+// `{}` on every render when favorites is undefined (typical for
+// brand-new accounts post-reset). Zustand's Object.is comparison
+// sees the new ref, re-renders the component, returns yet another
+// new `{}`, infinite loop. Symptom: "Maximum update depth exceeded"
+// → ErrorBoundary catches → "Something went wrong" screen. Hoisting
+// the empty default outside the component gives the selector a
+// stable reference to fall back to.
+const EMPTY_FAVORITES: Record<string, string[]> = {};
+
 export default function ShopListScreen() {
   const nav = useNavigation<any>();
   const [query, setQuery] = useState('');
@@ -29,7 +40,7 @@ export default function ShopListScreen() {
   const itemCount = useCartStore(s => s.itemCount());
   const total = useCartStore(s => s.total());
   const location = useLocationStore(s => s.location);
-  const favorites = useProfileStore(s => s.profile?.favorites ?? {});
+  const favorites = useProfileStore(s => s.profile?.favorites ?? EMPTY_FAVORITES);
 
   // State machine extracted to ./ShopListScreen.useShopListData so
   // the loader-stuck-forever bug class can be unit-tested without
