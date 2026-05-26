@@ -7216,6 +7216,77 @@ immediately. The checklist is the only thing that survives memory.
       and other customer-facing strings. PR 34 shipped voice +
       Hindi onboarding for shop registration; the customer-side
       i18n is a separate workstream. `[Post-launch]`
+
+## PR 32.1 — Category-aware menu placeholders `[Phase 32.1]`
+
+- [x] **Per-category placeholder map + helper** —
+      `functions/src/categoryConstants.ts` now exports
+      `CATEGORY_PLACEHOLDER_URLS` (10 placehold.co URLs, one
+      per `CategoryId`, with category emoji + theme color) and
+      `placeholderImageForCategory(categoryId)` (pure lookup
+      with a generic fallback for unknown ids — defence-in-
+      depth against future schema drift). Single source of
+      truth; both server callables import from here.
+
+- [x] **`addCustomMenuItem` (PR 6 manual-add path)** at
+      `functions/src/index.ts:~4714` now writes
+      `imageValidation.url ?? placeholderImageForCategory(category)`
+      instead of the hardcoded generic URL. `category` is
+      already validated against `VALID_CATEGORIES` earlier in
+      the same callable so the lookup always hits.
+
+- [x] **`addExtractedMenuItems` (PR 32 scan-rate-list path)**
+      at `functions/src/index.ts:~5827` now writes
+      `placeholderImageForCategory(item.category)` per row in
+      the batch loop. Same validated-category invariant.
+
+- [x] **`updateMenuItemFields` (partial update path)** at
+      `functions/src/index.ts:~4519` left **unchanged** — the
+      generic placeholder there only fires when imageUrl is
+      being explicitly cleared in a partial update where the
+      payload may not carry `category`, and the prompt scoped
+      PR 32.1 to the two add-paths only. Documented here so a
+      future audit doesn't flag the lingering literal as a
+      forgotten swap.
+
+- [x] **Tests** — `tests/functions/categoryPlaceholders.test.ts`
+      pins the parity (every `VALID_CATEGORIES` id has an
+      entry, no extras), URL syntactic validity, lookup
+      correctness, and the unknown-id / empty-string fallback.
+      **6 passing.** Deliberate-break (delete
+      `fruits_vegetables` from the map) caused 2 dependent
+      tests to fail with `expect(undefined).toBeDefined()`;
+      reverted.
+
+- [x] **Schema-additive only** — only items added AFTER deploy
+      use the new placeholders. Existing `MenuItem.imageUrl`
+      values are unchanged; no migration of historical rows.
+
+- [x] **OTA-eligibility audit** — `git diff HEAD -- app.json
+      package.json package-lock.json functions/package.json
+      functions/package-lock.json` is empty. Server-only deploy
+      (two callables) + optional client OTA for docs.
+
+- [ ] **Smoke tests post-deploy** — (1) scan a real Indian
+      rate-list with mixed categories via "📸 Scan rate-list
+      (AI)", commit, verify the resulting menu shows visually
+      differentiated category-themed placeholders rather than
+      a wall of grey; (2) manual "+ Add custom item" with no
+      uploaded image, two different categories, verify each
+      row's placeholder matches its category theme; (3)
+      open a pre-PR-32.1 shop's menu and confirm existing
+      images are unchanged. `[Phase 32.1-smoke]`
+
+- [ ] **Future: yield to real product images via PR 33
+      (master product catalog) / PR 32.2 (Open Food Facts
+      lookup)** — when those land, matched SKUs swap the
+      category placeholder for a real product image. Per-
+      category placeholders are the bridge for the pilot,
+      not the dead-end. `[Post-launch]`
+
+- [ ] **Future: localize placeholder text (Hindi / regional)**
+      — out of scope for v1; emoji + English is enough signal
+      for the pilot. `[Post-launch]`
 ## 📈 Post-launch scaling triggers (revisit each milestone)
 
 - [ ] At 100 DAU: review Firebase costs weekly for first month

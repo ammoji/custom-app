@@ -53,7 +53,10 @@ import { validateBulkMenuRequest } from './bulkMenuHelpers';
 // PR 32 — DO NOT REMOVE. Used by `addCustomMenuItem` (since PR 6),
 // `addExtractedMenuItems`, and `extractMenuFromImage` to validate
 // the `category` field against the canonical 10-value whitelist.
-import { VALID_CATEGORIES } from './categoryConstants';
+import {
+  VALID_CATEGORIES,
+  placeholderImageForCategory,
+} from './categoryConstants';
 // PR 32 — DO NOT REMOVE. Used by `extractMenuFromImage` callable.
 // `ANTHROPIC_API_KEY` must also be passed in the callable's
 // `secrets:` option for Firebase to mount the Secret Manager value
@@ -4701,17 +4704,20 @@ export const addCustomMenuItem = onCall<{
     const now = Date.now();
     const rand = Math.random().toString(36).slice(2, 8);
     const menuItemId = `custom_${now}_${rand}`;
-    // 1×1 transparent placeholder if no image — keeps card layout
-    // stable, customer-side will fall back to a category icon later.
-    const fallbackImage =
-      'https://placehold.co/400x400/e2e8f0/64748b?text=Custom+Item';
-
+    // PR 32.1 — category-themed placeholder if no image was
+    // uploaded. Keeps card layout stable AND visually differentiates
+    // categories so a 60-SKU menu doesn't look uniformly grey.
+    // `category` is already validated against `VALID_CATEGORIES`
+    // above, so the lookup always hits the per-category map; the
+    // helper's generic fallback is just defence-in-depth for
+    // future schema drift.
     await db.doc(`shops/${shopId}/menu/${menuItemId}`).set({
       id: menuItemId,
       shopId,
       productId: null,
       name: trimmedName,
-      imageUrl: imageValidation.url ?? fallbackImage,
+      imageUrl:
+        imageValidation.url ?? placeholderImageForCategory(category),
       packLabel: packLabel.trim(),
       category,
       price,
@@ -5765,8 +5771,11 @@ export const addExtractedMenuItems = onCall<{
     const added: string[] = [];
     const skipped: Array<{ index: number; reason: string }> = [];
     const now = Date.now();
-    const fallbackImage =
-      'https://placehold.co/400x400/e2e8f0/64748b?text=Custom+Item';
+    // PR 32.1 — per-category placeholder selection happens inside
+    // the loop below (each item carries its own validated category).
+    // The single fallbackImage constant from PR 32 is gone; the
+    // shared `placeholderImageForCategory` helper is the source of
+    // truth for both this callable and `addCustomMenuItem`.
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
@@ -5815,7 +5824,7 @@ export const addExtractedMenuItems = onCall<{
         shopId,
         productId: null,
         name: trimmedName,
-        imageUrl: fallbackImage,
+        imageUrl: placeholderImageForCategory(item.category),
         packLabel: item.packLabel.trim(),
         category: item.category,
         price: item.price,
