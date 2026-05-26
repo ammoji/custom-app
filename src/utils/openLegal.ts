@@ -4,7 +4,7 @@
  * Native (iOS / Android): uses `expo-web-browser`'s
  * `openBrowserAsync` which renders the system in-app browser tab
  * (SFSafariViewController / Chrome Custom Tabs). The user returns
- * to Kirana Mart on close — no app re-launch, no auth state loss.
+ * to HamaraSetu on close — no app re-launch, no auth state loss.
  *
  * Web: `expo-web-browser` on web pops up a useless about:blank tab.
  * We use `Linking.openURL` instead, which becomes `window.open()`

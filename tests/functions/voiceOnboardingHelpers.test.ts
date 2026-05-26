@@ -35,7 +35,7 @@ describe('PR 34 — voiceOnboardingHelpers', () => {
 
   test('parses a fully populated valid Claude response', () => {
     const text = JSON.stringify({
-      name: 'Sharma Kirana Mart',
+      name: 'Sharma Kirana Store',
       address: '20 MG Road, Kanpur',
       phone: '9876543210',
       openTime: '07:00',
@@ -46,7 +46,7 @@ describe('PR 34 — voiceOnboardingHelpers', () => {
     const r = parseVoiceOnboardingResponse(text);
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect(r.fields.name).toBe('Sharma Kirana Mart');
+      expect(r.fields.name).toBe('Sharma Kirana Store');
       expect(r.fields.address).toBe('20 MG Road, Kanpur');
       expect(r.fields.phone).toBe('9876543210');
       expect(r.fields.openTime).toBe('07:00');

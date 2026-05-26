@@ -7453,6 +7453,116 @@ immediately. The checklist is the only thing that survives memory.
 - [ ] **Future: extend with `--only <names>`** for selective
       collection wipes (e.g., "wipe only orders + analytics
       between rounds"). Out of scope for v1. `[Post-launch]`
+
+## PR 39 — Rebrand to HamaraSetu + Contact Support `[Phase 39]`
+
+- [x] **Single source of truth — `src/constants/branding.ts`.**
+      Exports `APP_NAME` (`'HamaraSetu'`), `TAGLINE`
+      (`'Shop Smart, Shop Local'`), `SUPPORT_EMAIL`
+      (`'sudhir.davim@gmail.com'`), `OPERATING_ENTITY`
+      (`'Sara Stack Labs'`), `OPERATING_CITY` / `OPERATING_DISTRICT`
+      / `OPERATING_STATE` / `LEGAL_JURISDICTION`. Every in-app
+      brand string now imports from here so a future rename is
+      one file, not a grep.
+
+- [x] **`app.json` rebrand.** Top-level `name` + `expo.name`
+      flipped to `HamaraSetu`; the 6 user-facing permission
+      prompt strings (iOS `NSCameraUsageDescription`,
+      `NSPhotoLibraryUsageDescription`,
+      `NSMicrophoneUsageDescription`,
+      `NSLocationWhenInUseUsageDescription`; Android
+      `expo-image-picker.cameraPermission` +
+      `photosPermission`; `expo-location.locationWhenInUsePermission`)
+      now read **"HamaraSetu needs …"**. **Native rebuild
+      required** — permission strings ship in the native
+      binaries, not OTA.
+
+- [x] **In-app screen strings.** `LoginScreen` got a brand
+      block above the Sign-in header (`APP_NAME` + `TAGLINE`).
+      `HomeScreen` opt-in tile + accessibility label use
+      `APP_NAME`. `BecomeDeliveryPartnerScreen` heading uses
+      `APP_NAME`. `openLegal.ts` comment updated. `ProfileScreen`
+      now has a **Help & Support** section above Legal with a
+      "Contact support" row that calls `openSupportEmail()`.
+
+- [x] **`src/utils/openSupport.ts`.** New helper builds a
+      `mailto:sudhir.davim@gmail.com?subject=HamaraSetu support&body=…`
+      URL with a `Platform: <ios|android|web>` stamp and
+      `App: HamaraSetu` line, gates on `Linking.canOpenURL`,
+      and silently no-ops on failure (no crash if the device
+      has no mail client). Mirrors the `openLegal.ts` pattern.
+
+- [x] **Voice onboarding prompt example.** `voiceOnboardingHelpers.ts`
+      example shop name updated from "Kirana Mart" to
+      "HamaraSetu" so the LLM doesn't accidentally name new
+      shops after the placeholder brand. Test in
+      `tests/functions/voiceOnboardingHelpers.test.ts` updated
+      in lock-step.
+
+- [x] **Legal docs + hosted HTML titles.** `docs/privacy-policy.md`
+      and `docs/terms-of-service.md` got global brand +
+      operating-entity + jurisdiction replacements
+      (`Faridabad, Haryana`). `scripts/build-legal-html.ts`
+      page titles flipped to HamaraSetu; `npm run build-legal`
+      regenerates `dist/privacy.html` + `dist/terms.html` for
+      hosting.
+
+- [x] **Operator tooling.** `scripts/reset-test-data.ts`
+      console banner updated; `testing/README.md` title
+      updated to "HamaraSetu — Testing Workbooks". No
+      behavioural change.
+
+- [x] **Tests** — `tests/constants/branding.test.ts` pins
+      every constant to its expected literal (catches an
+      accidental edit before it ships); `tests/utils/openSupport.test.ts`
+      mocks `react-native`'s `Linking` and verifies the
+      mailto recipient, subject, body markers, and silent-fail
+      behaviour when `canOpenURL` returns false / throws.
+      `tests/jest.unit.config.js` `testMatch` extended with
+      `tests/constants/**/*.test.ts` so the new dir is picked
+      up. **Final suite: 722 / 722 pass (72 suites);** root
+      tsc 0 errors; `npm run audit` + `audit:indexes` green.
+
+- [x] **OTA-eligibility audit** — **NOT OTA-eligible.**
+      `git diff HEAD -- app.json` is non-empty (display name
+      + permission strings). `package.json` /
+      `package-lock.json` / `functions/*` lockfiles unchanged.
+      Ship via `eas build --profile production` → store
+      submission, NOT `eas update`.
+
+- [ ] **Smoke tests post native build** — (1) install the
+      new build, confirm springboard shows "HamaraSetu", (2)
+      tap Login → brand block visible above sign-in, (3)
+      trigger camera / photos / mic / location prompts and
+      verify each iOS/Android system dialog reads "HamaraSetu
+      needs …", (4) `Profile → Contact support` opens the
+      mail app pre-filled to `sudhir.davim@gmail.com` with
+      `HamaraSetu support` subject + `App: HamaraSetu` body
+      line, (5) `Profile → Privacy policy` + `Terms of service`
+      open the HamaraSetu-titled hosted pages. `[Phase 39-smoke]`
+
+- [ ] **Deploy hosted legal HTML** — `npm run build-legal`
+      then `firebase deploy --only hosting` (or copy the
+      regenerated `dist/privacy.html` + `dist/terms.html` to
+      whatever hosts `grocery-mvp-dev.web.app`) so the in-app
+      links reflect the new brand. `[Phase 39-deploy]`
+
+- [ ] **DEFERRED — App Store / Play Store listing copy +
+      screenshots** referencing HamaraSetu. Store metadata
+      lives outside the repo; queue when prepping the first
+      production submission. `[Pre-launch store-submit]`
+
+- [ ] **DEFERRED — Hindi tagline (`हमारा सेतु`) + bilingual
+      brand block** on Login. Single-line constant addition
+      once the Hindi rendering is QA'd on both platforms.
+      `[Post-launch]`
+
+- [ ] **DEFERRED — In-app Contact-support form** (vs raw
+      mailto). A Cloud Function-backed `supportTickets/`
+      collection would let us thread + tag conversations.
+      Worth it once support volume crosses ~5 tickets/week.
+      `[Post-launch]`
+
 ## 📈 Post-launch scaling triggers (revisit each milestone)
 
 - [ ] At 100 DAU: review Firebase costs weekly for first month

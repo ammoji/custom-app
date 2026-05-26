@@ -191,15 +191,184 @@ file (currently PR 23 is the most recent), `docs/pr-N-<slug>-windsurf-prompt.md`
 6. Ask Sudhir what he wants to work on. Don't assume — even if context
    suggests an obvious next step, confirm before doing anything destructive.
 
-## Current state — 2026-05-24 (PR 34 native build live + tested; PR 26 source-map status TBD)
+## Current state — 2026-05-26 evening (build 17 live on TestFlight; Android build 6 unblocked; 4 smoke-test bugs hotfixed)
 
-**Branch:** `main`, up to date with `origin/main`.
+**Pilot strategy locked to 1-shop start.** Sudhir's call: settle
+shop #1 to ~30-50 successful orders + 1 quiet week + 1 real
+cancellation + customer NPS-positive before onboarding shop #2.
+Pilot data once real money flows = immutable; `reset-pilot-data`
+script must be locked before live pilot (proposed PR 39.2 if
+needed). Email switch to `sarastacklabs@gmail.com` deferred
+indefinitely (zero pilot benefit vs. multi-week migration risk).
+Bundle IDs unchanged.
 
-**Last commit:** `PR 34: voice + Hindi onboarding assist (Google
-STT + Claude Haiku field parser)` (`27f22ac`, May 24). Previous:
-`PR 32`, `PR 31.1`, `PR 31`, `PR 26`, `PR 27`, `PR 25`.
+**Build 17 — iOS live on TestFlight as of May 26 evening.**
+PR 39 rebrand strings + Contact Support row + PR 39.1 logo
+artwork (blue-to-green gradient bag + HAMARASETU wordmark)
+shipped together. Splash bg flipped from `#0E7C3A` green to
+`#FFFFFF` white to match logo's own bg. `eas submit` ran;
+TestFlight has build 17 installable. Hosting deploy pushed
+regenerated `/privacy` + `/terms` with HamaraSetu branding +
+Faridabad jurisdiction.
+
+**Android build 6 — unblocked and successful.** Long-pending
+Android build failure root-caused: `app.json` android block was
+missing `googleServicesFile`, so `@react-native-firebase/app`
+prebuild always failed. Sudhir created Android app in Firebase
+Console with SHA-1 + SHA-256 fingerprints of the production
+keystore, added `googleServicesFile: "./google-services.json"`
+to `app.json`. Build (6) succeeded. Distribution path = Google
+Play Closed Testing once Play Console developer account
+($25 one-time) is approved (1-3 day window).
+
+**Two hotfixes shipped via OTA in this session** — Sudhir's
+smoke test surfaced bugs not caught by unit tests:
+
+1. **ShopListScreen Zustand infinite-loop fix.** Selector
+   `useProfileStore(s => s.profile?.favorites ?? {})` was
+   creating a new empty object reference on every render when
+   `profile.favorites` was undefined. Zustand's Object.is
+   comparison saw the new ref, triggered re-render, infinite
+   loop, "Maximum update depth exceeded" → ErrorBoundary →
+   "Something went wrong" screen. Only manifested for accounts
+   where favorites was undefined (every non-admin account
+   post-reset). Fix: hoist `EMPTY_FAVORITES` to module-level
+   constant for stable fallback reference. Shipped via
+   `eas update --branch production`.
+
+2. **ShopCard imageUrl empty-string guard.** Defense-in-depth.
+   `<Image source={{ uri: '' }} />` throws on iOS in Expo SDK 54.
+   Shop registered via PR 31 self-registration has
+   `imageUrl: ""` until PR 42 wires `kycDocs.storefront → shop
+   .imageUrl`. Added a placeholder block (🏪 emoji) for the
+   empty case so the same crash class can't recur via a
+   different path.
+
+Both fixes logged as new permanent code-discipline rules
+(`.windsurf/code-discipline.md` Rules 8 + 9).
+
+**Cloud Run IAM gotcha logged** in `.windsurf/deploy-discipline
+.md`. The `listpendingdeliveryrequests` Cloud Run service had
+silently lost its `allUsers` / `roles/run.invoker` binding,
+causing 401 "access token could not be verified" responses.
+Sibling functions retained their binding. Fixed via
+`gcloud run services add-iam-policy-binding`. New mandatory
+verification step required in all PR deploy plans that touch
+callables — without it, a missing binding survives multiple
+deploy cycles unnoticed (Firebase reports "successful
+update" even with broken IAM).
+
+**Smoke-test score:** 9 issues surfaced, 5 fully resolved
+tonight (1, 2, 3, 4, 8), 3 scoped for follow-up PRs (5
+storefront photo wiring → PR 42; 6 ETA hidden-until-accepted
+locked as Option A → PR 43; 7 shop dashboard badge → folded
+into PR 41), 1 deferred (9 performance investigation).
+
+**PR 41 prompt corrected.** The `pendingDeliveryRequests`
+collection name (my error) corrected to actual `deliveryRequests`.
+Mandatory Cloud Run IAM verification step added to deploy plan.
+Shop owner dashboard badge folded into scope alongside admin
+notifications.
+
+
+
+**PR 39.1 — Logo swap.** Six asset files in `assets/images/`
+replaced with HamaraSetu logo derivatives (master source:
+`uploads/HamareSetuLogo.jpeg`, 1280×780 JPEG, blue-to-green
+gradient shopping-bag + H symbol + HAMARASETU wordmark + "Shop
+Smart. Shop Local." tagline on white bg). Derived via Python
+PIL: `icon.png` (1024² symbol-only square on white, ~88%
+fill), `splash-icon.png` (512² full logo with wordmark +
+tagline, transparent bg), `android-icon-foreground.png` (1024²
+symbol at ~70% safe-zone), `android-icon-background.png`
+(1024² solid white), `android-icon-monochrome.png` (1024²
+grey silhouette of symbol for themed icons mode),
+`favicon.png` (48² symbol on white). Old files backed up
+under `assets/images/.archive-pre-pr40/` in case of revert.
+`app.json` updated: splash `backgroundColor` `#0E7C3A` →
+`#FFFFFF`, splash `imageWidth` 200 → 240 (full logo with
+wordmark needs more width to be readable), `dark.backgroundColor`
+`#0E7C3A` → `#FFFFFF`, Android `adaptiveIcon.backgroundColor`
+`#0E7C3A` → `#FFFFFF`. **Intentionally NOT touched** in this
+hotfix: `theme.ts` palette, expo-notifications `color`
+(`#0E7C3A` notification tint stays — PR 40 territory),
+green-to-blue+green theme migration. Scope is icon/splash
+artwork swap + their bg colors only.
+
+
+
+**App name locked: HamaraSetu** (हमारा सेतु — "Our Bridge").
+**Tagline locked: "Shop Smart, Shop Local."**
+**Operating entity: Sara Stack Labs.**
+**Legal jurisdiction: Faridabad, Haryana** (Ballabgarh is the city,
+Faridabad the district HQ named in legal docs).
+**Support email (kept as personal during pilot):**
+`sudhir.davim@gmail.com`. Switching to `sarastacklabs@gmail.com`
+deferred to post-pilot — touching Apple Developer / Firebase /
+EAS / Sentry / Razorpay ownership during pilot is too risky
+relative to the zero pilot benefit.
+**Bundle IDs unchanged** (`com.sudhirdavim.grocerymvp` on both
+platforms) — bundle ID is invisible to users; display name change
+is what matters. Bundle migration deferred to post-pilot,
+pre-public-launch.
+
+**Single source of truth for brand strings:**
+`src/constants/branding.ts` — `APP_NAME`, `APP_NAME_DEVANAGARI`,
+`TAGLINE`, `SUPPORT_EMAIL`, `OPERATING_ENTITY`, `OPERATING_CITY`,
+`OPERATING_DISTRICT`, `OPERATING_STATE`, `LEGAL_JURISDICTION`. Pin
+test at `tests/constants/branding.test.ts` fails CI on any edit
+so future renames stay deliberate. Server-side strings (Cloud
+Functions prompts, hosted legal docs) do NOT import this — kept
+in sync by hand, with the pin test as the trip-wire.
+
+**Branch:** `main`. PR 39 committed locally; uncommitted bundle
+from earlier PRs (19–22) still pending separate triage.
+
+**Last commit:** PR 39 — Rebrand to HamaraSetu + Contact Support
+(local, awaiting build 16 + hosting deploy + push). Previous:
+`PR 34: voice + Hindi onboarding assist (Google STT + Claude
+Haiku field parser)` (`27f22ac`, May 24), then `PR 32`, `PR 31.1`,
+`PR 31`, `PR 26`, `PR 27`, `PR 25`.
 
 **Deploy state:**
+- **PR 39** — Rebrand to HamaraSetu + Contact Support row.
+  ✅ **Code-complete locally** as of May 26.
+  `npx tsc --noEmit` clean; `npm test` 722/722 passing across
+  72 suites; `npm run build-legal` regenerated `dist/privacy.html`
+  + `dist/terms.html`. **NOT YET DEPLOYED** — three actions
+  still required by Sudhir from his PowerShell:
+  1. `eas build --profile production --platform all` (native
+     rebuild — permission strings changed, OTA cannot apply).
+     Will auto-increment build 15 → build 16. Confirm
+     `SENTRY_AUTH_TOKEN` EAS secret is set first so PR 26
+     source-map upload finally activates.
+  2. `eas submit --profile production --platform ios --latest`
+     after iOS build finishes.
+  3. `firebase deploy --only hosting` to publish the
+     regenerated /privacy + /terms pages with the new brand +
+     `Faridabad, Haryana` jurisdiction in §13.
+
+  **Now bundled with PR 39.1 (logo swap):** build 17 instead
+  of build 16 — same `eas build` cycle, two unblocks together
+  (rebrand strings + logo artwork). Permission strings (PR 39)
+  + asset images (PR 39.1) both require native rebuild;
+  combining them into one `eas build --profile production
+  --platform all` is the cheap path.
+  Smoke acceptance (10 steps) listed in
+  `docs/pr-39-rebrand-hamarasetu-windsurf-prompt.md` runs after
+  build 16 lands on TestFlight.
+  Three Windsurf quality moves worth noting:
+  (a) Added `tests/constants/**/*.test.ts` to `testMatch` in
+  `tests/jest.unit.config.js` so the new `branding.test.ts`
+  pin actually runs — without this the constants pin would
+  have been silently invisible.
+  (b) Appended a 7-completed-items + 5-follow-ups section to
+  `PRELAUNCH_CHECKLIST.md:7457-7564` so PR 39 is fully traced
+  in the launch checklist.
+  (c) Switched the voice-helper LLM prompt example from
+  "Sharma Kirana Mart" to "Sharma Kirana Store" so the AI
+  doesn't keep seeing the old brand on every Hindi voice
+  onboarding call. (Subtle but correct.)
 - **PR 34** — voice + Hindi onboarding assist. ✅ **Live on
   iOS (build 15) as of May 24.** Native build shipped after
   the OTA-fingerprint-mismatch diagnostic; submitted via
@@ -244,8 +413,9 @@ STT + Claude Haiku field parser)` (`27f22ac`, May 24). Previous:
   (which is now in flight to also deliver PR 34 — same build,
   two unblocks at once).
 
-**Unit suite:** 636/636 passing (+9 from PR 32's
-`menuExtractionHelpers.test.ts`).
+**Unit suite:** 722/722 passing across 72 suites as of PR 39
+(was 636 at PR 32 baseline; growth across PRs 32.1, 32.2, 34,
+36, 36.1, 36.2, 38, 38.1, 39 added the rest).
 
 **AI substrate now in place** (`functions/src/aiHelpers.ts`):
 every Phase C customer-side AI PR (PR 47–53) reuses the same
@@ -340,10 +510,24 @@ Worth clarifying with Sudhir before touching this code.
   first, so there's no risk of silent skip. Smoke tests 1–4 from
   `docs/pr-26-sentry-sourcemap-upload-windsurf-prompt.md` run after
   the build completes.
-- **Pilot-blocking sequence (post-PR-34):** PR 38 (admin
-  feature-usage dashboard, ~2 days, must land before pilot for
-  day-1 data capture) → PR 36 (Customer CRM, ~1–1.5 days, the
-  primary merchant daily-use hook for pilot) → start pilot.
+- **Pilot-blocking sequence (post-PR-36):** PR 36 ✅ shipped +
+  tested May 24. PR 36.1 (pilot UX polish — 2 parts: countdown
+  timer on customer OrderDetailScreen + Favorites filter on
+  ShopListScreen) is the last pilot-blocking dev work. ~3 hrs
+  Windsurf. Cold-start fix on `updateOrderStatus` was the
+  original Part 1; **deferred per Sudhir's cost-conservative
+  call** — diagnosed as Cloud Functions Gen 2 cold start
+  (first-tap-of-the-day ~4 s, subsequent ~1 s); `minInstances:
+  1` would eliminate it at ~₹400/mo per function but he chose
+  to accept the hit during pilot rather than add recurring
+  cost. Revisit post-pilot if it surfaces as real friction.
+  After PR 36.1 ships + smoke-tests, dev side of pilot-readiness
+  is done — remaining items are branding + city + manual shop
+  onboarding (non-code).
+- **Deferred to post-pilot Phase B / C** (logged in ROADMAP
+  so they don't drift): PR 42.1 separate shop+delivery
+  ratings, PR 53.1 smart substitution with AI + real-time
+  approval. Both real product wants, neither pilot-blocking.
 - **PR 37 + PR 37.1 (Digital Udhaar / Khata) deferred from
   pilot** (Sudhir's call May 24). Build on demand if pilot
   shop owners request credit-tracking. Prompts preserved at

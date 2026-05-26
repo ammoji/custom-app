@@ -500,7 +500,7 @@ async function main(): Promise<number> {
   console.log(`  ${C.dim}Next step (if prepping for family role-play):${C.reset}`);
   console.log(`  ${C.dim}    1. Sign your admin phone in (custom claim already attached).${C.reset}`);
   console.log(`  ${C.dim}    2. Family members sign in fresh on test phone numbers.${C.reset}`);
-  console.log(`  ${C.dim}    3. Phones B & C register shops via "Open a shop on Kirana Mart".${C.reset}`);
+  console.log(`  ${C.dim}    3. Phones B & C register shops via "Open a shop on HamaraSetu".${C.reset}`);
   console.log(`  ${C.dim}    4. You approve via Pending Shop Approvals → bootstrapShopMenu fires.${C.reset}`);
   console.log(`  ${C.dim}    5. Customer testing begins.${C.reset}`);
 

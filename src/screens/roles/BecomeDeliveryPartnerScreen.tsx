@@ -14,6 +14,7 @@ import Button from '../../components/common/Button';
 import EmptyState from '../../components/common/EmptyState';
 import Loader from '../../components/common/Loader';
 import ScreenHeader from '../../components/common/ScreenHeader';
+import { APP_NAME } from '../../constants/branding';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
@@ -150,7 +151,7 @@ export default function BecomeDeliveryPartnerScreen() {
         onBack={() => nav.goBack()}
       />
       <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.heading}>Earn flexibly with Kirana Mart</Text>
+        <Text style={styles.heading}>{`Earn flexibly with ${APP_NAME}`}</Text>
         <Text style={styles.body}>
           Tell us a bit about yourself. An admin will review your application
           (usually within 24 hours) and approve you to start picking up orders.

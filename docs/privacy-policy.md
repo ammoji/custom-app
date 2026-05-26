@@ -1,9 +1,9 @@
-# Privacy Policy — Kirana Mart
+# Privacy Policy — HamaraSetu
 
 **Effective date:** May 16, 2026
 **Last updated:** May 16, 2026
 
-This Privacy Policy describes how Kirana Mart ("we", "our", "us")
+This Privacy Policy describes how HamaraSetu ("we", "our", "us")
 collects, uses, and protects your personal information when you use
 our mobile application ("the App").
 
@@ -13,10 +13,10 @@ If you have any questions, contact us at: **sudhir.davim@gmail.com**
 
 ## 1. Who we are
 
-Kirana Mart is a mobile application that connects customers with
+HamaraSetu is a mobile application that connects customers with
 local kirana (grocery) shops in India, with optional delivery via
 independent delivery partners. The App is currently operated by
-Sudhir Davim. Kirana Mart is in beta and not yet available to the
+Sara Stack Labs. HamaraSetu is in beta and not yet available to the
 general public.
 
 ---
@@ -180,7 +180,7 @@ information.
 
 ## 8. Children's privacy
 
-Kirana Mart is not intended for users under the age of 13. We do
+HamaraSetu is not intended for users under the age of 13. We do
 not knowingly collect personal information from children under 13.
 If you believe we have collected such information, please contact
 us at sudhir.davim@gmail.com and we will delete it promptly.
@@ -204,7 +204,7 @@ rights, contact us at:
 
 ---
 
-*This policy is provided for the Kirana Mart beta program. It will
+*This policy is provided for the HamaraSetu beta program. It will
 be updated for general availability with additional disclosures
 required by Apple App Store, Google Play, and other distribution
 channels.*

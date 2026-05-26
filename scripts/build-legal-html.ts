@@ -33,13 +33,13 @@ const PAGES: Page[] = [
   {
     sourcePath: join(ROOT, 'docs', 'privacy-policy.md'),
     outPath: join(ROOT, 'dist', 'privacy.html'),
-    title: 'Privacy Policy — Kirana Mart',
+    title: 'Privacy Policy — HamaraSetu',
     url: 'https://grocery-mvp-dev.web.app/privacy',
   },
   {
     sourcePath: join(ROOT, 'docs', 'terms-of-service.md'),
     outPath: join(ROOT, 'dist', 'terms.html'),
-    title: 'Terms of Service — Kirana Mart',
+    title: 'Terms of Service — HamaraSetu',
     url: 'https://grocery-mvp-dev.web.app/terms',
   },
 ];

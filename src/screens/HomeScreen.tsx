@@ -7,6 +7,7 @@ import QuickSwitchModal from '../components/dev/QuickSwitchModal';
 import ActiveOrdersRail from '../components/order/ActiveOrdersRail';
 import OrderAgainRail from '../components/order/OrderAgainRail';
 import ReorderModal from '../components/order/ReorderModal';
+import { APP_NAME } from '../constants/branding';
 import { CATEGORIES } from '../constants/categories';
 import { TEST_ACCOUNTS } from '../constants/testAccounts';
 import { colors, radii, spacing, typography } from '../constants/theme';
@@ -540,9 +541,9 @@ export default function HomeScreen() {
                 style={styles.optInRow}
                 onPress={() => nav.navigate('RegisterShop')}
                 accessibilityRole="button"
-                accessibilityLabel="Open a shop on Kirana Mart"
+                accessibilityLabel={`Open a shop on ${APP_NAME}`}
               >
-                <Text style={styles.optInText}>🏪  Open a shop on Kirana Mart</Text>
+                <Text style={styles.optInText}>{`🏪  Open a shop on ${APP_NAME}`}</Text>
                 <Text style={styles.optInChevron}>›</Text>
               </Pressable>
             )}

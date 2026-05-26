@@ -27,6 +27,7 @@ module.exports = {
     '<rootDir>/tests/store/**/*.test.ts',
     '<rootDir>/tests/contracts/**/*.test.ts',
     '<rootDir>/tests/screens/**/*.test.ts',
+    '<rootDir>/tests/constants/**/*.test.ts',
   ],
   testTimeout: 10000,
   setupFiles: ['<rootDir>/tests/unit-setup.ts'],

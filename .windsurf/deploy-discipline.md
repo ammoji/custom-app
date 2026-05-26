@@ -376,6 +376,107 @@ Firestore should always raise this question first.
   collections.** Prevent at prompt-writing time, not at
   pilot-deploy time.
 
+## Cloud Run `allUsers` invoker IAM — second IAM trap
+
+Sibling gotcha to the Signed-URL section above, surfaced during
+PR 41 smoke testing (May 26 2026).
+
+**Symptom:** A previously-working Firebase callable function
+suddenly returns HTTP 401 with `"The access token could not be
+verified."` from `run.googleapis.com/requests` logs. Client sees
+either a silent empty list (try/catch swallows it) or a
+React-side crash if the error isn't handled. The function code
+hasn't changed; redeploy doesn't fix it.
+
+**Cause:** Firebase Functions Gen 2 callables run as Cloud Run
+services. Public callability requires the Cloud Run service to
+grant `roles/run.invoker` to the special principal `allUsers`.
+The in-function `requireAdminCaller` (or similar) gate enforces
+actual authorization — the `allUsers` invoker just lets the
+request *reach* the function code.
+
+Some operation (manual gcloud edit, security-policy automation,
+even an interrupted `firebase deploy`) can silently strip the
+`allUsers` binding from one or more services. The function then
+401s for **every** caller, regardless of their Firebase Auth
+token.
+
+PR 41 incident: `listpendingdeliveryrequests` lost its binding
+while `listpendingshops` (architecturally identical) kept its
+binding. Admin could see pending shops but not pending delivery
+applicants. Empty IAM policy (`etag: ACAB` with no bindings) was
+the smoking gun.
+
+**Diagnostic (run as Sudhir, not Windsurf):**
+
+```powershell
+# Inspect one service
+gcloud run services get-iam-policy <service-name> --region=asia-south1 --project=grocery-mvp-dev
+```
+
+A healthy callable shows:
+
+```
+bindings:
+- members:
+  - allUsers
+  role: roles/run.invoker
+etag: BwZ...
+version: 1
+```
+
+A broken service shows just `etag: ACAB` with no `bindings`.
+
+**Bulk audit** — find every callable in `asia-south1` missing
+the binding:
+
+```powershell
+gcloud run services list --region=asia-south1 --project=grocery-mvp-dev --format="value(metadata.name)" | ForEach-Object {
+    $svc = $_
+    $policy = gcloud run services get-iam-policy $svc --region=asia-south1 --project=grocery-mvp-dev --format="value(bindings.members)" 2>$null
+    if (-not $policy -or $policy -notmatch "allUsers") {
+        Write-Host "MISSING allUsers binding: $svc"
+    }
+}
+```
+
+**False positives to ignore in the audit:** background triggers
+(`sendOrderStatusPush`, `sendNewOrderPushToShop`, etc.) and
+scheduled jobs (`cleanupAbandonedOrders`) MUST NOT have
+`allUsers` invoker — they're invoked by Eventarc / Cloud
+Scheduler via internal service accounts. Adding `allUsers` to
+those would be a real security regression. Audit script
+flags them but only `onCall` callables need the binding.
+
+**Fix:**
+
+```powershell
+gcloud run services add-iam-policy-binding <service-name> --region=asia-south1 --member=allUsers --role=roles/run.invoker --project=grocery-mvp-dev
+```
+
+Takes ~5 seconds. No function code change, no redeploy needed —
+the IAM update applies to the existing service immediately.
+
+**Prevention rule for PR prompts that touch callables:**
+
+Add to the deploy plan a verification step like:
+
+```
+After firebase deploy --only functions, run:
+
+gcloud run services get-iam-policy <each-new-or-touched-function> --region=asia-south1 --project=grocery-mvp-dev
+
+Confirm `allUsers` + `roles/run.invoker` appears in bindings for
+EVERY onCall callable. Background triggers and scheduled jobs
+MUST NOT have it.
+```
+
+Without that check, a stripped binding survives multiple deploy
+cycles unnoticed (Firebase deploy reports "successful update"
+even when IAM is in a broken state). Treat IAM verification as
+"server-first deploy" hardening, same tier as the signed-URL
+gotcha above.
+
 ## Cross-references
 
 This doc is referenced from `PRELAUNCH_CHECKLIST.md` under the

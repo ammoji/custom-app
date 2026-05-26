@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Kirana Mart",
+    "name": "HamaraSetu",
     "slug": "grocery-mvp",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -13,18 +13,19 @@
       "supportsTablet": false,
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Kirana Mart uses your location to find nearby grocery shops.",
-        "NSPhotoLibraryUsageDescription": "Kirana Mart may access your photo library when our payment provider needs to attach a receipt or proof of payment.",
-        "NSPhotoLibraryAddUsageDescription": "Kirana Mart may save payment receipts to your photo library when our payment provider provides one.",
-        "NSCameraUsageDescription": "Kirana Mart may use your camera when our payment provider requests it during checkout.",
+        "NSLocationWhenInUseUsageDescription": "HamaraSetu uses your location to find nearby grocery shops.",
+        "NSPhotoLibraryUsageDescription": "HamaraSetu may access your photo library when our payment provider needs to attach a receipt or proof of payment.",
+        "NSPhotoLibraryAddUsageDescription": "HamaraSetu may save payment receipts to your photo library when our payment provider provides one.",
+        "NSCameraUsageDescription": "HamaraSetu may use your camera when our payment provider requests it during checkout.",
         "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
       "package": "com.sudhirdavim.grocerymvp",
       "versionCode": 1,
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
-        "backgroundColor": "#0E7C3A",
+        "backgroundColor": "#FFFFFF",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
@@ -40,19 +41,19 @@
         "expo-splash-screen",
         {
           "image": "./assets/images/splash-icon.png",
-          "imageWidth": 200,
+          "imageWidth": 240,
           "resizeMode": "contain",
-          "backgroundColor": "#0E7C3A",
+          "backgroundColor": "#FFFFFF",
           "dark": {
-            "backgroundColor": "#0E7C3A"
+            "backgroundColor": "#FFFFFF"
           }
         }
       ],
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Allow grocery-mvp to use your location to find nearby shops.",
-          "locationWhenInUsePermission": "Allow grocery-mvp to use your location to find nearby shops.",
+          "locationAlwaysAndWhenInUsePermission": "Allow HamaraSetu to use your location to find nearby shops.",
+          "locationWhenInUsePermission": "Allow HamaraSetu to use your location to find nearby shops.",
           "isAndroidBackgroundLocationEnabled": false,
           "isIosBackgroundLocationEnabled": false
         }
@@ -85,7 +86,7 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "Kirana Mart uses the microphone for voice-assisted shop registration so you can speak your details instead of typing."
+          "microphonePermission": "HamaraSetu uses the microphone for voice-assisted shop registration so you can speak your details instead of typing."
         }
       ]
     ],

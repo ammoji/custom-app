@@ -60,17 +60,28 @@ not yet propagated to the codebase.
 - ~~PR 32 — AI photo-to-catalog~~ ✅ shipped May 23
 - ~~PR 34 — Voice + Hindi onboarding~~ ✅ shipped May 24
   (iOS build 15, tested live)
-- **PR 38 — Admin feature-usage dashboard** ← next (must
-  land before pilot starts so day-1 usage data is captured;
-  PR 32 + PR 34 already wire the analytics events per
-  Strategic Principle 8 — PR 38 is the read side)
+- ~~PR 38 — Admin feature-usage dashboard~~ ✅ shipped May 24
+  (PR 38) + PR 38.1 hotfix to route reads/writes through
+  callables (Web-SDK/RNFB auth mismatch — same root cause as
+  PR 6.1; second occurrence; permanent rule added to deploy-
+  discipline.md so it's the last)
 - **PR 35 — Field-rep assisted onboarding** (Phase A2;
   Trust Principle 5 escape hatch)
 - **PR 33 — Master product catalog** (Phase A2; can be
   deferred if PR 32's "every SKU is custom" works well in
   practice — revisit after pilot data)
-- **PR 36 — Customer CRM for shop owner** (Phase B opens;
-  the primary merchant daily-use hook for pilot)
+- ~~PR 36 — Customer CRM for shop owner~~ ✅ shipped May 24
+  2026; tested end-to-end including `featureUsageLog/` flow
+  confirming PR 38.1's callable routing works for the new
+  events.
+- **PR 36.1 — Pilot UX polish bundle (2 parts)** ← next.
+  Countdown timer on customer OrderDetailScreen +
+  "Favorites only" filter pill on ShopListScreen. Cold-start
+  fix DEFERRED — Sudhir confirmed it's a 1-line `minInstances:
+  1` config change worth ~₹400/mo per function, but chose
+  pilot-cost-conservative path (accept 2–3× daily cold-start
+  hit of ~4 s per shop owner). Revisit post-pilot if it
+  surfaces as friction.
 - ~~PR 37 — Digital Udhaar / Khata ledger~~ ⛔ **Deferred from
   pilot (Sudhir's call May 24).** Build on demand if pilot
   shops request credit-tracking. Prompt preserved at
@@ -633,14 +644,16 @@ critical. They are the daily-use hooks that determine whether the
 
 | # | Theme | Why | Est |
 |---|---|---|---|
-| PR 36 | Customer CRM screen for shop owner | **Killer merchant feature.** Shop sees: customer list, total orders per customer, last-order date, top 10 customers by revenue, customers who stopped ordering (no order in 30+ days). Reads existing order data; no new collections. Without this, the shop owner has no relationship visibility — exactly the gap chains like Blinkit make worse by disintermediating. Validates "will merchants use this weekly?" | 1–1.5 days |
+| ~~PR 36~~ | ~~Customer CRM screen for shop owner~~ | ✅ **Shipped May 24 2026.** Top / Recent / Stopped 30d+ tabs; period selector; tap-to-call; analytics auto-flow to `featureUsageLog/` via PR 38.1 routing. Schema correction Windsurf caught: `customerUid` + `deliveryAddress` (not `userId` + `address` as my prompt drafted) — cross-check pattern working as designed. | 1–1.5 days |
+| PR 36.1 | **Pilot UX polish bundle (2 parts; cold-start fix deferred)** | (a) Countdown timer alongside absolute pickup time ("Ready in 22 minutes (by 7:30 PM)") on customer-side `OrderDetailScreen`. (b) "Favorites only" filter pill on `ShopListScreen` / `SearchScreen` (favorites already exist via PR 19; just missing this filter). **Originally also included a cold-start fix for the 4–5 s shop-side status-change delay; Sudhir confirmed cold-start diagnosis (first tap 1 s after deploy, second tap 1 s — fully warm; original 4–5 s was cold) and chose to defer the `minInstances: 1` fix per cost-conservative pilot stance.** Shop owners experience the cold-start hit 2–3× per day; subsequent taps are fast. | 3 hrs |
 | ~~PR 37~~ | ~~Digital Udhaar / Khata ledger~~ | ⛔ **Deferred from pilot (Sudhir's call May 24)** — build on demand if pilot shop owners request credit-tracking. Speculative without demand signal; rather not bloat pilot scope. Full design preserved in `docs/pr-37-digital-udhaar-khata-ledger-windsurf-prompt.md` for fast pickup if/when demand surfaces. | ~~2–2.5 days~~ |
 | ~~PR 37.1~~ | ~~Customer-initiated udhaar payment + per-customer approval~~ | ⛔ **Deferred from pilot (Sudhir's call May 24)** — depends on PR 37 which is itself deferred. Design captured as the largest follow-up under PR 37's PRELAUNCH entry. | ~~~3 days~~ |
-| PR 38 | **Admin feature-usage dashboard + analytics expansion** | **Pilot-critical observability.** Extends the existing `src/services/analytics.ts` wrapper to cover shop-owner / delivery-partner / admin events (currently only customer-side is tracked). Adds parallel writes to a new `featureUsageLog/` Firestore collection so admin can query exact per-user / per-shop counts without Firebase Analytics sampling + latency. New `AdminUsageScreen`: "what features were used in the last 7/30 days, by role, by shop" — sorted by most-used descending. Without this, the pilot answers "did people use feature X" with guesses. With it, the answer is a query. Codifies Strategic Principle 8. | 1.5–2 days |
+| ~~PR 38~~ | ~~Admin feature-usage dashboard + analytics expansion~~ | ✅ **Shipped May 24 2026** (PR 38 + PR 38.1 hotfix). PR 38 added ~22 new shop/delivery/admin analytics events + the `featureUsageLog/` collection + the AdminUsageScreen dashboard. PR 38.1 routed reads/writes through callables (`logFeatureUsageEvent`, `queryFeatureUsageLog`) after a same-day diagnostic that direct Web-SDK Firestore calls silently failed on native — same root cause as PR 6.1. Permanent discipline-doc rule added so future Firestore-from-client PRs prevent this at prompt-writing time. Strategic Principle 7's three pilot metrics are now queryable from day 1 of pilot. | 1.5–2 days (PR 38) + 1.5–2 hrs (PR 38.1) |
 | PR 39 | Minimum viable customer support | FAQ screen + "Contact us" → WhatsApp deep link with pre-filled order context. | 2–3 hrs |
 | PR 40 | Visual order-status timeline + delay banner | Most-requested UX from quick-commerce comparison; doesn't need live map. | 3–4 hrs |
 | PR 41 | Refund status visibility | "₹X refunded to your card on date Y." Tied to existing Razorpay refund flow. | 2 hrs |
 | PR 42 | Shop substitution UI (closes PR 21 loop) | Shop owner can swap an item and customer is notified per their preference. | 4–5 hrs |
+| PR 42.1 | **Separate shop + delivery ratings** (Sudhir's May 24 observation) | Extends PR 20's single per-order rating into two distinct stars: **shop quality** (product, packaging, freshness) and **delivery experience** (timeliness, partner conduct). New `deliveryRating` aggregate on the delivery-partner user doc (mirror of `ratingAvg` + `ratingCount` on shop). Customer UI: two star pickers in the rating sheet. Admin UI: surfaces delivery partner rating on UserDetailScreen. Deferred from pilot (single rating is enough for ~150 ratings/month pilot scale); ships in Phase B post-pilot polish. | 1 day |
 | PR 43 | Low-stock alerts to shop owner | Defensive: prevents the "ordered but unavailable" trust break. | 2–3 hrs |
 | PR 44 | "Delivery ETA before payment" on checkout | Last frictionless-checkout gap from competitor list. Manual ETA, no ML. | 2 hrs |
 | PR 45 | Basic coupon system | Admin-defined codes, percentage / flat off, expiry, per-user limit. Defers from previous slot — coupons are a growth lever after pilot, not a pilot blocker. | 4–6 hrs |
@@ -686,6 +699,7 @@ onboarding friction directly.
 | PR 51 | AI support assistant | Triages support tickets, drafts refund-eligibility answer, escalates to human only when needed. | 5–7 hrs |
 | PR 52 | AI typo-tolerant search rewrite | LLM expands "haldi powder" → "turmeric / haldi / haldi powder / besan haldi" against the master catalog. Closes the typo-tolerance gap from category 3. | 3–4 hrs |
 | PR 53 | **AI-assisted express ordering** (Sudhir's idea — May 2026) | Customer says/types in WhatsApp-style natural language ("I want milk, atta, and 2 packs of biscuits from Sharma General Store") → LLM parses → app maps to actual menu items → drops the user directly on the checkout screen with the cart pre-filled. Faster than browse-and-tap for repeat orders. Reuses `aiHelpers.ts` substrate. Future-WhatsApp-channel-compatible. | 5–7 hrs |
+| PR 53.1 | **Smart substitution with real-time approval** (Sudhir's May 24 observation) | Layers on top of PR 21 (preference captured) + PR 42 (shop substitution UI). Two new pieces: (a) **AI "best match" recommendation** — when shop owner needs to substitute, the `aiHelpers.runClaude` substrate suggests the closest in-stock alternative ranked by category + price + brand similarity; shop owner picks from the ranked list with one tap. (b) **Real-time customer approval flow** — instead of falling back to the pre-set preference, push to the customer with the proposed substitute side-by-side with the original; customer taps Accept / Reject within 5 min; on timeout, fall back to the preference. Multi-day. Phase C — wait until customer-side AI is justified by pilot signal. | 2–3 days |
 
 **Exit criterion for Phase C:** Kirana Mart has a clear AI-assist
 chip on the home screen. Each AI feature has a measurable lift over

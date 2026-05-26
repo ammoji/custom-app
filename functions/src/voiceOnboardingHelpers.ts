@@ -44,7 +44,7 @@ RULES:
   baje" / "morning 7" → "07:00". "Raat das baje" / "10 PM" →
   "22:00".
 - Shop name: preserve the shopkeeper's chosen name as-is, even
-  if mixed Hindi-English ("Sharma Kirana Mart" is fine).
+  if mixed Hindi-English ("Sharma Kirana Store" is fine).
 - Address: capture verbatim. Don't translate landmarks or street
   names.
 - Never invent fields the shopkeeper didn't mention. Null is the

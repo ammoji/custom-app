@@ -40,6 +40,8 @@ import { profileService } from '../services/profileService';
 import { pushService } from '../services/pushService';
 import { signOutAndClearLocalState } from '../services/signOutAndClearLocalState';
 import { openPrivacy, openTerms } from '../utils/openLegal';
+import { openSupportEmail } from '../utils/openSupport';
+import { APP_NAME } from '../constants/branding';
 import { useAuthStore } from '../store/useAuthStore';
 import { useCartStore } from '../store/useCartStore';
 import type { SavedAddress, UserProfile } from '../types';
@@ -337,6 +339,23 @@ export default function ProfileScreen() {
             fullWidth
           />
         </View>
+
+        {/* PR 39 — Help & Support section. Sits above Legal so a
+            pilot user reporting a bug doesn't have to scroll past
+            policies first. One row: opens the user's mail app
+            pre-filled to the support address. */}
+        <Text style={[styles.sectionTitle, { marginTop: spacing.xl }]}>
+          Help & Support
+        </Text>
+        <Pressable
+          style={styles.legalRow}
+          onPress={openSupportEmail}
+          accessibilityRole="link"
+          accessibilityLabel={`Contact ${APP_NAME} support by email`}
+        >
+          <Text style={styles.legalRowText}>Contact support</Text>
+          <Text style={styles.chevron}>›</Text>
+        </Pressable>
 
         {/* PR 25 — Legal section. Sits above Account so the user
             can read the policy before deciding to sign out / delete

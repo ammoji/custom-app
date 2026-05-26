@@ -133,12 +133,98 @@ empty box on device. PR 32.2 fixed it by adding `.png` to each
 URL. This rule exists so future placeholder/icon work doesn't
 recur the same class of bug.
 
+## Rule 8 — Zustand selectors must return stable references
+
+PR 41 smoke testing (May 26 2026) surfaced a "Maximum update
+depth exceeded" crash on ShopListScreen for any account where
+`profile.favorites` was undefined (typical for fresh accounts
+post-`reset-pilot-data`).
+
+The culprit was a one-line selector that looked innocent:
+
+```ts
+// BUG — creates a new {} on every render
+const favorites = useProfileStore(s => s.profile?.favorites ?? {});
+```
+
+Zustand compares selector results with `Object.is`. When the
+selected field is undefined, `?? {}` returns a brand-new empty
+object on every render. New ref → store treats as changed →
+re-render → new ref → re-render → infinite loop.
+
+**The fix:** hoist the empty default to a module-level constant
+so the fallback returns the same reference every time.
+
+```ts
+// FIX — module-level constant, stable reference
+const EMPTY_FAVORITES: Record<string, string[]> = {};
+
+// inside the component:
+const favorites = useProfileStore(s => s.profile?.favorites ?? EMPTY_FAVORITES);
+```
+
+The same rule applies to `?? []` (empty array fallbacks) and
+`?? new Map()` or any other reference-typed fallback.
+
+**Symptom that should make you grep for this**: an
+ErrorBoundary firing with "Maximum update depth exceeded" or
+"Too many re-renders" anywhere in the app. Run:
+
+```
+grep -rn "use\\w*Store(s => .*\\?\\? [{\\[]" src/
+```
+
+If results appear, each one is a latent infinite-loop landmine
+waiting for a user whose underlying field is undefined.
+
+## Rule 9 — `<Image source={{ uri }} />` must guard against empty strings
+
+PR 41 smoke testing (same incident) found that React Native's
+`<Image>` on iOS in Expo SDK 54 throws an unhandled exception
+when given an empty-string URI. Empty string is NOT treated the
+same as null/undefined.
+
+```tsx
+// BUG — crashes ShopCard render if imageUrl is ""
+<Image source={{ uri: shop.imageUrl }} style={styles.image} />
+
+// FIX — guard explicitly for truthy URI
+{shop.imageUrl ? (
+  <Image source={{ uri: shop.imageUrl }} style={styles.image} />
+) : (
+  <View style={[styles.image, styles.imagePlaceholder]}>
+    <Text style={styles.imagePlaceholderText}>🏪</Text>
+  </View>
+)}
+```
+
+The empty-string case is common in this app because shop /
+menu-item docs can carry `imageUrl: ""` from data flows that
+haven't yet wired KYC uploads or product photos to the
+customer-facing field. Don't assume the field is either
+"a valid URL" or "missing" — the third "empty string" case
+breaks iOS rendering.
+
+**Symptom that should make you grep for this**: render-time
+crashes in a screen that contains a list of items pulled from
+Firestore, especially after a fresh registration flow has
+landed empty defaults in the data.
+
+```
+grep -rn "Image source={{ uri:" src/components src/screens
+```
+
+Verify each call site either guards on truthy URI or asserts
+upstream that the field is never empty.
+
 ## Quick reference
 
 | Layer | What it does | When it fires |
 |---|---|---|
 | Rules 1–4 | Discipline on the agent | During edits |
 | Rule 7 | RN image URLs specify raster format | During edits / review |
+| Rule 8 | Zustand `??` fallbacks must be stable refs | During edits / review |
+| Rule 9 | `<Image>` URIs must guard against empty strings | During edits / review |
 | `.vscode/settings.json` | Disables organize-imports on save | On IDE save |
 | `npm run audit` | Grep for stripped DO-NOT-REMOVE imports | Before deploy |
 | `tsc --noEmit` | Compile check | Before deploy |

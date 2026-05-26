@@ -6,6 +6,7 @@ import Button from '../components/common/Button';
 import Input from '../components/common/Input';
 import Loader from '../components/common/Loader';
 import ScreenHeader from '../components/common/ScreenHeader';
+import { APP_NAME, TAGLINE } from '../constants/branding';
 import { colors, radii, spacing, typography } from '../constants/theme';
 import type { ConfirmationResult } from '../services/authService';
 import { authService } from '../services/authService';
@@ -146,6 +147,13 @@ export default function LoginScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
+      {/* PR 39 — brand block: first visual contact with the app.
+          Centered wordmark + tagline, no background, sits above the
+          Sign-in ScreenHeader and below the SafeArea top inset. */}
+      <View style={styles.brandBlock}>
+        <Text style={styles.brandName}>{APP_NAME}</Text>
+        <Text style={styles.brandTagline}>{TAGLINE}</Text>
+      </View>
       <ScreenHeader title="Sign in" onBack={() => nav.goBack()} />
       <View style={styles.body}>
         {phase === 'verifying' && <Loader fullScreen />}
@@ -257,6 +265,23 @@ export default function LoginScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg },
+  // PR 39 — brand block. Two stacked text lines, centered. No box.
+  brandBlock: {
+    alignItems: 'center',
+    marginTop: spacing.xl,
+    marginBottom: spacing.lg,
+    paddingHorizontal: spacing.lg,
+  },
+  brandName: {
+    ...typography.h1,
+    textAlign: 'center',
+  },
+  brandTagline: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    marginTop: spacing.xs,
+  },
   body: { flex: 1, padding: spacing.lg, gap: spacing.md },
   heading: { ...typography.h2 },
   subtext: { ...typography.body, color: colors.textSecondary, marginBottom: spacing.md },
