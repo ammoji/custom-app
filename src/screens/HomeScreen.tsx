@@ -11,6 +11,8 @@ import { APP_NAME } from '../constants/branding';
 import { CATEGORIES } from '../constants/categories';
 import { TEST_ACCOUNTS } from '../constants/testAccounts';
 import { colors, radii, spacing, typography } from '../constants/theme';
+import { usePendingCounts } from '../hooks/usePendingCounts';
+import { Analytics } from '../services/analytics';
 import { orderService } from '../services/orderService';
 import { useAuthStore } from '../store/useAuthStore';
 import { useCartStore } from '../store/useCartStore';
@@ -90,6 +92,13 @@ export default function HomeScreen() {
   // function would silently regress the same crash on first data
   // load.
   const [quickSwitchVisible, setQuickSwitchVisible] = useState(false);
+
+  // PR 41 — pending-approval counts for HomeScreen badges. Enabled
+  // for admin OR shop owner; plain customers skip the poll entirely
+  // (hook returns all-zero without calling the server). MUST sit
+  // above any conditional return — same Rules-of-Hooks discipline
+  // as the state above (PR 12 ETA-modal lineage).
+  const pendingCounts = usePendingCounts(isAdmin || isShopOwner);
 
   // PR 18 — visibility gate for the Quick Switch button. True iff
   // the currently signed-in user's E.164 phone matches one of the
@@ -399,12 +408,37 @@ export default function HomeScreen() {
             {isShopOwner && (
               <Pressable
                 style={styles.roleRow}
-                onPress={() => nav.navigate('ShopOwnerDashboard')}
+                onPress={() => {
+                  // PR 41 — badge-tap funnel signal. Fire only when
+                  // the badge currently shows a non-zero count so we
+                  // can distinguish "admin opened on schedule" from
+                  // "badge actually prompted action".
+                  if (pendingCounts.pendingOrderCount > 0) {
+                    Analytics.admin_pending_badge_tapped({
+                      kind: 'shop_owner_orders',
+                      count: pendingCounts.pendingOrderCount,
+                    });
+                  }
+                  nav.navigate('ShopOwnerDashboard');
+                }}
                 accessibilityRole="button"
-                accessibilityLabel="Shop Dashboard"
+                accessibilityLabel={
+                  pendingCounts.pendingOrderCount > 0
+                    ? `Shop Dashboard, ${pendingCounts.pendingOrderCount} orders need attention`
+                    : 'Shop Dashboard'
+                }
               >
                 <Text style={styles.roleText}>🛍️  Shop Dashboard</Text>
-                <Text style={styles.roleChevron}>›</Text>
+                <View style={styles.roleTrailing}>
+                  {pendingCounts.pendingOrderCount > 0 && (
+                    <View style={styles.badge}>
+                      <Text style={styles.badgeText}>
+                        {formatBadgeCount(pendingCounts.pendingOrderCount)}
+                      </Text>
+                    </View>
+                  )}
+                  <Text style={styles.roleChevron}>›</Text>
+                </View>
               </Pressable>
             )}
             {isDelivery && (
@@ -432,23 +466,65 @@ export default function HomeScreen() {
             {isAdmin && (
               <Pressable
                 style={styles.adminRow}
-                onPress={() => nav.navigate('PendingShops')}
+                onPress={() => {
+                  if (pendingCounts.shopCount > 0) {
+                    Analytics.admin_pending_badge_tapped({
+                      kind: 'shop',
+                      count: pendingCounts.shopCount,
+                    });
+                  }
+                  nav.navigate('PendingShops');
+                }}
                 accessibilityRole="button"
-                accessibilityLabel="Pending Shop Approvals"
+                accessibilityLabel={
+                  pendingCounts.shopCount > 0
+                    ? `Pending Shop Approvals, ${pendingCounts.shopCount} waiting`
+                    : 'Pending Shop Approvals'
+                }
               >
                 <Text style={styles.adminText}>📋  Pending Shop Approvals</Text>
-                <Text style={styles.adminChevron}>›</Text>
+                <View style={styles.adminTrailing}>
+                  {pendingCounts.shopCount > 0 && (
+                    <View style={styles.badge}>
+                      <Text style={styles.badgeText}>
+                        {formatBadgeCount(pendingCounts.shopCount)}
+                      </Text>
+                    </View>
+                  )}
+                  <Text style={styles.adminChevron}>›</Text>
+                </View>
               </Pressable>
             )}
             {isAdmin && (
               <Pressable
                 style={styles.adminRow}
-                onPress={() => nav.navigate('PendingDeliveryRequests')}
+                onPress={() => {
+                  if (pendingCounts.deliveryCount > 0) {
+                    Analytics.admin_pending_badge_tapped({
+                      kind: 'delivery',
+                      count: pendingCounts.deliveryCount,
+                    });
+                  }
+                  nav.navigate('PendingDeliveryRequests');
+                }}
                 accessibilityRole="button"
-                accessibilityLabel="Delivery partner requests"
+                accessibilityLabel={
+                  pendingCounts.deliveryCount > 0
+                    ? `Delivery partner requests, ${pendingCounts.deliveryCount} waiting`
+                    : 'Delivery partner requests'
+                }
               >
                 <Text style={styles.adminText}>🛵  Delivery requests</Text>
-                <Text style={styles.adminChevron}>›</Text>
+                <View style={styles.adminTrailing}>
+                  {pendingCounts.deliveryCount > 0 && (
+                    <View style={styles.badge}>
+                      <Text style={styles.badgeText}>
+                        {formatBadgeCount(pendingCounts.deliveryCount)}
+                      </Text>
+                    </View>
+                  )}
+                  <Text style={styles.adminChevron}>›</Text>
+                </View>
               </Pressable>
             )}
             {isAdmin && (
@@ -888,4 +964,39 @@ const styles = StyleSheet.create({
   },
   cartText: { ...typography.bodyBold, color: '#fff' },
   cartCta: { ...typography.bodyBold, color: '#fff' },
+  // PR 41 — pending-approval badges. The trailing wrappers replace
+  // the bare chevron so the badge pill sits between the row text
+  // and the chevron without disturbing the existing flex layout.
+  // The badge itself is a small white pill on the green admin rows
+  // (high contrast against the dark green); the shop-owner role row
+  // uses the same pill since it sits on the same green background.
+  adminTrailing: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  roleTrailing: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  badge: {
+    backgroundColor: '#fff',
+    borderRadius: 999,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    minWidth: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  badgeText: {
+    ...typography.caption,
+    fontWeight: '700',
+    color: colors.primaryDark,
+    fontVariant: ['tabular-nums'],
+  },
 });
+
+/**
+ * PR 41 — badge count formatter. Display the raw count up to 99 and
+ * cap at "99+" for higher values so the pill width stays bounded.
+ * Server already caps at 999 (`capPendingCount`); this is the
+ * display-side cap on top of that.
+ */
+function formatBadgeCount(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '';
+  if (n > 99) return '99+';
+  return String(Math.floor(n));
+}

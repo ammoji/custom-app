@@ -63,7 +63,9 @@ export default function ShopDetailManagementScreen() {
 
   const [shop, setShop] = useState<Shop | null>(null);
   const [loading, setLoading] = useState(true);
-  const [pending, setPending] = useState<'suspend' | 'unsuspend' | null>(null);
+  const [pending, setPending] = useState<
+    'suspend' | 'unsuspend' | 'regenerateImage' | null
+  >(null);
   const [showSuspendModal, setShowSuspendModal] = useState(false);
   const [reason, setReason] = useState('');
   // PR 31.1 — KYC docs viewer state. Mirrors the pattern PR 31
@@ -132,6 +134,38 @@ export default function ShopDetailManagementScreen() {
       cancelled = true;
     };
   }, [isAdmin, shopId]);
+
+  // PR 42 followup — recovery action for shops approved with
+  // `imageUrl: ''` because approveShop's storefront signing failed
+  // silently. Re-mints the signed URL and stamps it onto the shop
+  // doc. Surfaces the actual signing error via Alert so the admin
+  // sees the IAM / quota / bucket cause (opposite of approveShop's
+  // swallowed warn).
+  const handleRegenerateImage = async () => {
+    if (!shop) return;
+    setPending('regenerateImage');
+    try {
+      await orderService.regenerateShopImageUrl({ shopId: shop.id });
+      // Refresh local state so the new imageUrl is visible without
+      // a manual reload. Same fetch-then-find pattern as the rest of
+      // this screen.
+      const list = await orderService.listAllShops();
+      const next = list.find(s => s.id === shop.id);
+      if (next) setShop(next);
+      Alert.alert(
+        'Image refreshed',
+        `${shop.name}'s storefront photo is now live on the customer card.`,
+      );
+    } catch (e: any) {
+      Alert.alert(
+        'Could not refresh image',
+        e?.message ??
+          'Unknown error while signing the storefront URL. Check Cloud Logs for details.',
+      );
+    } finally {
+      setPending(null);
+    }
+  };
 
   const handleUnsuspend = async () => {
     if (!shop) return;
@@ -405,6 +439,28 @@ export default function ShopDetailManagementScreen() {
                 title="⚙️ Edit settings (delivery fee, minimum order)"
                 variant="secondary"
                 onPress={() => nav.navigate('ShopSettings', { shopId: shop.id })}
+                disabled={pending !== null}
+                size="lg"
+              />
+              <View style={{ height: spacing.md }} />
+              {/* PR 42 followup — admin recovery for shops approved
+                  with an empty imageUrl (storefront signing failed
+                  silently inside approveShop). Tap to re-mint the
+                  signed URL from the existing kycDocs.storefront
+                  path. The server callable throws on signing failure
+                  so the admin sees the actual error message rather
+                  than the swallow-and-placeholder UX of approveShop. */}
+              <Button
+                title={
+                  pending === 'regenerateImage'
+                    ? 'Refreshing storefront image…'
+                    : shop.imageUrl
+                      ? '🖼️ Refresh storefront image'
+                      : '🖼️ Generate storefront image'
+                }
+                variant="secondary"
+                onPress={handleRegenerateImage}
+                loading={pending === 'regenerateImage'}
                 disabled={pending !== null}
                 size="lg"
               />

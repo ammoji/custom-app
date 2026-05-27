@@ -1,5 +1,6 @@
 import * as Notifications from 'expo-notifications';
 import { useEffect } from 'react';
+import { safeNavigate } from '../navigation/navigationRef';
 import { Analytics } from '../services/analytics';
 import { authService } from '../services/authService';
 import { pushService } from '../services/pushService';
@@ -109,12 +110,63 @@ export default function AuthBootstrap() {
 
     fetchLocation();
 
-    // Tap-to-open hook. For MVP we only log the orderId — full
-    // deep-link nav into OrderDetail is tracked as a follow-up.
+    // Tap-to-open hook. PR 41 extends the original PR 16 handler
+    // (which only logged orderId) to deeplink admin push taps to
+    // the right detail screen. Uses the existing in-callable
+    // pushToAdmins payload shapes:
+    //   - { shopId, type: 'shop_pending_approval' }
+    //       → ShopRegistrationDetail({ shopId })
+    //   - { uid, type: 'delivery_request_pending' }
+    //       → DeliveryRequestDetail({ uid })
+    // Anything else (order_status, new_order_for_shop, refund_*)
+    // falls through to the legacy log-only branch.
+    //
+    // Non-admin callers (someone reinstalled and signed in as a
+    // different account, or admin claim was revoked) don't get
+    // routed to the admin stack — the admin screens themselves
+    // gate on `isAdmin` and render an "Admin only" empty state,
+    // so the worst-case UX is a flash of that screen rather than
+    // a crash.
     const tapSub = Notifications.addNotificationResponseReceivedListener(
       response => {
+        const data = response.notification.request.content.data as
+          | Record<string, unknown>
+          | undefined;
+        const type =
+          typeof data?.type === 'string' ? (data.type as string) : undefined;
+
+        if (type === 'shop_pending_approval') {
+          const shopId =
+            typeof data?.shopId === 'string'
+              ? (data.shopId as string)
+              : undefined;
+          if (shopId) {
+            Analytics.admin_pending_notification_tapped({
+              type: 'shop_pending_approval',
+              target_id: shopId,
+            });
+            safeNavigate('ShopRegistrationDetail', { shopId });
+          }
+          return;
+        }
+
+        if (type === 'delivery_request_pending') {
+          const uid =
+            typeof data?.uid === 'string' ? (data.uid as string) : undefined;
+          if (uid) {
+            Analytics.admin_pending_notification_tapped({
+              type: 'delivery_request_pending',
+              target_id: uid,
+            });
+            safeNavigate('DeliveryRequestDetail', { uid });
+          }
+          return;
+        }
+
         const orderId =
-          response.notification.request.content.data?.orderId;
+          typeof data?.orderId === 'string'
+            ? (data.orderId as string)
+            : undefined;
         if (orderId) {
           console.log('[push] tapped notification for order', orderId);
         }

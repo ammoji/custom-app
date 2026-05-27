@@ -9,6 +9,7 @@
 import { describe, expect, it } from '@jest/globals';
 import {
     computeNewRollingAverage,
+    validateDualRatingSubmission,
     validateRatingSubmission,
 } from '../../functions/src/ratingHelpers';
 
@@ -219,5 +220,248 @@ describe('computeNewRollingAverage', () => {
     // Many ratings — confirm we never see >1 decimal sneaking out.
     const r = computeNewRollingAverage(3.7, 100, 4);
     expect(Math.round(r.newAvg * 10)).toBe(r.newAvg * 10);
+  });
+});
+
+// PR 42.1 — dual-rating validator. Exercises the shape-detection
+// ladder (new vs. legacy), the optional delivery dimension, and the
+// no-partner drop semantics. The base order shape now includes
+// `deliveryPersonId` so the new path can opt to write the delivery
+// rolling average.
+const DUAL_BASE_ORDER = {
+  customerUid: 'u1',
+  status: 'delivered',
+  shopId: 'shop_1',
+  deliveryPersonId: 'delivery_p1',
+};
+
+const AUTH = { uid: 'u1' };
+
+describe('validateDualRatingSubmission', () => {
+  it('happy path — dual rating (both shop + delivery submitted)', () => {
+    const r = validateDualRatingSubmission({
+      auth: AUTH,
+      order: DUAL_BASE_ORDER,
+      shopRating: 5,
+      shopComment: 'Great packaging',
+      deliveryRating: 4,
+      deliveryComment: 'Friendly partner',
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.shopRating).toBe(5);
+      expect(r.shopComment).toBe('Great packaging');
+      expect(r.deliveryRating).toBe(4);
+      expect(r.deliveryComment).toBe('Friendly partner');
+      expect(r.deliveryPersonId).toBe('delivery_p1');
+      expect(r.deliveryDropped).toBeUndefined();
+    }
+  });
+
+  it('happy path — shop-only (delivery undefined)', () => {
+    const r = validateDualRatingSubmission({
+      auth: AUTH,
+      order: DUAL_BASE_ORDER,
+      shopRating: 3,
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.shopRating).toBe(3);
+      expect(r.deliveryRating).toBeUndefined();
+      expect(r.deliveryPersonId).toBeUndefined();
+    }
+  });
+
+  it('legacy single-rating shape — coerces to shop-only', () => {
+    const r = validateDualRatingSubmission({
+      auth: AUTH,
+      order: DUAL_BASE_ORDER,
+      stars: 4,
+      comment: 'Good stuff',
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.shopRating).toBe(4);
+      expect(r.shopComment).toBe('Good stuff');
+      // Legacy callers never get delivery fields, even if the
+      // order has a deliveryPersonId.
+      expect(r.deliveryRating).toBeUndefined();
+    }
+  });
+
+  it('already-rated under legacy schema (order.rating set) → rejected', () => {
+    const r = validateDualRatingSubmission({
+      auth: AUTH,
+      order: { ...DUAL_BASE_ORDER, rating: { stars: 5, ratedAt: 1 } },
+      shopRating: 4,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe('failed-precondition');
+      expect(r.message).toMatch(/already been rated/);
+    }
+  });
+
+  it('already-rated under new schema (order.shopRating set) → rejected', () => {
+    const r = validateDualRatingSubmission({
+      auth: AUTH,
+      order: { ...DUAL_BASE_ORDER, shopRating: 5 },
+      shopRating: 4,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('failed-precondition');
+  });
+
+  it('dual rating but order has no deliveryPersonId → shop accepted, delivery dropped', () => {
+    const r = validateDualRatingSubmission({
+      auth: AUTH,
+      order: { ...DUAL_BASE_ORDER, deliveryPersonId: undefined },
+      shopRating: 5,
+      deliveryRating: 3,
+      deliveryComment: 'Whatever',
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.shopRating).toBe(5);
+      expect(r.deliveryRating).toBeUndefined();
+      expect(r.deliveryPersonId).toBeUndefined();
+      expect(r.deliveryDropped).toBe('no-partner');
+    }
+  });
+
+  it('delivery rating out of range → invalid-argument', () => {
+    const r = validateDualRatingSubmission({
+      auth: AUTH,
+      order: DUAL_BASE_ORDER,
+      shopRating: 5,
+      deliveryRating: 7,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe('invalid-argument');
+      expect(r.message).toMatch(/deliveryRating/);
+    }
+  });
+
+  it('shop rating out of range checked before delivery (first-error wins)', () => {
+    const r = validateDualRatingSubmission({
+      auth: AUTH,
+      order: DUAL_BASE_ORDER,
+      shopRating: 0,
+      deliveryRating: 7,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe('invalid-argument');
+      expect(r.message).toMatch(/shopRating/);
+    }
+  });
+
+  it('shop comment too long → invalid-argument', () => {
+    const r = validateDualRatingSubmission({
+      auth: AUTH,
+      order: DUAL_BASE_ORDER,
+      shopRating: 4,
+      shopComment: 'a'.repeat(501),
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe('invalid-argument');
+      expect(r.message).toMatch(/shopComment too long/);
+    }
+  });
+
+  it('delivery comment too long → invalid-argument', () => {
+    const r = validateDualRatingSubmission({
+      auth: AUTH,
+      order: DUAL_BASE_ORDER,
+      shopRating: 4,
+      deliveryRating: 4,
+      deliveryComment: 'b'.repeat(501),
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe('invalid-argument');
+      expect(r.message).toMatch(/deliveryComment too long/);
+    }
+  });
+
+  it('neither shopRating nor stars provided → invalid-argument (delivery alone not valid)', () => {
+    const r = validateDualRatingSubmission({
+      auth: AUTH,
+      order: DUAL_BASE_ORDER,
+      deliveryRating: 4,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe('invalid-argument');
+      expect(r.message).toMatch(/shopRating is required/);
+    }
+  });
+
+  it('whitespace-only shopComment collapses to undefined', () => {
+    const r = validateDualRatingSubmission({
+      auth: AUTH,
+      order: DUAL_BASE_ORDER,
+      shopRating: 5,
+      shopComment: '   \n  ',
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.shopComment).toBeUndefined();
+  });
+
+  it('whitespace-only deliveryComment collapses to undefined (rating still kept)', () => {
+    const r = validateDualRatingSubmission({
+      auth: AUTH,
+      order: DUAL_BASE_ORDER,
+      shopRating: 5,
+      deliveryRating: 4,
+      deliveryComment: '\t\t',
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.deliveryRating).toBe(4);
+      expect(r.deliveryComment).toBeUndefined();
+    }
+  });
+
+  it('unauthenticated → rejected (cheapest check fires first)', () => {
+    const r = validateDualRatingSubmission({
+      auth: null,
+      order: DUAL_BASE_ORDER,
+      shopRating: 5,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('unauthenticated');
+  });
+
+  it('wrong customer → permission-denied', () => {
+    const r = validateDualRatingSubmission({
+      auth: { uid: 'other' },
+      order: DUAL_BASE_ORDER,
+      shopRating: 5,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('permission-denied');
+  });
+
+  it('non-delivered status → failed-precondition', () => {
+    const r = validateDualRatingSubmission({
+      auth: AUTH,
+      order: { ...DUAL_BASE_ORDER, status: 'preparing' },
+      shopRating: 5,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('failed-precondition');
+  });
+
+  it('non-integer shopRating (e.g. 4.5) → invalid-argument', () => {
+    const r = validateDualRatingSubmission({
+      auth: AUTH,
+      order: DUAL_BASE_ORDER,
+      shopRating: 4.5,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('invalid-argument');
   });
 });

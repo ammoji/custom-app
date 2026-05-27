@@ -194,6 +194,22 @@ export default function UserDetailScreen() {
             <RoleBadge active={user.isDelivery} label="Delivery" />
             <RoleBadge active label="Customer" />
           </View>
+          {/* PR 42.1 — delivery partner rolling rating, populated by
+              `submitOrderRating`'s multi-write transaction. Only
+              surfaced for delivery users who have at least one
+              rating (count > 0) — a brand-new partner with no
+              ratings yet shouldn't see a misleading "0★" badge.
+              Rating count in parens gives admin context for the
+              average (4.7★ from 2 ratings is much less reliable
+              than 4.7★ from 200). */}
+          {user.isDelivery &&
+            typeof user.deliveryRatingCount === 'number' &&
+            user.deliveryRatingCount > 0 && (
+              <Detail
+                label="Delivery rating"
+                value={`${user.deliveryRatingAvg ?? 0} ★ (${user.deliveryRatingCount})`}
+              />
+            )}
         </View>
 
         {isSelf && (

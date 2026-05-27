@@ -115,6 +115,20 @@ export const pushService = {
         vibrationPattern: [0, 250, 250, 250],
         lightColor: '#0E7C3A',
       });
+      // PR 41 — admin alerts (new shop registration, new delivery
+      // partner application) go on a separate channel so an admin
+      // who is ALSO a customer or shop owner can mute one role's
+      // notifications without muting the other. Order alerts stay
+      // HIGH importance (they need to break through silent mode
+      // because pilot delivery partners use the phone to wake up to
+      // pickups); admin alerts are DEFAULT — should arrive promptly
+      // but don't need to override silent mode.
+      await Notifications.setNotificationChannelAsync('admin-alerts', {
+        name: 'Admin Approval Queue',
+        importance: Notifications.AndroidImportance.DEFAULT,
+        vibrationPattern: [0, 200, 200, 200],
+        lightColor: '#0E7C3A',
+      });
     }
 
     // Round-trip the token through a Cloud Function so the server has

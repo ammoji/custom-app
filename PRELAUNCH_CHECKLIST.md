@@ -7563,6 +7563,756 @@ immediately. The checklist is the only thing that survives memory.
       Worth it once support volume crosses ~5 tickets/week.
       `[Post-launch]`
 
+## PR 41 — Admin pending-approval badges + deeplinks `[Phase 41]`
+
+- [x] **Scope reframed from the original prompt.** The prompt's
+      `notifyAdminsOnNewShopRequest` + `notifyAdminsOnNewDeliveryRequest`
+      Firestore triggers were dropped — the existing in-callable
+      `pushToAdmins` calls inside `registerShop`
+      (`@functions/src/index.ts:~3373`) and `requestDeliveryRole`
+      (`@functions/src/index.ts:~3685`) already fan out admin push
+      notifications. Adding the triggers as written would have caused
+      duplicate notifications for every applicant. The PR keeps the
+      existing notification surface and focuses on what was actually
+      missing: persistent badge counts + deeplink-on-tap.
+
+- [x] **New server callable — `getPendingApprovalCounts`.** Single
+      callable that projects counts onto the caller's claims:
+      admin → `{ shopCount, deliveryCount }`; shop owner →
+      `{ pendingOrderCount }`; anyone else → all zeros. Deliberately
+      does NOT throw `permission-denied` for plain customers because
+      the badge UI polls on every HomeScreen mount; a 403 in Sentry
+      on every customer launch would be pure noise. Lives at
+      `@functions/src/index.ts:~3878`. **Collection-name correction
+      from the prompt:** pending shops live in `shops` with
+      `status === 'pending'` (same source `listPendingShops` reads
+      from), NOT a separate `pendingShopRequests` collection — the
+      prompt's "Important corrections" section already flagged the
+      same class of mistake for the delivery side.
+
+- [x] **Pure helpers — `functions/src/pendingCountsHelpers.ts`.**
+      `projectPendingCounts(role, raw)` zero-projects unauthorised
+      buckets (belt-and-braces over the role-gated Firestore queries
+      upstream); `countPendingDocs(docs)` defensively filters for
+      `status === 'pending'` even though the upstream query already
+      pins it; `capPendingCount(n)` server-side caps at 999 so a
+      misbehaving client can't burn bandwidth on a runaway integer.
+      Pure helpers + IO split keeps the counting logic unit-testable
+      without firebase-admin.
+
+- [x] **Client hook — `src/hooks/usePendingCounts.ts`.** Polls
+      `getPendingApprovalCounts` every 30s while `enabled` is true.
+      Inactive for plain customers (hook short-circuits without
+      calling the server). State machine mirrors
+      `useOnlineDeliveryCount.nextPollState`: tolerate up to
+      `PENDING_COUNTS_STALE_THRESHOLD=3` consecutive failures, then
+      drop to all-zero so the badge UI doesn't render a stale number
+      forever. Pure `nextPendingCountsState` extracted for tests.
+      Hook MUST be invoked above any conditional return per
+      `.windsurf/code-discipline.md` Rule 5 — HomeScreen has the
+      explicit comment block above its `usePendingCounts(...)` call.
+
+- [x] **Client wrapper — `orderService.getPendingApprovalCounts`.**
+      Native (`@react-native-firebase/functions`) + web SDK dispatch,
+      same Plan B branching as every other callable in
+      `@src/services/orderService.ts`.
+
+- [x] **Filter-parity audit — shop-owner `pendingOrderCount`.**
+      `ShopOwnerDashboardScreen` does NOT have New/Preparing/Ready/
+      Past tabs (the prompt's framing was speculative); it has a
+      single "Pending" stat card computed as `o.status === 'pending'`
+      (`@src/screens/shop/ShopOwnerDashboardScreen.tsx:195`). The
+      OrderStatus state machine is `pending → accepted → preparing
+      → ready_for_pickup → delivered` (`cancelled` terminal); there
+      is no `'placed'` value. The callable's
+      `where('status', '==', 'pending')` matches the dashboard stat
+      exactly, so the badge number will equal the stat number the
+      shop owner sees on tap-through. **Inline comment in the
+      callable pins this contract** so a future PR can't drift the
+      two filters apart silently.
+
+- [x] **Single-shop scoping confirmed.** Phase 12a constraint ("one
+      shop per user", policy block at `mergeCustomClaims` upstream)
+      means `claims.shopId` is a single string and the query is
+      `where('shopId', '==', claims.shopId)`. Mirrors `listShopOrders`
+      / `listShopCustomers` via the same caller-shopId semantics
+      (those go through `validateShopOrdersAccess`; this callable
+      reads claims directly because it doesn't need the admin
+      override surface). **Inline comment in the callable signposts
+      the multi-shop migration path** (claim shape would become
+      `shopIds: string[]`, query becomes `where('shopId', 'in',
+      shopIds)`, response gains per-shop breakdown).
+
+- [x] **HomeScreen badges (3 placements).** White pill badge with
+      `99+` cap on the rendered count:
+      - "Pending Shop Approvals" row → `pendingCounts.shopCount`
+      - "Delivery requests" row → `pendingCounts.deliveryCount`
+      - "Shop Dashboard" role row → `pendingCounts.pendingOrderCount`
+      Accessibility labels include the count when non-zero
+      ("Pending Shop Approvals, 3 waiting"). Empty badge state
+      hides the pill entirely so the chevron sits where it always
+      did.
+
+- [x] **Screen header counts — pre-existing.** Audit found
+      `PendingShopsScreen` and `PendingDeliveryRequestsScreen`
+      already render `Pending shops (${shops.length})` /
+      `Delivery requests (${requests.length})` in their
+      `ScreenHeader` title. No change needed there — `[x]` because
+      the requirement is already satisfied, not because PR 41
+      added the code.
+
+- [x] **Android `admin-alerts` notification channel.**
+      `pushService.registerForPushNotifications` now creates a
+      second channel (`Admin Approval Queue`,
+      `AndroidImportance.DEFAULT`) alongside the existing `default`
+      channel (order alerts, `HIGH`). Server-side `pushToAdmins`
+      stamps `channelId: 'admin-alerts'` on every Expo message so
+      Android routes admin pushes onto the new channel. iOS ignores
+      `channelId`; web push routes itself.
+
+- [x] **Notification-tap deeplink.** New
+      `src/navigation/navigationRef.ts` exposes a module-level
+      `createNavigationContainerRef` + `safeNavigate` helper; wired
+      into `@App.js:~24` `<NavigationContainer ref={navigationRef}>`.
+      `AuthBootstrap.tsx`'s `addNotificationResponseReceivedListener`
+      now branches on the existing in-callable payload shapes:
+      - `{ type: 'shop_pending_approval', shopId }`
+        → `ShopRegistrationDetail({ shopId })`
+      - `{ type: 'delivery_request_pending', uid }`
+        → `DeliveryRequestDetail({ uid })`
+      - everything else (orderId / refund_failed / etc.) falls
+        through to the legacy log-only branch.
+      Non-admin users routed to the admin screens see the existing
+      "Admin only" empty state — graceful, no crash.
+
+- [x] **Analytics — `Analytics.admin_pending_badge_tapped`** (fires
+      only when the badge is non-zero, with `kind: 'shop' |
+      'delivery' | 'shop_owner_orders'` + the displayed `count`) +
+      **`Analytics.admin_pending_notification_tapped`** (fires on
+      push tap with the deeplink type + target_id). Both auto-mirror
+      to `featureUsageLog/` via PR 38.1 routing.
+
+- [x] **Tests** — `tests/functions/pendingCountsHelpers.test.ts`
+      (12 cases: role projection ladder, defensive `'pending'`
+      filter, cap behaviour incl. NaN / negative / Infinity) +
+      `tests/hooks/usePendingCounts.test.ts` (6 cases: success
+      resets, failure preserves, third-strike clears, recovery,
+      custom threshold knob). **18 new passing. Full suite:
+      740 / 740 (74 suites).** Root + functions tsc both 0 errors.
+      `npm run audit` + `audit:indexes` green.
+
+- [x] **OTA-eligibility audit** — `git diff HEAD -- app.json
+      package.json package-lock.json functions/package.json
+      functions/package-lock.json` is empty (the `app.json` edits
+      from PR 39 are still dirty but PR 41 added nothing on top).
+      No new SDKs, no plugin changes, no permission requests.
+      Server changes ship via `firebase deploy --only functions`;
+      client ships via `eas update --branch production`.
+
+- [ ] **Cloud Run IAM verification — MANDATORY post-deploy step.**
+      Per `.windsurf/deploy-discipline.md` "Cloud Run `allUsers`
+      invoker IAM" section (May 26 2026 incident: PR 1's
+      `listpendingdeliveryrequests` callable 401'd despite a
+      "successful" deploy because the `allUsers` →
+      `roles/run.invoker` binding wasn't applied). After
+      `firebase deploy --only functions:getPendingApprovalCounts`:
+
+      ```powershell
+      gcloud run services get-iam-policy getpendingapprovalcounts --region=asia-south1 --project=grocery-mvp-dev
+      ```
+
+      Confirm `allUsers` + `roles/run.invoker` in bindings. If
+      missing:
+
+      ```powershell
+      gcloud run services add-iam-policy-binding getpendingapprovalcounts --region=asia-south1 --member=allUsers --role=roles/run.invoker --project=grocery-mvp-dev
+      ```
+
+      Without this step the badge counts will silently be 0 on every
+      device and Sentry will fill with 401s on every HomeScreen
+      mount. `[Phase 41-deploy]`
+
+- [ ] **Smoke tests post-deploy** — (1) sign in as admin, land on
+      HomeScreen, confirm the "Pending Shop Approvals" + "Delivery
+      requests" rows show numeric badges matching the actual
+      `shops`/`deliveryRequests` queue depth in Firestore Console;
+      (2) from a second test phone, register a new shop → on admin
+      device the push arrives within ~5s, badge increments on next
+      poll tick (≤30s); (3) tap the push → app opens directly to
+      `ShopRegistrationDetail` for that shop; (4) approve the shop
+      → badge drops within ≤30s; (5) repeat with
+      `BecomeDeliveryPartnerScreen` on a third phone; (6) sign in
+      as a shop owner with pending orders, confirm "Shop Dashboard"
+      row shows the pending count badge; (7) sign in as a plain
+      customer (9999999991), verify HomeScreen has NO badges and
+      no `getPendingApprovalCounts` 401 in Sentry.
+      `[Phase 41-smoke]`
+
+- [ ] **DEFERRED — Per-admin "subscribe to notifications" toggle**
+      in Profile. Single admin during pilot; channel-level mute on
+      Android is enough for now. `[Post-launch]`
+
+- [ ] **DEFERRED — Rich notifications** (image previews, inline
+      Approve/Reject action buttons on the push itself). Expo Push
+      doesn't support custom action buttons; would need a native
+      module migration. Phase D polish. `[Post-launch]`
+
+- [ ] **DEFERRED — Aging-escalation push** ("this shop has been
+      waiting 12+ hours"). Worth doing once the pilot has multiple
+      admins or admin response time becomes an SLA concern.
+      `[Post-launch]`
+
+- [ ] **DEFERRED — Web push for admin desktop dashboard.** The
+      PR 38.1 cross-SDK auth-context trap (RNFB native auth ↔ Web
+      SDK Firestore) makes this messier than it sounds. Out of
+      scope until there's a confirmed admin-on-laptop workflow.
+      `[Post-launch]`
+
+## PR 42 — Storefront photo on shop card + mandatory in registration `[Phase 42]`
+
+- [x] **Closes the PR 31 → PR 41 gap.** PR 31 captured the
+      storefront photo during shop self-registration into
+      `shops/{id}.registrationData.kycDocs.storefront.storagePath`.
+      `approveShop` never copied that to the customer-facing
+      `shop.imageUrl`, so PR 41's `<Image>` hotfix in ShopCard
+      always fell back to the 🏪 placeholder for every newly
+      registered shop. PR 42 closes the loop.
+
+- [x] **Path-on-doc correction vs. the prompt.** Prompt said
+      `pendingData?.kycDocs?.storefront?.storagePath`. Wrong — KYC
+      docs land on the SAME `shops/{shopId}` doc via
+      `recordShopKycUpload` at
+      `registrationData.kycDocs.{kind}.storagePath`
+      (`@functions/src/index.ts:~1631`). There is no separate
+      `pendingData` collection. Helper + callable use the correct
+      path; inline comment in
+      `@functions/src/approveShopHelpers.ts:1-25` pins the
+      lineage.
+
+- [x] **Server — pure helpers in
+      `@functions/src/approveShopHelpers.ts`.**
+      `pickStorefrontPath(shopDocLike)` returns the string path or
+      `null`, defending against 5 real shapes (no
+      `registrationData`, no `kycDocs`, no storefront field,
+      empty `storagePath` string, non-string forged payload,
+      `storefront: null`). `STOREFRONT_SIGNED_URL_TTL_MS` exported
+      as a constant (10 years) so the helper and callable agree
+      and the unit test can assert it without depending on the
+      test's clock. Pure helpers + IO split mirrors
+      `pendingCountsHelpers` posture.
+
+- [x] **Server — `approveShop` wires `imageUrl`** at
+      `@functions/src/index.ts:~3441-3494`. Reads the storefront
+      path via the helper, mints a v4 signed read URL via
+      `getStorage().bucket().file().getSignedUrl(...)` (same
+      pattern as `getShopKycReadUrls`), and stamps it into the
+      `shops/{shopId}` `update()` payload. **Non-fatal
+      degradation** — missing path or signing failure leaves
+      `imageUrl` unwritten (NOT `''`); the spread
+      `...(storefrontImageUrl ? { imageUrl: storefrontImageUrl }
+      : {})` preserves any existing `imageUrl` value on a
+      re-approval that failed signing rather than wiping it back
+      to empty.
+
+- [x] **Re-approval is out of scope (architectural ceiling).**
+      The prompt's smoke item 4 ("admin re-approves an existing
+      shop to refresh the imageUrl") cannot be exercised because
+      `approveShop` rejects with `failed-precondition` for any
+      shop not currently in `'pending'` status
+      (`@functions/src/index.ts:~3434`). Pre-PR-42 shops that
+      already approved with `imageUrl: ""` will stay on the 🏪
+      placeholder until either (a) a future PR adds a
+      `regenerateShopImageUrl` admin callable, or (b) an admin
+      manually flips the shop's status back to `'pending'` in
+      Firestore Console. Accepted as-is for pilot — the prompt's
+      "either is acceptable" clause covers this.
+
+- [x] **Client — storefront mandatory in `RegisterShopScreen`.**
+      Three coordinated changes in
+      `@src/screens/roles/RegisterShopScreen.tsx`:
+      1. Label updated from "Storefront photo" → "Storefront
+         photo (required)" in `KYC_LABELS`
+         (`@src/screens/roles/RegisterShopScreen.tsx:58-67`).
+      2. Step-2 intro copy rewritten to flag storefront as
+         required and the other three as optional
+         (`@src/screens/roles/RegisterShopScreen.tsx:666-673`).
+      3. `handleFinish` gates on `storefront.storagePath` and
+         shows the exact alert copy from the prompt
+         ("Please upload a photo of your storefront before
+         submitting. This will be your shop's main image in the
+         app.") (`@src/screens/roles/RegisterShopScreen.tsx:280-286`).
+      4. `Finish & wait for approval` button disabled until
+         `storefront.storagePath` is set and not uploading
+         (`@src/screens/roles/RegisterShopScreen.tsx:705-710`) —
+         defence in depth alongside the alert (disabled state
+         can race with the async `setStorefront` write, so the
+         alert is the authoritative gate).
+
+- [x] **ShopCard rendering — verified, no change.** PR 41's
+      hotfix at `@src/components/shop/ShopCard.tsx` already
+      renders `<Image>` when `imageUrl` is truthy and the 🏪
+      placeholder when falsy. Once PR 42's signed URLs flow in,
+      the card auto-upgrades to real photos without any code
+      change on the client.
+
+- [x] **Tests** — `tests/functions/approveShopHelpers.test.ts`
+      (9 cases): 7 path-extraction cases covering every real
+      shape + 2 TTL constant assertions. **Full suite: 749 / 749
+      (75 suites).** Root + functions tsc both 0 errors.
+
+- [x] **OTA-eligibility audit** — no `app.json` / `package.json`
+      / lockfile changes. No new SDKs, no plugin changes, no
+      permission requests. Server changes ship via
+      `firebase deploy --only functions`; client ships via
+      `eas update --branch production`.
+
+- [ ] **Cloud Run IAM verification — MANDATORY post-deploy step.**
+      Per `.windsurf/deploy-discipline.md` "Cloud Run `allUsers`
+      invoker IAM" section. `approveShop` is being modified;
+      after `firebase deploy --only functions:approveShop`:
+
+      ```powershell
+      gcloud run services get-iam-policy approveshop --region=asia-south1 --project=grocery-mvp-dev
+      ```
+
+      Confirm `allUsers` + `roles/run.invoker` in bindings. If
+      missing:
+
+      ```powershell
+      gcloud run services add-iam-policy-binding approveshop --region=asia-south1 --member=allUsers --role=roles/run.invoker --project=grocery-mvp-dev
+      ```
+
+      Without this step, admin's first attempt to approve a new
+      shop after deploy will 401 silently and the shopkeeper will
+      be stuck on WaitingForApproval forever. `[Phase 42-deploy]`
+
+- [ ] **Smoke tests post-deploy** — (1) fresh shop-owner test
+      phone registers a new shop, completes step 2 WITHOUT a
+      storefront upload → Finish button is disabled AND tapping
+      it (via the disabled-race window) shows the
+      "Storefront photo required" alert; (2) upload a real
+      storefront photo → Finish enables → submission completes →
+      lands on WaitingForApproval; (3) admin signs in, approves
+      the new shop via `ShopRegistrationDetail` → customer signs
+      in, opens the shop list → the new shop's card shows the
+      ACTUAL uploaded photo, not the 🏪 placeholder;
+      (4) pre-PR-42 shops with `imageUrl: ""` (e.g. Sudhir
+      Grocery Store) still render the 🏪 placeholder — no
+      regression on the falsy-imageUrl path; (5) label copy
+      reads "Storefront photo (required)" on the step-2 card.
+      `[Phase 42-smoke]`
+
+- [x] **PR 42.0.1 — `regenerateShopImageUrl` admin callable
+      (promoted from deferred → shipped May 26 2026 evening).**
+      Pilot smoke test caught a shop that was approved post-PR-42
+      with `imageUrl: ''` — meaning `approveShop`'s storefront
+      signing silently failed inside its `try/catch` and the
+      customer card fell back to the 🏪 placeholder. Without a
+      recovery path, the only fix was a manual Firestore Console
+      status flip (pending → re-approve). Three changes shipped:
+
+      1. **New `regenerateShopImageUrl` admin callable** at
+         `@functions/src/index.ts:~4503-4600`. Re-runs the
+         storefront-path → signed URL → `shop.imageUrl` write
+         on any active/suspended shop. Reuses `pickStorefrontPath`
+         from `approveShopHelpers.ts` so both callables agree
+         on the field shape. **Opposite error posture from
+         `approveShop`**: throws `HttpsError('internal', ...)`
+         with the underlying signing error message so the admin
+         sees the actual cause (most likely missing
+         `iam.serviceAccounts.signBlob` self-binding on the
+         compute service account — the classic Cloud Functions
+         signing gotcha). Audit-logs `shop.regenerate-image-url`
+         with `priorImageUrlEmpty` so a recovery vs. re-mint can
+         be distinguished post-hoc.
+
+      2. **Structured logging on `approveShop`'s silent paths**
+         at `@functions/src/index.ts:~3474-3506`. The original
+         PR 42 catch used `console.warn(message, error)` which
+         is unsearchable in Cloud Logging. Upgraded to
+         `console.error(structured)` with
+         `event: 'approveShop.signing-failed'`, `shopId`,
+         `storefrontPath`, `ownerUid`, `err`, and `stack` so a
+         log query like
+         `severity=ERROR jsonPayload.event="approveShop.signing-failed"`
+         surfaces the failure immediately. Also added a
+         `'approveShop.no-storefront-path'` warn for the branch
+         where the storefront field is missing entirely (legacy
+         pre-PR-42 shop or a client bypassing the mandatory gate).
+
+      3. **Admin UI button** on
+         `@src/screens/admin/ShopDetailManagementScreen.tsx`:
+         "🖼️ Generate storefront image" (when imageUrl is empty)
+         or "🖼️ Refresh storefront image" (when populated).
+         Lives alongside the Edit settings + Suspend/Unsuspend
+         buttons in the actions block. Disabled while pending;
+         shows the actual server error message via Alert on
+         failure rather than a generic "something went wrong"
+         banner. Client wrapper at
+         `@src/services/orderService.ts:~467-485`.
+
+- [ ] **Cloud Run IAM verification for `regenerateShopImageUrl`
+      — MANDATORY post-deploy step.** Per the same pattern as
+      the other admin callables modified in this stack.
+
+      ```powershell
+      gcloud run services get-iam-policy regenerateshopimageurl --region=asia-south1 --project=grocery-mvp-dev
+      ```
+
+      If `allUsers` + `roles/run.invoker` missing:
+
+      ```powershell
+      gcloud run services add-iam-policy-binding regenerateshopimageurl --region=asia-south1 --member=allUsers --role=roles/run.invoker --project=grocery-mvp-dev
+      ```
+
+      `[Phase 42.0.1-deploy]`
+
+- [x] **Root-cause identified — V4 signed URL 7-day cap.**
+      The regenerate callable surfaced the actual error (proving
+      the diagnostic posture works):
+
+      > `Max allowed expiration is seven days (604800 seconds).`
+
+      NOT an IAM issue. The original PR 42 minted V4 signed URLs
+      with a `STOREFRONT_SIGNED_URL_TTL_MS = 10 * 365 * 24 * 60 *
+      60 * 1000` (10 years) per the prompt's "long expiry" spec.
+      V4 signed URLs have a HARD CAP of 7 days baked into the
+      GCS signer SDK — anything beyond rejects at signing time.
+      Every `approveShop` call has been failing into the silent
+      catch since PR 42 shipped. Bug introduced by me, not a
+      platform/IAM problem. The signBlob IAM is fine.
+
+- [x] **PR 42.0.2 — switched to Firebase download-token URLs
+      (shipped May 26 2026 late evening).** Three changes:
+
+      1. **Replaced `STOREFRONT_SIGNED_URL_TTL_MS` with
+         `buildFirebaseStorageDownloadUrl`** in
+         `@functions/src/approveShopHelpers.ts:99-114`. Pure
+         URL builder for the canonical Firebase Storage
+         download-token pattern:
+         `https://firebasestorage.googleapis.com/v0/b/{bucket}/o/{encoded-path}?alt=media&token={uuid}`.
+         No expiry, no V4 cap, no cron, no IAM signBlob
+         requirement. This is exactly the URL shape the Firebase
+         client SDK's `getDownloadURL()` produces.
+
+      2. **Rewired `approveShop` AND `regenerateShopImageUrl`**
+         at `@functions/src/index.ts:~3468-3484` and
+         `@functions/src/index.ts:~4557-4574`. Both now mint a
+         `randomUUID()` token, write it to the file's
+         `firebaseStorageDownloadTokens` metadata via
+         `file.setMetadata`, then construct the permanent URL
+         via the new helper. The regenerate path additionally
+         documents the implicit kill-switch behaviour: each
+         setMetadata write replaces the prior token, so a stale
+         leaked URL stops resolving the moment regenerate is
+         tapped.
+
+      3. **Tests replaced** at
+         `@tests/functions/approveShopHelpers.test.ts:77-141`.
+         Dropped the 2 TTL constant tests. Added 5 URL builder
+         tests covering: well-formed URL shape, slash encoding
+         (`%2F` not `/`), special-character encoding
+         (space / `?` / `#` / `&`), token verbatim preservation,
+         and bucket-name passthrough. **Suite: 769 / 769 (75 suites).
+         Root + functions tsc both 0 errors.**
+
+- [ ] **Smoke test the fix end-to-end post-deploy.** After
+      `firebase deploy --only functions:approveShop,functions:regenerateShopImageUrl`:
+
+      1. Open admin app → All Shops → tap the affected pilot shop
+         (the one with `imageUrl: ''`).
+      2. Tap **🖼️ Generate storefront image**.
+      3. Expect Alert "Image refreshed". Card should now reload
+         with the real photo immediately (the screen re-fetches
+         the shop after success).
+      4. Open the customer app → Browse Shops Near Me → confirm
+         the shop's card shows the actual photo, not 🏪.
+      5. Register a BRAND NEW shop end-to-end (owner uploads
+         storefront via RegisterShop step 2 → admin approves).
+         The customer card should land with the real photo on
+         FIRST view, no manual regenerate needed.
+      6. Tap **🖼️ Refresh storefront image** on the same shop.
+         New URL should also work; verify the OLD URL (paste
+         into browser) now 403s — confirms the token rotation
+         kill-switch is functional. `[Phase 42.0.2-smoke]`
+
+- [ ] **DEFERRED — Storage rules audit for token URLs.** The
+      Firebase download-token URL bypasses Storage rules entirely
+      (it's a shared-secret URL, not an authenticated request).
+      Our `storage.rules` ALREADY denied unauthenticated reads on
+      `shop-kyc/**` paths, and the token URL still works — that's
+      the point of tokens. But a future "lock down KYC reads
+      entirely" intent could fool itself: the token URL keeps
+      working until the token is rotated or the file is deleted.
+      Worth a comment in `storage.rules` near the shop-kyc rule
+      noting the token-URL escape hatch. Not urgent. `[Post-launch]`
+
+- [ ] **DEFERRED — Storefront re-upload from
+      WaitingForApproval.** The screen mentions "you can add or
+      replace any of them while your shop is pending review"
+      but there's no edit-in-place flow today. Phase D polish.
+      `[Post-launch]`
+
+- [ ] **DEFERRED — Image optimization (WebP / responsive
+      variants).** Firebase Storage CDN serves the raw upload at
+      whatever resolution `expo-image-picker` produced (typically
+      ~1-2MB JPEG). At pilot scale (<100 shops, <50 daily card
+      renders per user) this is fine. Revisit when a single
+      shop list render starts crossing 5MB of imagery.
+      `[Post-launch]`
+
+## PR 42.1 — Separate shop + delivery partner ratings `[Phase 42.1]`
+
+- [x] **Why this PR exists.** PR 20's single-rating model compressed
+      shop quality (freshness, packaging) AND delivery quality
+      (timeliness, courtesy) into one number that flowed into
+      `shop.ratingAvg`. Wrong both ways: bad deliveries unfairly
+      tanked the shop's standing, AND delivery partners had no
+      independent reputation surface. PR 42.1 splits the rating
+      into two dimensions matching industry standard
+      (Swiggy / Zomato / Blinkit). Not pilot-blocking but ships
+      before shop #2 onboards so historical data isn't co-mingled.
+
+- [x] **Schema additions — additive only, no migration.** Extended
+      `Order` (`@src/types/index.ts:398-421`) with optional flat
+      fields `shopRating`, `shopComment`, `deliveryRating`,
+      `deliveryComment`. Legacy nested `rating: OrderRating` field
+      kept READ-ONLY for orders rated before the cutover —
+      `OrderDetailScreen` reads from whichever source has data.
+      Extended `UserInfo` (`@src/types/index.ts:106-118`) with
+      optional `deliveryRatingAvg` + `deliveryRatingCount`,
+      populated only for delivery users.
+
+- [x] **Pure helper — `validateDualRatingSubmission`** in
+      `@functions/src/ratingHelpers.ts:163-478`. Accepts BOTH
+      legacy (`stars` / `comment`) and new (`shopRating` /
+      `shopComment` / `deliveryRating?` / `deliveryComment?`)
+      input shapes; canonicalises to the new flat schema in the
+      result. Shape detection: `input.shopRating !== undefined`
+      → new path; else `input.stars !== undefined` → legacy →
+      coerce to shop-only. **Submit-once policy spans BOTH
+      schemas**: either `order.rating` (legacy nested object) OR
+      `order.shopRating` (new flat number) blocks re-submission.
+      **No-partner drop semantics**: if the customer sends a
+      delivery rating but the order has no `deliveryPersonId`,
+      the helper accepts shop rating and drops the delivery
+      dimension with a `deliveryDropped: 'no-partner'` marker
+      (callable logs + audits, doesn't fail). Pure helpers + IO
+      split mirrors `pendingCountsHelpers` posture.
+
+- [x] **Server — `submitOrderRating` rewritten** at
+      `@functions/src/index.ts:5636-5824`. Multi-write transaction:
+      order doc (new flat schema) + shop doc (rolling avg/count)
+      + optional user doc (delivery rolling avg/count via
+      `merge: true` so a fresh partner doc is initialized
+      without overwriting unrelated fields like `isDelivery`
+      mirror or `fcmTokens`). Double-tap race guarded by
+      re-reading inside the transaction; submit-once span
+      checks both legacy `rating` AND new `shopRating`. Audit
+      log captures `shopRating`, `hasShopComment`,
+      `deliveryRating`, `hasDeliveryComment`, `deliveryPersonId`,
+      and `deliveryDropped` for ops diagnosis. Legacy
+      `validateRatingSubmission` helper kept in
+      `ratingHelpers.ts` for the existing test suite but its
+      callable import dropped — the dual helper subsumes the
+      legacy path.
+
+- [x] **Server — `listAllUsers` augmented** at
+      `@functions/src/index.ts:4460-4535`. Reads `users/{uid}`
+      Firestore mirror for delivery users only (parallel
+      `Promise.all` over the ~5 delivery partners at MVP scale,
+      not the full 100-user list). Projects `deliveryRatingAvg`
+      + `deliveryRatingCount` onto each `UserInfo` row. Returns
+      `undefined` for non-delivery users + delivery users with no
+      ratings yet so the admin UI knows to suppress the row.
+
+- [x] **Client — `orderService.submitOrderRating` wrapper** at
+      `@src/services/orderService.ts:212-245`. Accepts both
+      input shapes (legacy + new) and returns the canonical
+      new shape regardless of input. New callers use the dual
+      fields; legacy shape stays accepted so a not-yet-OTA'd
+      client during the deploy window can still submit a
+      shop-only rating without the server rejecting it.
+
+- [x] **Client — `RateOrderCard` split into dual sections** at
+      `@src/components/order/RateOrderCard.tsx`. Two sections:
+      "How was the shop?" (REQUIRED, shop stars + optional
+      comment) and "How was your delivery?" (OPTIONAL, hidden
+      entirely when `hasDeliveryPartner` is false, delivery
+      stars=0 means "skipped"). Shared `StarPicker` sub-component
+      handles both rows; the delivery comment input dims and
+      becomes non-editable until the customer picks at least one
+      delivery star (visual hint that comment without stars
+      doesn't persist). 5 `useState` calls hoisted above any
+      conditional return per Rules-of-Hooks (PR 12 lineage).
+      Exported `RateOrderPayload` type so the parent's `onRated`
+      callback types correctly.
+
+- [x] **Client — `OrderDetailScreen` post-rating panel** at
+      `@src/screens/OrderDetailScreen.tsx:643-730`. Three render
+      paths converge on the same panel: (a) canonical new dual
+      rating from server (`order.shopRating`), (b) optimistic
+      dual rating (just-submitted, watcher not yet ticked),
+      (c) legacy nested `order.rating.stars` for pre-PR-42.1
+      orders. The variables `shopStars` / `shopComment` /
+      `deliveryStars` / `deliveryComment` use nullish-coalescing
+      to pick whichever source has data. Delivery dimension
+      only renders when present (legacy + skipped orders hide
+      it). Added `ratedSubtitle` + `ratedDeliveryBlock` styles
+      at `@src/screens/OrderDetailScreen.tsx:1039-1051`.
+
+- [x] **Admin — `UserDetailScreen` surfaces delivery rating**
+      at `@src/screens/admin/UserDetailScreen.tsx:197-212`.
+      Conditional row inside the Roles card: shows
+      `"X ★ (N)"` only for delivery users with
+      `deliveryRatingCount > 0` so a brand-new partner with no
+      ratings doesn't surface a misleading "0★" badge. Count in
+      parens gives admin context for the average (4.7★ from 2
+      ratings ≠ 4.7★ from 200).
+
+- [x] **Tests** — extended
+      `@tests/functions/ratingHelpers.test.ts:225-467` with 17
+      new cases under `describe('validateDualRatingSubmission')`:
+      both happy paths (dual + shop-only), legacy shape coercion,
+      already-rated under either schema, no-partner drop,
+      out-of-range shop / delivery, first-error-wins ordering,
+      both comment length caps, whitespace collapse on both
+      comments, unauth / wrong customer / wrong status, non-integer
+      shopRating, and the delivery-alone-rejected case.
+      **Full suite: 766 / 766 (75 suites). Root + functions tsc
+      both 0 errors.**
+
+- [x] **OTA-eligibility audit** — no `app.json` / `package.json` /
+      lockfile changes. No new SDKs, no plugin changes, no
+      permission requests. Server changes ship via
+      `firebase deploy --only functions`; client ships via
+      `eas update --branch production`.
+
+- [ ] **Cloud Run IAM verification — MANDATORY post-deploy step.**
+      Per `.windsurf/deploy-discipline.md` "Cloud Run `allUsers`
+      invoker IAM" section. Both `submitOrderRating` AND
+      `listAllUsers` were modified:
+
+      ```powershell
+      gcloud run services get-iam-policy submitorderrating --region=asia-south1 --project=grocery-mvp-dev
+      gcloud run services get-iam-policy listallusers --region=asia-south1 --project=grocery-mvp-dev
+      ```
+
+      Confirm `allUsers` + `roles/run.invoker` in bindings for
+      EACH. Apply `add-iam-policy-binding` per service if
+      missing. Without this, the first rating submit after
+      deploy will 401 silently and the admin UserDetail page
+      will throw 401 errors on load. `[Phase 42.1-deploy]`
+
+- [ ] **Smoke tests post-deploy** — (1) dual-rating UI renders
+      on a delivered order with a delivery partner: two sections
+      visible with independent star pickers; (2) submit shop=5 +
+      delivery=4 + both comments → server accepts, panel flips
+      to "Thanks for rating!" showing both ratings; (3) submit
+      shop-only (don't touch delivery section) → server accepts,
+      only shop dimension shown in panel; (4) shop's
+      `ratingAvg` on the home-screen card reflects the new
+      rolling average (only the `shopRating` value feeds it, not
+      the blended single-rating); (5) admin
+      `UserDetailScreen` for the delivery partner shows
+      `"X ★ (1)"` after the first dual rating; (6) re-rate the
+      same order → RateOrderCard is gone (replaced by the
+      panel); submit-once enforced; (7) pre-PR-42.1 order with
+      `order.rating.stars` set still renders the legacy panel
+      ("You rated the shop ★★★★☆") without crashing — no
+      regression; (8) cancelled order has no RateOrderCard at
+      all. `[Phase 42.1-smoke]`
+
+- [x] **PR 42.1.1 hotfix — Firestore reads-before-writes in
+      `submitOrderRating` (shipped May 26 2026 late evening).**
+      Pilot smoke test caught:
+
+      > `Error: Firestore transactions require all reads to be executed before all writes.`
+
+      Root cause: the original PR 42.1 transaction did
+      `tx.get(orderRef)` → `tx.get(shopRef)` → `tx.update(orderRef)`
+      → `tx.set(shopRef)` → `tx.get(userRef)` → `tx.set(userRef)`.
+      Firestore enforces a strict ordering: ALL reads must
+      complete before ANY write. The interleaved
+      `tx.get(userRef)` inside the `if (deliveryRating && userRef)`
+      block threw the moment a customer submitted a dual rating
+      with the delivery dimension on an order with a populated
+      `deliveryPersonId`. Shop-only ratings worked because the
+      gated read never ran.
+
+      Fix at `@functions/src/index.ts:5939-5952`: hoisted the
+      user read up alongside the order + shop reads, gated by
+      the same `(deliveryRating && userRef)` condition the write
+      uses. The captured `userTxData` is then used by the write
+      block at `@functions/src/index.ts:5995-6009`. No behaviour
+      change for shop-only submissions or for orders without a
+      delivery partner. **Suite: 769 / 769 still passing** (the
+      existing tests cover the helper's logic; the bug was in
+      the firebase-admin glue, not the helper).
+
+- [ ] **Smoke-test the rating fix post-deploy.** After
+      `firebase deploy --only functions:submitOrderRating`:
+
+      1. As a customer, complete a delivered order WITH a
+         delivery partner assigned.
+      2. Submit shop=5 + delivery=4 + both comments. Server
+         should accept (no 500). Panel flips to "Thanks for
+         rating!" with both ratings visible.
+      3. Verify Firestore: order doc has new flat `shopRating` /
+         `deliveryRating`; shop doc's `ratingAvg` / `ratingCount`
+         updated; delivery partner's `users/{uid}` doc has
+         `deliveryRatingAvg` / `deliveryRatingCount` populated.
+      4. Submit a second order with shop-only (skip delivery).
+         Should also accept; user-read branch silent. `[Phase 42.1.1-smoke]`
+
+- [ ] **DEFERRED — Add a transaction-shape regression test for
+      `submitOrderRating`.** The current test suite covers
+      `validateDualRatingSubmission` (pure helper, no firebase)
+      but doesn't exercise the actual transaction body. A future
+      test using `@firebase/rules-unit-testing` or an admin SDK
+      mock would catch reads-after-writes regressions. The pure
+      helper is the high-value coverage target; transaction-shape
+      tests are valuable but more setup. `[Post-launch]`
+
+- [ ] **DEFERRED — Per-shop delivery partner leaderboard** for
+      admin. Useful later for roster management (admin can
+      deprioritize chronically late partners, reward consistent
+      performers). Not pilot-blocking. `[Post-launch]`
+
+- [ ] **DEFERRED — Customer-visible delivery partner rating**
+      pre-delivery ("Your delivery partner: 4.7★"). Surfaces
+      partner reputation to customers but feels like Uber-eats
+      polish; out of scope until cohort is big enough that
+      partner-pick visibility matters. `[Post-launch]`
+
+- [ ] **DEFERRED — Editable ratings.** Customer changes their
+      mind after submit. Submit-once policy remains for MVP —
+      editing requires recomputing rolling averages from scratch
+      across both shop and partner. Worth doing once a real
+      "I tapped wrong star" support thread arrives. `[Post-launch]`
+
+- [ ] **DEFERRED — Reminder to rate delivery if customer
+      submitted shop-only.** Push notification next session
+      asking "How was your delivery partner?" if
+      `shopRating` is set but `deliveryRating` is not. Phase D
+      polish. `[Post-launch]`
+
+- [ ] **DEFERRED — Migrate legacy `order.rating` →
+      `order.shopRating`.** Historical orders stay on the legacy
+      field forever; the post-rating panel handles both branches
+      cleanly. Only worth doing if a future query needs to
+      `where('shopRating', '>=', 4)` across ALL orders including
+      pre-PR-42.1 ones. `[Post-launch]`
+
+- [ ] **DEFERRED — Drop `validateRatingSubmission` from
+      `ratingHelpers.ts`.** Currently kept for the existing
+      test suite's coverage (`validateRatingSubmission` describe
+      block). Once the OTA propagation window closes (~2 weeks
+      after deploy when ratings-volume confirms no legacy-shape
+      clients remain), the helper + its tests can be deleted
+      and the file shrunk back to just `validateDualRatingSubmission`
+      + `computeNewRollingAverage`. `[Post-launch]`
+
 ## 📈 Post-launch scaling triggers (revisit each milestone)
 
 - [ ] At 100 DAU: review Firebase costs weekly for first month

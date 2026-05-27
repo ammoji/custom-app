@@ -209,11 +209,31 @@ export const orderService = {
   // the order's rating field and bumps the shop's rolling avg /
   // count. Returns the canonical { stars, comment } so the caller
   // can render its "Thanks for rating!" confirmation immediately.
+  // PR 42.1 — accepts both the legacy single-rating shape
+  // (`stars` / `comment`) and the new dual-rating shape
+  // (`shopRating` / `shopComment` / `deliveryRating?` /
+  // `deliveryComment?`). New callers use the dual shape; the
+  // legacy shape stays accepted for safety during the OTA window
+  // (a not-yet-OTA'd client still sends it; the server treats
+  // it as shop-only). Server response is the canonical new shape
+  // regardless of input.
   async submitOrderRating(input: {
     orderId: string;
-    stars: 1 | 2 | 3 | 4 | 5;
+    // Legacy
+    stars?: 1 | 2 | 3 | 4 | 5;
     comment?: string;
-  }): Promise<{ ok: true; stars: number; comment?: string }> {
+    // New
+    shopRating?: 1 | 2 | 3 | 4 | 5;
+    shopComment?: string;
+    deliveryRating?: 1 | 2 | 3 | 4 | 5;
+    deliveryComment?: string;
+  }): Promise<{
+    ok: true;
+    shopRating: number;
+    shopComment?: string;
+    deliveryRating: number | null;
+    deliveryComment: string | null;
+  }> {
     if (isNative) {
       const fn = getNativeFunctions().httpsCallable('submitOrderRating');
       const result = await fn(input);
@@ -442,6 +462,26 @@ export const orderService = {
     }
     const fn = httpsCallable(functions, 'unsuspendShop');
     await fn(input);
+  },
+
+  // PR 42 followup — admin recovery callable for shops approved
+  // with `imageUrl: ''` (storefront signing failed silently inside
+  // approveShop). Unlike approveShop's swallow-and-warn posture,
+  // this callable throws on signing failure so the admin sees the
+  // actual error (typically IAM signBlob misconfig). Also doubles
+  // as a "re-mint" path for future flows that let the owner
+  // re-upload the storefront photo post-approval.
+  async regenerateShopImageUrl(input: {
+    shopId: string;
+  }): Promise<{ ok: true; imageUrl: string }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('regenerateShopImageUrl');
+      const result = await fn(input);
+      return result.data as any;
+    }
+    const fn = httpsCallable(functions, 'regenerateShopImageUrl');
+    const result = await fn(input);
+    return result.data as any;
   },
 
   async listAllUsers(): Promise<UserInfo[]> {
@@ -1203,6 +1243,38 @@ export const orderService = {
     const fn = httpsCallable(functions, 'listShopCustomers');
     const result = await fn(input);
     return result.data as any;
+  },
+
+  // PR 41 — Pending-approval counts for HomeScreen badges. Server
+  // projects onto the caller's role: admin sees shopCount +
+  // deliveryCount, shop owner sees pendingOrderCount, anyone else
+  // gets all zeros. Never throws permission-denied for signed-in
+  // callers (it would spam Sentry on every customer launch); only
+  // throws for unauthenticated requests, which the hook gates on
+  // anyway.
+  async getPendingApprovalCounts(): Promise<{
+    shopCount: number;
+    deliveryCount: number;
+    pendingOrderCount: number;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'getPendingApprovalCounts',
+      );
+      const result = await fn();
+      return (result.data ?? {
+        shopCount: 0,
+        deliveryCount: 0,
+        pendingOrderCount: 0,
+      }) as any;
+    }
+    const fn = httpsCallable(functions, 'getPendingApprovalCounts');
+    const result = await fn();
+    return (result.data ?? {
+      shopCount: 0,
+      deliveryCount: 0,
+      pendingOrderCount: 0,
+    }) as any;
   },
 
   // ──────────────────────────────────────────────────────────

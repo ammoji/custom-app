@@ -115,7 +115,7 @@ import {
 } from './favoritesHelpers';
 import {
     computeNewRollingAverage,
-    validateRatingSubmission,
+    validateDualRatingSubmission,
 } from './ratingHelpers';
 // PR 21 — DO NOT REMOVE. Auto-formatter risk per code-discipline.
 // Used by placeOrder below to normalize the substitution preference.
@@ -153,6 +153,27 @@ import {
     type RawMenuItem,
 } from './searchMenuPublicHelpers';
 import { validateShopOrdersAccess } from './shopOrdersHelpers';
+// PR 41 — DO NOT REMOVE. Used by `getPendingApprovalCounts` callable
+// below. Auto-formatter risk per code-discipline; if tsc complains
+// "Cannot find name 'projectPendingCounts' / 'countPendingDocs' /
+// 'capPendingCount'", re-add this block.
+import {
+  capPendingCount,
+  countPendingDocs,
+  projectPendingCounts,
+} from './pendingCountsHelpers';
+// PR 42 — DO NOT REMOVE. Used by `approveShop` callable below to
+// extract the storefront photo's storage path off the pending shop
+// doc and to build a Firebase download-token URL (PR 42.0.1 hotfix:
+// V4 signed URLs cap at 7 days, so we switched to the canonical
+// download-token pattern that never expires).
+// Auto-formatter risk; if tsc complains "Cannot find name
+// 'pickStorefrontPath' / 'buildFirebaseStorageDownloadUrl'", re-add.
+import {
+  pickStorefrontPath,
+  buildFirebaseStorageDownloadUrl,
+} from './approveShopHelpers';
+import { randomUUID } from 'crypto';
 import {
     aggregateShopCustomers,
     viewShopCustomers,
@@ -3241,6 +3262,11 @@ async function pushToAdmins(
     title,
     body,
     data,
+    // PR 41 — route to the dedicated Android channel so admins can
+    // mute admin alerts independently of order alerts. iOS ignores
+    // channelId; web push uses its own routing. Channel is created
+    // client-side in pushService.registerForPushNotifications.
+    channelId: 'admin-alerts' as const,
   }));
   try {
     const res = await fetch('https://exp.host/--/api/v2/push/send', {
@@ -3401,6 +3427,12 @@ export const approveShop = onCall<{ shopId: string }>(
       status: string;
       ownerUid: string;
       name: string;
+      registrationData?: {
+        kycDocs?: {
+          storefront?: { storagePath?: unknown } | null;
+          [k: string]: unknown;
+        };
+      };
     };
     if (shop.status !== 'pending') {
       throw new HttpsError(
@@ -3409,11 +3441,91 @@ export const approveShop = onCall<{ shopId: string }>(
       );
     }
 
+    // PR 42 — Wire the storefront photo from the KYC upload into the
+    // customer-facing `shop.imageUrl`. The storage path was captured
+    // during RegisterShop step 2 (PR 31, via `recordShopKycUpload`)
+    // and lives at `registrationData.kycDocs.storefront.storagePath`
+    // (NOT a separate `pendingData` collection — see comment in
+    // `approveShopHelpers.ts`). Pre-PR-42 the URL never landed on
+    // the doc and customers saw the 🏪 placeholder for every
+    // newly-registered shop (PR 41 hotfix).
+    //
+    // Long-expiry signed URL (10y) — non-sensitive shop branding
+    // displayed on every shop list render, no benefit from per-call
+    // rotation. Same `getStorage().bucket().file().getSignedUrl()`
+    // pattern as `getShopKycReadUrls` and `getMenuImageUploadUrl`.
+    //
+    // Non-fatal — if the storefront path is missing (legacy shop,
+    // RegisterShop client predating PR 42's mandatory gate) or the
+    // signing call rejects, we leave `imageUrl` empty and the
+    // approval still succeeds. The customer card falls back to the
+    // 🏪 placeholder; the shop owner can re-upload via
+    // WaitingForApproval and an admin can re-approve to refresh
+    // the URL.
+    let storefrontImageUrl: string | undefined;
+    const storefrontPath = pickStorefrontPath(shop);
+    if (storefrontPath) {
+      try {
+        // PR 42.0.1 — Firebase download-token URL pattern. Set a
+        // fresh `firebaseStorageDownloadTokens` metadata value on
+        // the file, then construct the permanent token URL. No
+        // expiry (unlike V4 signed URLs which cap at 7 days and
+        // broke the original PR 42 implementation).
+        const bucket = getStorage().bucket();
+        const file = bucket.file(storefrontPath);
+        const token = randomUUID();
+        await file.setMetadata({
+          metadata: { firebaseStorageDownloadTokens: token },
+        });
+        storefrontImageUrl = buildFirebaseStorageDownloadUrl(
+          bucket.name,
+          storefrontPath,
+          token,
+        );
+      } catch (e) {
+        // PR 42 followup (May 26 2026): the original PR 42 catch
+        // used `console.warn` with just the error, which was
+        // unsearchable in Cloud Logging when a real signing failure
+        // happened during the first pilot smoke test. Upgrade to
+        // `console.error` + structured fields so a log query like
+        // `severity=ERROR jsonPayload.event="approveShop.signing-failed"`
+        // surfaces the failure immediately. Still non-fatal —
+        // approval proceeds and the shop card falls back to 🏪.
+        console.error('[approveShop] storefront signed URL failed', {
+          event: 'approveShop.signing-failed',
+          shopId,
+          storefrontPath,
+          ownerUid: shop.ownerUid,
+          err: e instanceof Error ? e.message : String(e),
+          stack: e instanceof Error ? e.stack : undefined,
+        });
+        // Leave undefined → falls through to empty imageUrl below.
+        // The admin can recover via the `regenerateShopImageUrl`
+        // callable (PR 42 followup) which throws on signing failure
+        // rather than swallowing — that's the diagnostic path.
+      }
+    } else {
+      // PR 42 followup — make this branch visible too. If a shop
+      // gets approved with no storefront path we want to see WHY
+      // (legacy pre-PR-42 shop? client bypassed the mandatory
+      // gate?) rather than silently shipping with imageUrl: ''.
+      console.warn('[approveShop] storefront path missing on doc', {
+        event: 'approveShop.no-storefront-path',
+        shopId,
+        ownerUid: shop.ownerUid,
+      });
+    }
+
     const now = Date.now();
     await shopRef.update({
       status: 'active',
       approvedAt: now,
       approvedBy: auth.uid,
+      // PR 42 — only stamp imageUrl when we actually minted one.
+      // FieldValue.delete() would be wrong (it'd erase a re-approval's
+      // older URL on signing failure); skipping the field on failure
+      // preserves whatever was there before.
+      ...(storefrontImageUrl ? { imageUrl: storefrontImageUrl } : {}),
       updatedAt: FieldValue.serverTimestamp(),
     });
 
@@ -3841,6 +3953,144 @@ export const getMyDeliveryRequest = onCall(
 );
 
 // ────────────────────────────────────────────────────────────
+// PR 41 — Pending-approval counts for HomeScreen badges
+// ────────────────────────────────────────────────────────────
+//
+// Single callable that serves three different consumers in one round
+// trip, projecting onto whatever the caller's role/claims authorise:
+//   - Admin → `{ shopCount, deliveryCount }` (badges next to the
+//     "Pending Shop Approvals" + "Delivery requests" rows + screen
+//     headers).
+//   - Shop owner → `{ pendingOrderCount }` (badge next to "Shop
+//     Dashboard" row — "N orders need your attention").
+//   - Anyone else → all zeros. We deliberately do NOT throw
+//     permission-denied for plain customers because the badge UI
+//     polls this on every HomeScreen mount; a 403 in Sentry on
+//     every customer launch would be pure noise.
+//
+// Pure helpers (`projectPendingCounts`, `countPendingDocs`,
+// `capPendingCount`) live in `./pendingCountsHelpers.ts` so the
+// counting + projection logic is unit-testable without firebase-admin.
+// This file owns the Firestore IO.
+//
+// Cost shape: at most three Firestore queries per call (admin shop
+// queue + admin delivery queue + this-shop-owner pending orders),
+// each capped at 200 docs to bound read cost in pathological cases
+// (a runaway test fixture, a forgotten admin shift). The badge UI
+// caps display at "99+" anyway, so the hard cap is generous.
+export const getPendingApprovalCounts = onCall(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    if (!auth) {
+      // Unauthenticated callers are the only ones we 401 — every
+      // signed-in user can poll, even if every count comes back zero.
+      throw new HttpsError('unauthenticated', 'Sign in required');
+    }
+    const claims = (auth.token ?? {}) as {
+      admin?: unknown;
+      shopOwner?: unknown;
+      shopId?: unknown;
+    };
+    const isAdmin = claims.admin === true;
+    const isShopOwner = claims.shopOwner === true;
+    const shopId =
+      typeof claims.shopId === 'string' && claims.shopId.length > 0
+        ? (claims.shopId as string)
+        : undefined;
+
+    // Defaults — non-authorised buckets stay zero. `projectPendingCounts`
+    // belt-and-braces this projection at the end too, but skipping the
+    // Firestore query when we know the bucket will be zeroed saves a
+    // network round trip + a small amount of read quota.
+    let shopCount = 0;
+    let deliveryCount = 0;
+    let pendingOrderCount = 0;
+
+    if (isAdmin) {
+      try {
+        const [shopSnap, deliverySnap] = await Promise.all([
+          // Pending shop registrations live in the `shops` collection
+          // with `status === 'pending'` — same source `listPendingShops`
+          // reads from. No separate `pendingShopRequests` collection
+          // (PR 41 prompt was wrong on the name; mirrors the
+          // `deliveryRequests` correction baked into the prompt's own
+          // "Important corrections" section).
+          db
+            .collection('shops')
+            .where('status', '==', 'pending')
+            .limit(200)
+            .get(),
+          db
+            .collection('deliveryRequests')
+            .where('status', '==', 'pending')
+            .limit(200)
+            .get(),
+        ]);
+        shopCount = countPendingDocs(shopSnap.docs);
+        deliveryCount = countPendingDocs(deliverySnap.docs);
+      } catch (e) {
+        // Logged but not surfaced. A partial response is better than
+        // a hard failure that hides the OTHER bucket too.
+        console.warn('[getPendingApprovalCounts] admin queue read failed:', e);
+      }
+    }
+
+    if (isShopOwner && shopId) {
+      try {
+        // Filter shape — pinned to match ShopOwnerDashboardScreen's
+        // existing "Pending" stat card (computed client-side at
+        // `src/screens/shop/ShopOwnerDashboardScreen.tsx:195` as
+        // `o.status === 'pending'`). The OrderStatus state machine
+        // is `pending → accepted → preparing → ready_for_pickup →
+        // delivered` (`cancelled` terminal); only the `pending`
+        // state means "shop owner has not yet decided
+        // accept/reject" so it's the right "needs your initial
+        // attention" semantics for the badge. If a future PR
+        // broadens the badge to mean "needs ANY shop owner action"
+        // (e.g. include `accepted` so the badge prompts the move to
+        // `preparing`), this filter AND the dashboard stat MUST
+        // change together — otherwise the badge count would
+        // diverge from what the owner sees on tap-through.
+        //
+        // Single-shop scoping — Phase 12a constraint
+        // ("one shop per user", see the policy block at
+        // `mergeCustomClaims` upstream): `claims.shopId` is a
+        // single string, not an array. If a future PR opens up
+        // multi-shop ownership, the claim shape will change
+        // (probably `shopIds: string[]`) and this query needs to
+        // become a `where('shopId', 'in', shopIds)` plus per-shop
+        // count breakdown in the response. The hook + badge UI on
+        // HomeScreen would then aggregate or surface per-shop.
+        const orderSnap = await db
+          .collection('orders')
+          .where('shopId', '==', shopId)
+          .where('status', '==', 'pending')
+          .limit(200)
+          .get();
+        pendingOrderCount = countPendingDocs(orderSnap.docs);
+      } catch (e) {
+        console.warn(
+          '[getPendingApprovalCounts] shop-owner pending orders read failed:',
+          e,
+        );
+      }
+    }
+
+    const projected = projectPendingCounts(
+      { isAdmin, isShopOwner, shopId },
+      { shopCount, deliveryCount, pendingOrderCount },
+    );
+
+    return {
+      shopCount: capPendingCount(projected.shopCount),
+      deliveryCount: capPendingCount(projected.deliveryCount),
+      pendingOrderCount: capPendingCount(projected.pendingOrderCount),
+    };
+  },
+);
+
+// ────────────────────────────────────────────────────────────
 // Admin governance (Phase 12a-v2-i-bis)
 // ────────────────────────────────────────────────────────────
 //
@@ -4242,6 +4492,133 @@ export const unsuspendShop = onCall<{ shopId: string }>(
   },
 );
 
+// PR 42 followup (May 26 2026): `approveShop` swallows storefront
+// signing failures behind a try/catch so that a transient signing
+// outage doesn't block shop approval — admin can still mark the
+// shop active and customers see the 🏪 placeholder until recovery.
+// But the original PR 42 had no recovery path: once a shop was
+// approved with `imageUrl: ''`, `approveShop` refused to re-run
+// (failed-precondition: shop is active, not pending). This
+// callable IS that recovery path.
+//
+// Re-runs the storefront → signed URL → imageUrl write on an
+// active shop. Admin-only. Unlike `approveShop`'s silent catch,
+// THIS callable throws `internal` with the underlying error
+// message so the admin sees the actual cause (typically missing
+// `iam.serviceAccounts.signBlob` self-binding on the compute
+// service account — the classic Cloud Functions signing gotcha).
+//
+// Also useful when the storefront photo is re-uploaded
+// post-approval (a future flow): admin taps "Regenerate image"
+// to mint a fresh URL against the new path.
+export const regenerateShopImageUrl = onCall<{ shopId: string }>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+    if (auth.token?.admin !== true) {
+      throw new HttpsError('permission-denied', 'Admin role required');
+    }
+
+    const shopId = request.data?.shopId;
+    if (typeof shopId !== 'string' || shopId.length === 0) {
+      throw new HttpsError('invalid-argument', 'shopId required');
+    }
+
+    const shopRef = db.doc(`shops/${shopId}`);
+    const shopSnap = await shopRef.get();
+    if (!shopSnap.exists) {
+      throw new HttpsError('not-found', 'Shop not found');
+    }
+    const shop = shopSnap.data() as {
+      status?: string;
+      ownerUid?: string;
+      name?: string;
+      imageUrl?: string;
+      registrationData?: {
+        kycDocs?: {
+          storefront?: { storagePath?: unknown } | null;
+          [k: string]: unknown;
+        };
+      };
+    };
+
+    // Same path-extraction helper `approveShop` uses — guarantees
+    // both callables agree on what "the storefront photo" means.
+    const storefrontPath = pickStorefrontPath(shop);
+    if (!storefrontPath) {
+      throw new HttpsError(
+        'failed-precondition',
+        'Shop has no storefront photo uploaded. The owner must upload one via RegisterShop step 2 first.',
+      );
+    }
+
+    let storefrontImageUrl: string;
+    try {
+      // Same Firebase download-token pattern as approveShop. Each
+      // call mints a FRESH token, which invalidates any prior URL
+      // for the same file — useful as a kill-switch if a stale
+      // URL leaked. The new token is the only one returned in
+      // the metadata, so the old URL stops resolving once this
+      // setMetadata write lands.
+      const bucket = getStorage().bucket();
+      const file = bucket.file(storefrontPath);
+      const token = randomUUID();
+      await file.setMetadata({
+        metadata: { firebaseStorageDownloadTokens: token },
+      });
+      storefrontImageUrl = buildFirebaseStorageDownloadUrl(
+        bucket.name,
+        storefrontPath,
+        token,
+      );
+    } catch (e) {
+      // Surface the actual signing error to the admin caller —
+      // opposite posture from approveShop, which swallows. The
+      // admin needs to SEE the IAM / quota / bucket issue so it
+      // can be fixed at the platform layer.
+      const message =
+        e instanceof Error ? e.message : 'Unknown signing error';
+      console.error('[regenerateShopImageUrl] signing failed', {
+        event: 'regenerateShopImageUrl.signing-failed',
+        shopId,
+        storefrontPath,
+        err: message,
+        stack: e instanceof Error ? e.stack : undefined,
+      });
+      throw new HttpsError(
+        'internal',
+        `Failed to mint signed URL for storefront: ${message}. Check Cloud Run service account has iam.serviceAccounts.signBlob on itself.`,
+      );
+    }
+
+    await shopRef.update({
+      imageUrl: storefrontImageUrl,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    // PR 8 — audit log (non-fatal). Captures whether this was a
+    // first-time fix or a re-mint of an already-populated URL.
+    await writeAuditLog({
+      actorUid: auth.uid,
+      actorRole: 'admin',
+      actionType: 'shop.regenerate-image-url',
+      targetType: 'shop',
+      targetId: shopId,
+      targetSummary: shop.name,
+      metadata: {
+        ownerUid: shop.ownerUid ?? null,
+        priorImageUrlEmpty: !shop.imageUrl,
+        storefrontPath,
+      },
+    }).catch(e =>
+      console.warn('[regenerateShopImageUrl] writeAuditLog failed:', e),
+    );
+
+    return { ok: true, imageUrl: storefrontImageUrl };
+  },
+);
+
 // MVP: hard-coded 100-user cap; pagination tracked in checklist.
 export const listAllUsers = onCall(
   { cors: true, enforceAppCheck: false },
@@ -4253,8 +4630,47 @@ export const listAllUsers = onCall(
     }
 
     const result = await getAuth().listUsers(100);
+
+    // PR 42.1 — augment delivery users with rolling-rating stats
+    // from the `users/{uid}` Firestore mirror. Auth alone doesn't
+    // carry the rating (it lives on the Firestore doc, written by
+    // `submitOrderRating`'s multi-write transaction). We only
+    // fetch docs for users who actually have the delivery claim —
+    // saves up to ~95 reads per call at MVP scale (100 users, ~5
+    // delivery partners). Reads run in parallel.
+    const deliveryUsers = result.users.filter(
+      u =>
+        ((u.customClaims ?? {}) as Record<string, unknown>).delivery ===
+        true,
+    );
+    const ratingByUid = new Map<
+      string,
+      { deliveryRatingAvg?: number; deliveryRatingCount?: number }
+    >();
+    if (deliveryUsers.length > 0) {
+      const snaps = await Promise.all(
+        deliveryUsers.map(u => db.doc(`users/${u.uid}`).get()),
+      );
+      for (let i = 0; i < deliveryUsers.length; i++) {
+        const snap = snaps[i];
+        if (!snap.exists) continue;
+        const data = snap.data() as any;
+        ratingByUid.set(deliveryUsers[i].uid, {
+          deliveryRatingAvg:
+            typeof data?.deliveryRatingAvg === 'number'
+              ? data.deliveryRatingAvg
+              : undefined,
+          deliveryRatingCount:
+            typeof data?.deliveryRatingCount === 'number'
+              ? data.deliveryRatingCount
+              : undefined,
+        });
+      }
+    }
+
     return result.users.map(u => {
       const claims = (u.customClaims ?? {}) as Record<string, unknown>;
+      const rating = ratingByUid.get(u.uid);
       return {
         uid: u.uid,
         phoneNumber: u.phoneNumber ?? null,
@@ -4271,6 +4687,11 @@ export const listAllUsers = onCall(
         lastSignInAt: u.metadata.lastSignInTime
           ? new Date(u.metadata.lastSignInTime).getTime()
           : null,
+        // PR 42.1 — undefined for non-delivery users; undefined or
+        // populated for delivery users depending on whether the
+        // Firestore mirror has rating fields yet.
+        deliveryRatingAvg: rating?.deliveryRatingAvg,
+        deliveryRatingCount: rating?.deliveryRatingCount,
       };
     });
   },
@@ -5420,17 +5841,33 @@ export const toggleFavorite = onCall<{
 // this callable is the firebase-admin glue + audit-log emitter.
 export const submitOrderRating = onCall<{
   orderId: string;
-  stars: number;
+  // Legacy single-rating shape (PR 20). Still accepted during the
+  // OTA propagation window — a not-yet-updated client will send
+  // these. The server coerces them to a shop-only dual rating and
+  // writes the new schema (`shopRating` / `shopComment`).
+  stars?: number;
   comment?: string;
+  // PR 42.1 dual-rating shape. `shopRating` is required for the
+  // new path; `deliveryRating` is optional (customer skipped) and
+  // also auto-dropped if the order has no `deliveryPersonId`.
+  shopRating?: number;
+  shopComment?: string;
+  deliveryRating?: number;
+  deliveryComment?: string;
 }>(
   { cors: true, enforceAppCheck: false, region: 'asia-south1' },
   async request => {
     const auth = request.auth;
-    const { orderId, stars, comment } = (request.data ?? {}) as {
+    const data = (request.data ?? {}) as {
       orderId?: string;
       stars?: number;
       comment?: string;
+      shopRating?: number;
+      shopComment?: string;
+      deliveryRating?: number;
+      deliveryComment?: string;
     };
+    const { orderId } = data;
     if (typeof orderId !== 'string' || orderId.length === 0) {
       throw new HttpsError('invalid-argument', 'orderId required');
     }
@@ -5439,30 +5876,58 @@ export const submitOrderRating = onCall<{
     const orderSnap = await orderRef.get();
     const orderData = orderSnap.exists ? (orderSnap.data() as any) : null;
 
-    const check = validateRatingSubmission({
+    const check = validateDualRatingSubmission({
       auth: auth ? { uid: auth.uid } : null,
       order: orderData,
-      stars,
-      comment,
+      stars: data.stars,
+      comment: data.comment,
+      shopRating: data.shopRating,
+      shopComment: data.shopComment,
+      deliveryRating: data.deliveryRating,
+      deliveryComment: data.deliveryComment,
     });
     if (!check.ok) {
       throw new HttpsError(check.code, check.message);
     }
-    const { shopId, stars: validStars, comment: validComment } = check;
+    const {
+      shopId,
+      shopRating,
+      shopComment,
+      deliveryRating,
+      deliveryComment,
+      deliveryPersonId,
+      deliveryDropped,
+    } = check;
+
+    if (deliveryDropped === 'no-partner') {
+      // The customer rated delivery but the order never got picked
+      // up by a partner (rare edge — could happen if a future flow
+      // delivers without a deliveryPersonId stamped). Shop rating
+      // still persists; delivery dimension silently dropped. Ops
+      // visibility via warn log + audit metadata below.
+      console.warn(
+        '[submitOrderRating] delivery rating dropped (no-partner) for order',
+        orderId,
+      );
+    }
 
     const shopRef = db.doc(`shops/${shopId}`);
-    const now = Date.now();
+    const userRef = deliveryPersonId
+      ? db.doc(`users/${deliveryPersonId}`)
+      : null;
 
     await db.runTransaction(async tx => {
       // Re-read inside the transaction so a rapid double-submit
       // hits the prior-rating check on the second invocation
-      // rather than racing with the first write.
+      // rather than racing with the first write. Submit-once span
+      // mirrors the helper — either the legacy `rating` object OR
+      // the new `shopRating` field blocks re-submission.
       const orderInTx = await tx.get(orderRef);
       if (!orderInTx.exists) {
         throw new HttpsError('not-found', 'Order vanished mid-rating');
       }
       const orderTxData = orderInTx.data() as any;
-      if (orderTxData.rating) {
+      if (orderTxData.rating || orderTxData.shopRating) {
         throw new HttpsError(
           'failed-precondition',
           'This order has already been rated',
@@ -5471,40 +5936,83 @@ export const submitOrderRating = onCall<{
       const shopInTx = await tx.get(shopRef);
       const shopTxData = shopInTx.exists ? (shopInTx.data() as any) : {};
 
-      const { newAvg, newCount } = computeNewRollingAverage(
-        shopTxData.ratingAvg,
-        shopTxData.ratingCount,
-        validStars,
-      );
+      // PR 42.1.1 hotfix — Firestore transactions require ALL
+      // reads to precede ALL writes. The original PR 42.1 read
+      // the user doc AFTER `tx.update(orderRef)` + `tx.set(shopRef)`,
+      // which threw "Firestore transactions require all reads to
+      // be executed before all writes" the first time a customer
+      // submitted a dual rating with delivery on a delivered
+      // order. Fix: hoist the user read up here, alongside the
+      // order + shop reads, and gate it on the same
+      // (deliveryRating && userRef) condition the write uses.
+      let userTxData: any = null;
+      if (deliveryRating && userRef) {
+        const userInTx = await tx.get(userRef);
+        userTxData = userInTx.exists ? userInTx.data() : {};
+      }
 
-      // Build the rating payload conditionally — Firestore rejects
-      // explicit `undefined` field values, so omit comment when
-      // absent rather than setting it to undefined.
-      const ratingPayload: Record<string, unknown> = {
-        stars: validStars,
-        ratedAt: now,
-      };
-      if (validComment) ratingPayload.comment = validComment;
+      const { newAvg: shopAvg, newCount: shopCount } =
+        computeNewRollingAverage(
+          shopTxData.ratingAvg,
+          shopTxData.ratingCount,
+          shopRating,
+        );
 
-      tx.update(orderRef, {
-        rating: ratingPayload,
+      // PR 42.1 multi-write: order doc + shop doc + (optional)
+      // user doc. The new flat schema replaces PR 20's nested
+      // `rating: { stars, comment, ratedAt }` — write only the
+      // fields that have values (Firestore rejects explicit
+      // `undefined` in update payloads). We do NOT write the
+      // legacy `rating` field at all on new submissions; the
+      // historical legacy field remains untouched on pre-PR-42.1
+      // orders and is read-only.
+      const orderPayload: Record<string, unknown> = {
+        shopRating,
         updatedAt: FieldValue.serverTimestamp(),
-      });
+      };
+      if (shopComment) orderPayload.shopComment = shopComment;
+      if (deliveryRating) orderPayload.deliveryRating = deliveryRating;
+      if (deliveryComment) orderPayload.deliveryComment = deliveryComment;
+
+      tx.update(orderRef, orderPayload);
       tx.set(
         shopRef,
         {
-          ratingAvg: newAvg,
-          ratingCount: newCount,
+          ratingAvg: shopAvg,
+          ratingCount: shopCount,
           updatedAt: FieldValue.serverTimestamp(),
         },
         { merge: true },
       );
+
+      // Delivery partner rolling average — only if the helper
+      // produced both a delivery rating AND a deliveryPersonId.
+      // The user doc is created via `merge: true` so a brand-new
+      // delivery partner (no prior `users/{uid}` doc, or one
+      // without delivery rating fields) gets initialized
+      // correctly without overwriting other fields the doc may
+      // hold (isDelivery mirror, fcmTokens, etc.).
+      if (deliveryRating && userRef) {
+        const { newAvg: dAvg, newCount: dCount } = computeNewRollingAverage(
+          userTxData?.deliveryRatingAvg,
+          userTxData?.deliveryRatingCount,
+          deliveryRating,
+        );
+        tx.set(
+          userRef,
+          {
+            deliveryRatingAvg: dAvg,
+            deliveryRatingCount: dCount,
+          },
+          { merge: true },
+        );
+      }
     });
 
-    // Audit log (non-fatal — PR 8 wrapper pattern; a failed audit
-    // write must not break the user-visible action that triggered
-    // it). hasComment lets ops query "ratings with comments" without
-    // exposing the comment text in the audit doc.
+    // Audit log (non-fatal — PR 8 wrapper pattern). `hasShopComment`
+    // / `hasDeliveryComment` let ops query "ratings with comments"
+    // per dimension without exposing the comment text.
+    // `deliveryDropped` captures the no-partner edge for diagnosis.
     await writeAuditLog({
       actorUid: auth!.uid,
       actorRole: 'customer',
@@ -5513,14 +6021,24 @@ export const submitOrderRating = onCall<{
       targetId: orderId,
       metadata: {
         shopId,
-        stars: validStars,
-        hasComment: !!validComment,
+        shopRating,
+        hasShopComment: !!shopComment,
+        deliveryRating: deliveryRating ?? null,
+        hasDeliveryComment: !!deliveryComment,
+        deliveryPersonId: deliveryPersonId ?? null,
+        deliveryDropped: deliveryDropped ?? null,
       },
     }).catch(e =>
       console.warn('[submitOrderRating] writeAuditLog failed:', e),
     );
 
-    return { ok: true, stars: validStars, comment: validComment };
+    return {
+      ok: true,
+      shopRating,
+      shopComment,
+      deliveryRating: deliveryRating ?? null,
+      deliveryComment: deliveryComment ?? null,
+    };
   },
 );
 

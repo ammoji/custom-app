@@ -113,9 +113,16 @@ export default function OrderDetailScreen() {
   // `order.rating` field and both code paths render the same
   // confirmation. Hoisted here above the screen's early returns,
   // mirroring the PR 7 / PR 17 / PR 19 lineage in this file.
+  // PR 42.1 — optimistic state extended to capture BOTH dimensions
+  // (shop required, delivery optional) so the post-rating panel can
+  // render the full dual-rating summary without waiting for the
+  // watcher tick. Legacy single-rating orders (pre-PR-42.1) read
+  // from `order.rating.stars` instead — handled in the JSX below.
   const [optimisticRating, setOptimisticRating] = useState<{
-    stars: number;
-    comment?: string;
+    shopRating: 1 | 2 | 3 | 4 | 5;
+    shopComment?: string;
+    deliveryRating?: 1 | 2 | 3 | 4 | 5;
+    deliveryComment?: string;
   } | null>(null);
 
   // PR 19 fix — the cancel countdown ("Cancel order (1:32 left)")
@@ -643,33 +650,81 @@ export default function OrderDetailScreen() {
             eventual canonical write doesn't visually flicker. */}
         {order.status === 'delivered' &&
           !order.rating &&
+          !order.shopRating &&
           !optimisticRating && (
             <View style={styles.rateCardWrap}>
               <RateOrderCard
                 orderId={order.id}
-                onRated={(stars, comment) =>
-                  setOptimisticRating({ stars, comment })
+                // PR 42.1 — only render the delivery section when a
+                // partner actually exists on the order. Defensive
+                // truthy check (string presence) so the empty-string
+                // edge from older write paths doesn't surface a
+                // pointless delivery section.
+                hasDeliveryPartner={
+                  typeof order.deliveryPersonId === 'string' &&
+                  order.deliveryPersonId.length > 0
                 }
+                onRated={payload => setOptimisticRating(payload)}
               />
             </View>
           )}
         {order.status === 'delivered' &&
-          (order.rating || optimisticRating) &&
+          (order.rating || order.shopRating || optimisticRating) &&
           (() => {
-            const stars =
-              order.rating?.stars ?? optimisticRating?.stars ?? 0;
-            const comment =
-              order.rating?.comment ?? optimisticRating?.comment;
+            // PR 42.1 — three render paths converge on the same
+            // panel:
+            //   1. New dual rating from server (`order.shopRating`)
+            //   2. Optimistic dual rating (just-submitted, watcher
+            //      not yet ticked)
+            //   3. Legacy single rating (`order.rating.stars`) for
+            //      pre-PR-42.1 orders — read-only historical.
+            // The variables below pick whichever source has data.
+            const shopStars =
+              order.shopRating ??
+              optimisticRating?.shopRating ??
+              order.rating?.stars ??
+              0;
+            const shopComment =
+              order.shopComment ??
+              optimisticRating?.shopComment ??
+              order.rating?.comment;
+            const deliveryStars =
+              order.deliveryRating ?? optimisticRating?.deliveryRating;
+            const deliveryComment =
+              order.deliveryComment ?? optimisticRating?.deliveryComment;
             return (
               <View style={styles.ratedCard}>
                 <Text style={styles.ratedTitle}>Thanks for rating!</Text>
+                {/* Shop dimension — always present (either the new
+                    flat field, optimistic, or legacy nested). */}
+                <Text style={styles.ratedSubtitle}>You rated the shop</Text>
                 <Text style={styles.ratedStars}>
-                  {'★'.repeat(stars)}
-                  {'☆'.repeat(5 - stars)}
+                  {'★'.repeat(shopStars)}
+                  {'☆'.repeat(5 - shopStars)}
                 </Text>
-                {comment && (
-                  <Text style={styles.ratedComment}>"{comment}"</Text>
+                {shopComment && (
+                  <Text style={styles.ratedComment}>"{shopComment}"</Text>
                 )}
+                {/* Delivery dimension — only when the customer
+                    actually rated it. Legacy single-rating orders
+                    never have this; new dual orders may have it
+                    if the customer didn't skip. */}
+                {deliveryStars && deliveryStars > 0 ? (
+                  <View style={styles.ratedDeliveryBlock}>
+                    <Text style={styles.ratedSubtitle}>
+                      You rated your delivery
+                    </Text>
+                    <Text style={styles.ratedStars}>
+                      {'★'.repeat(deliveryStars)}
+                      {'☆'.repeat(5 - deliveryStars)}
+                    </Text>
+                    {deliveryComment && (
+                      <Text style={styles.ratedComment}>
+                        "{deliveryComment}"
+                      </Text>
+                    )}
+                  </View>
+                ) : null}
               </View>
             );
           })()}
@@ -980,6 +1035,19 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
     marginTop: spacing.xs,
     textAlign: 'center',
+  },
+  // PR 42.1 — dual-rating panel additions. Subtitle precedes each
+  // star row to distinguish shop vs. delivery; the delivery block
+  // sits below the shop block with extra top spacing so the two
+  // ratings read as related but separate.
+  ratedSubtitle: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    marginTop: spacing.xs,
+  },
+  ratedDeliveryBlock: {
+    marginTop: spacing.md,
+    alignItems: 'center',
   },
   // PR 21 — customer-side read-only confirmation card. Subdued
   // styling (surface bg, no accent) — this is a confirmation of

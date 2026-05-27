@@ -10,6 +10,10 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import AuthBootstrap from "./src/components/AuthBootstrap";
 import ErrorBoundary from "./src/components/ErrorBoundary";
 import AppNavigator from "./src/navigation/AppNavigator";
+// PR 41 — module-level navigation ref so the push-notification
+// response handler in AuthBootstrap can deeplink to admin detail
+// screens without needing a React tree position.
+import { navigationRef } from "./src/navigation/navigationRef";
 import "./src/services/firebase";
 
 function App() {
@@ -17,7 +21,7 @@ function App() {
     <ErrorBoundary>
       <SafeAreaProvider>
         <AuthBootstrap />
-        <NavigationContainer>
+        <NavigationContainer ref={navigationRef}>
           <StatusBar style="dark" />
           <AppNavigator />
         </NavigationContainer>

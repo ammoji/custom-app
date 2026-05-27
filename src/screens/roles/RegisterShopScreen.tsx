@@ -56,7 +56,11 @@ const initialSlotState: KycSlotState = {
 };
 
 const KYC_LABELS: Record<ShopKycDocKind, string> = {
-  storefront: 'Storefront photo',
+  // PR 42 — storefront is now MANDATORY. The "(required)" suffix
+  // mirrors the `Finish & wait for approval` gate below; the other
+  // three slots remain admin-discretion (free-text GST/FSSAI numbers
+  // are an acceptable substitute at MVP scale).
+  storefront: 'Storefront photo (required)',
   gstDoc: 'GST certificate',
   fssaiDoc: 'FSSAI license',
   ownerIdDoc: 'Owner ID (Aadhaar/PAN)',
@@ -267,6 +271,19 @@ export default function RegisterShopScreen() {
   // + whatever docs were uploaded). Routes to WaitingForApproval.
   const handleFinish = () => {
     if (!submittedShopId) return;
+    // PR 42 — storefront photo is mandatory. The customer-facing
+    // shop card uses this image (signed-URL'd into shop.imageUrl by
+    // approveShop); without it the card shows a 🏪 placeholder which
+    // hurts Trust Principle 1 (visual quality). We gate at finish
+    // time rather than per-slot because step 2 also lets the user
+    // set up the other three docs in any order.
+    if (!storefront.storagePath) {
+      Alert.alert(
+        'Storefront photo required',
+        'Please upload a photo of your storefront before submitting. This will be your shop\'s main image in the app.',
+      );
+      return;
+    }
     nav.reset({
       index: 1,
       routes: [
@@ -648,10 +665,11 @@ export default function RegisterShopScreen() {
             <>
               <Text style={styles.intro}>
                 Help us verify your shop is genuine. The storefront photo
-                appears on your shop card and is highly recommended;
-                the rest help admin confirm your registration is real.
-                All four are optional — you can add or replace any of
-                them while your shop is pending review.
+                is required — it becomes your shop's main image on the
+                customer app. The other three documents are optional but
+                help admin confirm your registration is real; you can
+                add or replace any of them while your shop is pending
+                review.
               </Text>
 
               <KycSlotCard
@@ -684,6 +702,12 @@ export default function RegisterShopScreen() {
                   title="Finish & wait for approval"
                   onPress={handleFinish}
                   size="lg"
+                  // PR 42 — disable until storefront upload completes.
+                  // The handleFinish gate above also alerts if a tap
+                  // somehow reaches it without a storefront (defence
+                  // in depth — disabled state can race with the
+                  // upload's `setStorefront` write).
+                  disabled={!storefront.storagePath || storefront.uploading}
                 />
               </View>
 

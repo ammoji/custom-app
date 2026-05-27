@@ -103,6 +103,19 @@ export type UserInfo = {
   isDelivery: boolean;
   createdAt: number | null;
   lastSignInAt: number | null;
+  // PR 42.1 — rolling delivery partner rating, populated by
+  // `submitOrderRating`'s multi-write transaction when a customer
+  // rates the delivery dimension of a delivered order. Only
+  // meaningful for users with `isDelivery === true`; the
+  // `listAllUsers` callable projects these off `users/{uid}` and
+  // they remain `undefined` for non-delivery users (admins,
+  // customers, shop owners).
+  //
+  // Undefined / 0 means "no ratings yet" — UserDetailScreen
+  // suppresses the row in that case so a brand-new delivery
+  // partner doesn't surface a misleading "0★" badge.
+  deliveryRatingAvg?: number;
+  deliveryRatingCount?: number;
 };
 
 export type Product = {
@@ -387,7 +400,38 @@ export type Order = {
   // Missing field means "not yet rated"; OrderDetailScreen renders
   // the prompt card while this is undefined and flips to a
   // "Thanks for rating!" card once present.
+  //
+  // PR 42.1 — this legacy nested object is now READ-ONLY historical
+  // for orders rated before PR 42.1 shipped. New ratings write
+  // exclusively to the flat `shopRating` / `deliveryRating` fields
+  // below (single source of truth: server `submitOrderRating`
+  // always writes the new schema regardless of input shape). The
+  // server's already-rated check spans BOTH `rating` (legacy) and
+  // `shopRating` (new) so submit-once works across the cutover.
   rating?: OrderRating;
+
+  // PR 42.1 — separate shop + delivery partner ratings. Flat
+  // fields rather than nested objects (intentional break with the
+  // PR 20 `rating: OrderRating` nesting): the dual-rating UI sets
+  // them independently and the Firestore writes target each field
+  // individually inside the multi-write transaction, so the flat
+  // shape removes one level of indirection. `ratedAt` becomes
+  // `updatedAt` on the order doc (already maintained) — we don't
+  // duplicate the timestamp per dimension.
+  //
+  // `shopRating` is REQUIRED for any new rating submission; the
+  // server rejects a submission that has only `deliveryRating`.
+  shopRating?: 1 | 2 | 3 | 4 | 5;
+  shopComment?: string;
+
+  // `deliveryRating` is optional even on dual-submit — if the
+  // customer didn't see the delivery partner (gate-handoff, e.g.)
+  // they may legitimately skip this dimension. Also auto-dropped
+  // server-side if the order has no `deliveryPersonId` (the
+  // shop rating still goes through; we log a warning rather than
+  // failing the whole submission).
+  deliveryRating?: 1 | 2 | 3 | 4 | 5;
+  deliveryComment?: string;
   // PR 21 — customer's substitution preference. Captured ONCE at
   // checkout. Tells the shop how to handle an item that turns out
   // to be unavailable mid-fulfillment without a call interrupting

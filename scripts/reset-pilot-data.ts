@@ -629,6 +629,31 @@ async function main(): Promise<number> {
     audit,
   );
 
+  // Phase D.1 — Clear admin's favorites field too. The original
+  // design preserved admin's entire profile across resets, but
+  // `favorites` is dev-noise (shop keys pointing at shops that
+  // the reset just wiped). Surfaces as a stale count on
+  // HomeScreen → empty list on FavoritesScreen. Clearing it
+  // here keeps the admin's role + auth + addresses intact while
+  // dropping the stale favorites map.
+  if (flags.execute) {
+    console.log(`[D.1] Admin favorites cleanup`);
+    try {
+      await db.doc(`users/${adminUid}`).update({
+        favorites: FieldValue.delete(),
+      });
+      console.log(`  cleared favorites on admin/${adminUid} ✓`);
+    } catch (e) {
+      audit.errors.push({
+        phase: 'admin-favorites-cleanup',
+        message: `${adminUid}: ${(e as Error).message}`,
+      });
+      console.log(
+        `  ${C.red}admin favorites cleanup FAILED — ${(e as Error).message}${C.reset}`,
+      );
+    }
+  }
+
   // 9. Summary + audit log.
   audit.finishedAt = new Date().toISOString();
   const logPath = writeAuditLog(audit);

@@ -309,4 +309,26 @@ export const Analytics = {
     role: 'admin' | 'shop_owner' | 'delivery';
   }) => track('admin_user_role_set', params),
   admin_signed_in: () => track('admin_signed_in', {}),
+
+  // PR 41 — admin pending-approval badge funnel.
+  //
+  // `admin_pending_badge_tapped` fires when the admin (or shop owner)
+  // taps a HomeScreen row whose badge currently shows a non-zero
+  // count — gives us a durable signal that "the badge prompted the
+  // admin to act" vs. "the admin opened the queue on their own
+  // schedule". `kind` distinguishes which badge; `count` is the
+  // value displayed at tap time.
+  //
+  // `admin_pending_notification_tapped` fires when the admin opens
+  // the app via a push notification tap (see AuthBootstrap.tsx
+  // notification response handler). Independent surface from the
+  // badge tap; both can fire per session.
+  admin_pending_badge_tapped: (params: {
+    kind: 'shop' | 'delivery' | 'shop_owner_orders';
+    count: number;
+  }) => track('admin_pending_badge_tapped', params),
+  admin_pending_notification_tapped: (params: {
+    type: 'shop_pending_approval' | 'delivery_request_pending';
+    target_id: string;
+  }) => track('admin_pending_notification_tapped', params),
 };
