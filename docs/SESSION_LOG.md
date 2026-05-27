@@ -1904,3 +1904,106 @@ deferred (9). Build 17 + Android build (6) both live. Net for
 the night = significant pilot-readiness progress, also a
 strong reminder that smoke testing one shop with real testers
 catches real bugs that unit tests don't.
+
+## 2026-05-27 — PRs 41–45.2 shipped; push notification root-cause-and-fix; pilot-ready dev side
+
+Marathon continuation of the May 26 session. Offshore testing
+team smoke-tested build 17; this session worked through their
+findings + a multi-day push-notification outage.
+
+**PRs shipped via OTA (no native rebuild after build 17):**
+- PR 41 — admin pending-approval badges + shop-owner dashboard
+  badge. Windsurf pushed back on my prompt's extra triggers
+  (kept existing in-callable pushToAdmins, dropped the new
+  triggers) — cleaner. Also caught a 4th schema-name error in my
+  prompt (pending shops live in `shops` with status==='pending',
+  not a separate collection).
+- PR 42 — storefront photo wiring (KYC → shop.imageUrl) +
+  mandatory storefront in RegisterShop. Windsurf corrected the
+  doc path (registrationData.kycDocs.storefront.storagePath).
+- PR 42.0.1 — regenerateShopImageUrl admin callable.
+- PR 42.0.2 — storefront URLs switched v4-signed → Firebase
+  download tokens. Root cause of the storefront-photo-never-shows
+  bug: v4 signed URLs cap at 7 days; PR 42's 10-year expiry threw
+  silently in approveShop's non-fatal catch. Lesson →
+  deploy-discipline.md "GCS v4 signed-URL 7-day expiry cap."
+- PR 42.1 — separate shop + delivery ratings.
+- PR 42.1.1 — Firestore reads-before-writes fix (dual-rating
+  500'd because a gated tx.get ran after writes). Lesson →
+  code-discipline Rule 10.
+- PR 43 — ETA hidden until shop accepts (Option A) + KYC
+  mandatory (GST hard-required per CGST Section 24, Identity
+  Proof = Aadhaar OR PAN via existing single ownerIdDoc slot —
+  Windsurf kept the single slot rather than schema-expanding).
+- PR 43.1 — keyboard-avoidance hotfix on RateOrderCard.
+- PR 45 / 45.1 / 45.2 — push reliability + observability + the
+  anonymous-user root cause (below).
+
+**The push notification saga (the headline of this session):**
+Push silently broke between build 15 and 17. Multi-step
+diagnosis ruled out, from the outside: APN key (present), App ID
+push capability (enabled), iOS permission (granted), Cloud Run
+IAM (present), the closure-gate retry bug (clean force-quit
+still empty). PR 45 added instrumentation but had a blind spot —
+captures only on FAILURE branches; the success path emitted only
+breadcrumbs (which don't create Sentry issues). So the actual
+failure mode produced zero Sentry signal. PR 45.1 added
+success-path captureMessage milestones. The probes immediately
+revealed the root cause: `bootstrap: reached push branch
+{ isAnonymous: true, uidPrefix: Lb5D6Ske }` — the token was
+registering for Firebase's anonymous launch session, the
+session-wide boolean gate latched, and the real user (signing in
+moments later) was short-circuited. PR 45.2 made the gate
+identity-aware: skip anonymous users, re-register when the uid
+changes, track lastRegisteredUid instead of a boolean.
+Confirmed working on two physical devices (customer + shop owner,
+separate phones). Lesson → code-discipline Rule 11.
+
+**Key testing-methodology insight:** push is inherently
+two-device. On a single device switching accounts, PR 24's
+unregisterPushToken removes the token on sign-out, so the
+customer (who placed the order) has no live token when the shop
+accepts — the push has nowhere to land. Solo testing always
+looks broken; the real pilot (customer + shopkeeper on separate
+phones) works. Confirmed.
+
+**Push pipeline test coverage:** went from ZERO (only
+authService.signOut.test.ts mocking pushService) to
+comprehensive — pushService branches, the pure
+pushRegistrationOrchestrator (incl. the anonymous-skip + uid-
+change regression tests that pin this exact bug), and server
+pushHelpers (validatePushTokenInput + buildOrderStatusPushPlan).
+Suite 782 → 825. This directly serves Sudhir's stated directive:
+"more test coverage = faster, more reliable manual testing."
+
+**Cloud Run allUsers IAM gotcha — now hit 4× total.** Recurring:
+something in the GCP project strips the allUsers/run.invoker
+binding from callables, causing silent 401s. The bulk-audit
+PowerShell one-liner finds all affected callables; the fix is one
+add-iam-policy-binding per service. Every callable-touching PR now
+carries a mandatory post-deploy IAM verification step.
+
+**Doc trail (this entry's batch):**
+- code-discipline.md — Rule 10 (Firestore reads-before-writes),
+  Rule 11 (register-once gates keyed to identity not a boolean).
+- deploy-discipline.md — GCS v4 signed-URL 7-day cap + the
+  download-token alternative.
+- CLAUDE.md — current state rewritten for the PR 41–45.2 batch +
+  push fix + the two deferred follow-ups.
+
+**Deferred / queued (non-blocking):**
+- Strip PR 45.1 diagnostic probes (cleanup OTA, no rush).
+- RNFB namespaced → modular API migration (deprecation noise,
+  before RNFB v22).
+- PR 39.2 (reset-pilot-data live-pilot guard) — prompt drafted,
+  not executed.
+- PR 44 (real category photos) — needs 10 Pexels PNGs sourced.
+- PR 42.1.2 (admin order-comment surfacing — delivery comments
+  stored but not displayed).
+
+**Pilot-readiness:** dev side is effectively done. HamaraSetu
+brand + logo live, Android build unblocked, push working,
+storefront photos working, ratings split, KYC enforced, ETA
+honest. Remaining is non-code: source category photos, onboard
+the first real shop in person, print QR posters, run the
+PILOT_LAUNCH_CHECKLIST (not yet drafted — next session candidate).

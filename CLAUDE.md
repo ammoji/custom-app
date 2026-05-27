@@ -191,7 +191,79 @@ file (currently PR 23 is the most recent), `docs/pr-N-<slug>-windsurf-prompt.md`
 6. Ask Sudhir what he wants to work on. Don't assume — even if context
    suggests an obvious next step, confirm before doing anything destructive.
 
-## Current state — 2026-05-26 evening (build 17 live on TestFlight; Android build 6 unblocked; 4 smoke-test bugs hotfixed)
+## Current state — 2026-05-27 (PRs 41–45.2 shipped via OTA; push notifications fixed + confirmed; pilot-ready dev side)
+
+**Push notifications fixed + confirmed working (two-device test).**
+The multi-day push outage is resolved. Root cause (found via PR
+45.1 diagnostic probes): the push-registration gate latched a
+session-wide boolean on the FIRST user, and Firebase's anonymous
+launch session (`signInAnonymouslyIfNeeded`) won the race —
+registering the device token to the throwaway anonymous user and
+short-circuiting the real user who signed in moments later. The
+real account's `fcmTokens` stayed empty → no order pushes. PR 45.2
+made the gate identity-aware (skip anonymous users, re-register on
+uid change). Confirmed delivering on two physical devices
+(customer + shop owner). Lesson logged as code-discipline Rule 11.
+**Push is inherently two-device — cannot be observed on one device
+switching roles** (PR 24 unregisters the token on sign-out), so
+solo testing always looked broken; real pilot (separate phones)
+works.
+
+**Everything PR 41 → 45.2 shipped via OTA this session** (no
+native rebuild needed after build 17):
+- **PR 41** — admin pending-approval badges + shop-owner dashboard
+  badge + getPendingApprovalCounts callable. (Triggers dropped per
+  scope decision; reused existing in-callable pushToAdmins.)
+- **PR 42** — storefront photo wired from KYC → shop.imageUrl;
+  storefront mandatory in RegisterShop.
+- **PR 42.0.1** — regenerateShopImageUrl admin callable (manual
+  refresh for already-approved shops).
+- **PR 42.0.2** — switched storefront URLs from v4 signed URLs to
+  Firebase download tokens (v4 has a hard 7-day expiry cap; the
+  10-year expiry from PR 42's prompt threw silently). Lesson in
+  deploy-discipline.md.
+- **PR 42.1** — separate shop + delivery partner ratings.
+- **PR 42.1.1** — Firestore reads-before-writes fix in
+  submitOrderRating (dual-rating 500'd). Lesson = code-discipline
+  Rule 10.
+- **PR 43** — ETA hidden until shop accepts (Issue 6, Option A) +
+  KYC mandatory enforcement (GST + Identity Proof hard-required).
+- **PR 43.1** — keyboard-avoidance hotfix on RateOrderCard input.
+- **PR 45 / 45.1 / 45.2** — push reliability, observability
+  (Sentry instrumentation), + the anonymous-user fix. Push pipeline
+  went from ZERO tests to comprehensive coverage (orchestrator,
+  pushService, pushHelpers); suite 782 → 825.
+- **Earlier OTA hotfixes** — ShopList Zustand infinite-loop
+  (Rule 8), ShopCard imageUrl empty-string guard (Rule 9).
+
+**Cloud Run `allUsers` IAM gotcha hit 4× this session**
+(`listPendingDeliveryRequests`, `getPendingApprovalCounts`, etc.).
+Something in the GCP project periodically strips the
+`allUsers`/`roles/run.invoker` binding from callables → silent
+401s. Bulk-audit one-liner + fix command in deploy-discipline.md.
+Every PR touching callables now includes a post-deploy IAM
+verification step.
+
+**reset-pilot-data enhanced** — now also clears the admin's
+`favorites` field (Phase D.1) so the stale-favorites-count bug
+doesn't recur on the admin account after a reset.
+
+**Two follow-ups deferred (non-blocking):**
+- Strip the `PR 45.1 DIAGNOSTIC PROBE` Sentry milestones (cleanup
+  OTA once comfortable — harmless but noisy).
+- Migrate RNFB namespaced API (`firebase.app().functions()`,
+  `httpsCallable`) → modular API before RNFB v22 forces it. Pure
+  deprecation noise today.
+
+**Queued PR prompts not yet executed:** PR 39.2 (reset-pilot-data
+live-pilot guard), PR 44 (real category photos — needs Sudhir to
+source 10 Pexels PNGs first), PR 42.1.2 (admin order-comment
+surfacing — delivery comments are stored but not yet displayed
+anywhere).
+
+---
+
+## Prior state — 2026-05-26 evening (build 17 live on TestFlight; Android build 6 unblocked; 4 smoke-test bugs hotfixed)
 
 **Pilot strategy locked to 1-shop start.** Sudhir's call: settle
 shop #1 to ~30-50 successful orders + 1 quiet week + 1 real

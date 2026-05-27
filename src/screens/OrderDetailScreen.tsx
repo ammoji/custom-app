@@ -17,6 +17,7 @@ import type { Order, Shop } from '../types';
 import { usePressGuard } from '../hooks/usePressGuard';
 import { formatOrderTime, formatRupees } from '../utils/format';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
+import { orderEtaDisplay } from '../utils/orderEtaDisplay';
 import { openRazorpayCheckout } from '../utils/razorpay';
 
 const showAlert = (title: string, message: string) => {
@@ -273,7 +274,13 @@ export default function OrderDetailScreen() {
     );
   }
 
-  const minutesLeft = Math.max(0, Math.round((order.estimatedDeliveryAt - Date.now()) / 60_000));
+  // PR 43 — single source of truth for the customer ETA copy.
+  // Replaces the inline `minutesLeft` + nested-ternary block at the
+  // status card below. The helper hides the pre-acceptance minute
+  // count entirely (status === 'pending' → 'awaiting_confirmation')
+  // so the customer doesn't anchor expectation on a number the
+  // shop hasn't committed to yet.
+  const etaDisplay = orderEtaDisplay(order, nowMs);
 
   // PR 7 — eligibility for the in-window cancel button. Mirrors the
   // server's canCustomerCancelPaidOrder rules (kept in sync; server
@@ -305,6 +312,21 @@ export default function OrderDetailScreen() {
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
         }
+        // PR 43.1 hotfix — RateOrderCard's TextInput at the bottom of
+        // OrderDetailScreen was being covered by the iOS keyboard
+        // (especially the delivery feedback box, which sits second on
+        // the screen). `automaticallyAdjustKeyboardInsets` is iOS
+        // 14+'s native solution: the ScrollView automatically adds
+        // bottom inset equal to the keyboard height when an input
+        // becomes focused, so the focused field scrolls into view.
+        // Android relies on `adjustResize` (Expo's default) which
+        // handles the same case without an explicit prop.
+        // `keyboardShouldPersistTaps="handled"` lets buttons (e.g. the
+        // star pickers, Submit) be tappable even while keyboard is
+        // open — without this, the first tap just dismisses the
+        // keyboard and the action requires a second tap.
+        automaticallyAdjustKeyboardInsets={true}
+        keyboardShouldPersistTaps="handled"
       >
         {/* Status header */}
         <View style={styles.statusCard}>
@@ -317,40 +339,51 @@ export default function OrderDetailScreen() {
             <Text style={styles.orderId}>{order.id}</Text>
           </View>
           <Text style={styles.placedAt}>Placed {formatOrderTime(order.createdAt)}</Text>
-          {/* PR 12 — ETA copy varies by status:
-              - accepted / preparing with readyByEstimate: surface
-                the shopkeeper's "Ready by HH:MM" so the customer
-                sees the same time the shop committed to.
-              - other in-flight states (incl. ready_for_pickup):
-                fall back to the existing minutes-left estimate.
-              - delivered / cancelled: hidden. */}
-          {order.status !== 'delivered' &&
-            order.status !== 'cancelled' &&
-            (order.readyByEstimate &&
-            (order.status === 'accepted' || order.status === 'preparing') ? (
-              // PR 36.1 — two-line countdown + absolute time.
-              // Eliminates the "when's 7:30 vs now?" mental-math
-              // every customer hits when checking on their order.
-              // The relative line ticks once per minute via the
-              // existing nowMs interval (PR 7); no new timer.
-              <View style={styles.pickupRow}>
-                <Text style={styles.pickupPrimary}>
-                  {formatRelativeTime(
-                    order.readyByEstimate,
-                    nowMs,
-                    { label: 'Pickup ready' },
-                  ).primary}
-                </Text>
-                <Text style={styles.pickupSecondary}>
-                  by {formatOrderTime(order.readyByEstimate)} · delivery
-                  partner brings it to you
-                </Text>
-              </View>
-            ) : (
-              minutesLeft > 0 && (
-                <Text style={styles.eta}>Arriving in ~{minutesLeft} min</Text>
-              )
-            ))}
+          {/* PR 12 → PR 36.1 → PR 43 — customer-facing ETA copy
+              varies by status:
+              - pending: hide minute count, show "Awaiting shop
+                confirmation" (PR 43 — anchors customer expectation
+                only after shop commits, not on shop.etaMinutes).
+              - accepted / preparing / ready_for_pickup with
+                readyByEstimate: PR 36.1 two-line countdown.
+              - accepted+ without readyByEstimate (legacy /
+                defensive): legacy "Arriving in ~N min" fallback.
+              - delivered / cancelled: hidden.
+              State machine logic centralised in
+              `src/utils/orderEtaDisplay.ts`. */}
+          {etaDisplay.kind === 'awaiting_confirmation' && (
+            <View style={styles.pickupRow}>
+              <Text style={styles.pickupPrimary}>
+                Awaiting shop confirmation
+              </Text>
+              <Text style={styles.pickupSecondary}>
+                {order.shopName ?? 'The shop'} will confirm shortly
+              </Text>
+            </View>
+          )}
+          {etaDisplay.kind === 'ready_by' && (
+            <View style={styles.pickupRow}>
+              <Text style={styles.pickupPrimary}>
+                {formatRelativeTime(
+                  etaDisplay.readyByEstimate,
+                  nowMs,
+                  { label: 'Pickup ready' },
+                ).primary}
+              </Text>
+              <Text style={styles.pickupSecondary}>
+                by {formatOrderTime(etaDisplay.readyByEstimate)} · delivery
+                partner brings it to you
+              </Text>
+            </View>
+          )}
+          {etaDisplay.kind === 'eta_fallback' && (
+            <Text style={styles.eta}>
+              Arriving in ~{etaDisplay.minutesLeft} min
+            </Text>
+          )}
+          {etaDisplay.kind === 'arriving_soon' && (
+            <Text style={styles.eta}>Arriving soon</Text>
+          )}
         </View>
 
         {/* Delivery address */}

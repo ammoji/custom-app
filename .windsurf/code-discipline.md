@@ -217,6 +217,77 @@ grep -rn "Image source={{ uri:" src/components src/screens
 Verify each call site either guards on truthy URI or asserts
 upstream that the field is never empty.
 
+## Rule 10 — Firestore transactions: all reads before any writes
+
+PR 42.1.1 (May 27 2026). Firestore's transaction model requires
+every `tx.get()` to come BEFORE any `tx.set()` / `tx.update()` /
+`tx.delete()`. A read after a write throws at runtime — and only
+on the code path that actually executes the late read.
+
+PR 42.1's `submitOrderRating` did `tx.get(orderRef)` →
+`tx.get(shopRef)` → writes → THEN a gated `tx.get(userRef)` for
+the delivery partner. Shop-only ratings worked (the gated read
+never ran); dual ratings 500'd the instant the delivery read
+fired after the writes.
+
+```ts
+// BUG — conditional read AFTER writes
+tx.update(orderRef, ...);
+tx.update(shopRef, ...);
+if (deliveryRating) {
+  const userSnap = await tx.get(userRef);  // ← throws
+}
+
+// FIX — hoist ALL reads (incl. conditional ones) to the top
+const orderSnap = await tx.get(orderRef);
+const shopSnap = await tx.get(shopRef);
+const userSnap = deliveryRating ? await tx.get(userRef) : null;
+// ...then all writes
+```
+
+**Why pure-helper tests don't catch it:** the helpers are pure;
+the transaction shape is glue-only. Only an emulator-backed
+integration test exercises the real read-then-write ordering.
+For conditional reads, the data shape that triggers the gate
+(here: a dual rating with a delivery dimension) must be in the
+test matrix or the bug ships.
+
+**Symptom:** a callable 500s for ONE specific data shape but
+works for others — the shape that hits the gated read.
+
+## Rule 11 — "register-once" gates must be keyed to identity, not a session boolean
+
+PR 45.2 (May 27 2026). Push registration latched a session-wide
+boolean (`pushRegisteredOk`) on the FIRST successful
+registration. On app launch the anonymous user (Firebase
+`signInAnonymouslyIfNeeded`) registered first, flipped the gate,
+and the real user — signing in milliseconds later — was
+short-circuited. The push token ended up on the throwaway
+anonymous user's doc; the real account's `fcmTokens` stayed
+empty forever. Push silently broke.
+
+```ts
+// BUG — boolean gate latches on the first (anonymous) user
+let pushRegisteredOk = false;
+if (user && !pushRegisteredOk) { register(); pushRegisteredOk = true; }
+
+// FIX — gate keyed to WHICH uid was registered + skip anonymous
+let lastRegisteredUid: string | null = null;
+if (user && !user.isAnonymous && lastRegisteredUid !== user.uid) {
+  register().then(ok => { if (ok) lastRegisteredUid = user.uid; });
+}
+```
+
+Any "do this once per X" gate where X can change within a
+session (user identity, shop, address) must key on X, not a
+bare boolean. Otherwise the first value to satisfy the gate
+poisons every subsequent one. Bonus: skip throwaway/anonymous
+identities entirely if the side-effect is meaningless for them.
+
+**Symptom:** a per-user side-effect (push token, analytics
+identity, cache key) attaches to the wrong user — usually the
+anonymous launch session or whoever was signed in first.
+
 ## Quick reference
 
 | Layer | What it does | When it fires |
@@ -225,6 +296,8 @@ upstream that the field is never empty.
 | Rule 7 | RN image URLs specify raster format | During edits / review |
 | Rule 8 | Zustand `??` fallbacks must be stable refs | During edits / review |
 | Rule 9 | `<Image>` URIs must guard against empty strings | During edits / review |
+| Rule 10 | Firestore tx: all reads before any writes | During edits / review |
+| Rule 11 | "Register-once" gates keyed to identity, not a bool | During edits / review |
 | `.vscode/settings.json` | Disables organize-imports on save | On IDE save |
 | `npm run audit` | Grep for stripped DO-NOT-REMOVE imports | Before deploy |
 | `tsc --noEmit` | Compile check | Before deploy |

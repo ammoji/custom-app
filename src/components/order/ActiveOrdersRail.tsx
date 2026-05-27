@@ -19,6 +19,7 @@
 import React from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { colors, radii, spacing, typography } from '../../constants/theme';
+import { orderEtaDisplay } from '../../utils/orderEtaDisplay';
 import OrderStatusChip from './OrderStatusChip';
 import type { Order } from '../../types';
 
@@ -36,34 +37,45 @@ type Props = {
   nowMs?: number;
 };
 
-// Customer-facing ETA copy. When called with a ticking `nowMs`,
-// the surrounding component re-renders every minute and this
-// string updates in lockstep. See PR 17 §Part 1 for the ticker
-// design; the change here is mechanical — the helper now takes
-// `nowMs` as a parameter instead of reading the clock itself.
+// Customer-facing ETA copy. Re-renders every minute via the parent's
+// ticking `nowMs` (PR 17 §Part 1). PR 43 — delegates the state
+// machine to `orderEtaDisplay` so this rail, OrderDetailScreen,
+// and OrderConfirmationScreen all read off one contract. The
+// rail-specific copy variations (e.g. "Ready in" vs "Arriving in")
+// stay here since they only apply to this surface's tight summary
+// format.
 function etaText(order: Order, nowMs: number): string {
-  // ready_for_pickup with pickedUpAt set → partner has the order
-  // and is en route to the customer. Show that explicitly.
+  // Out-for-delivery is rail-specific copy — shown only here, not
+  // in the helper (the detail screen has a richer status card for
+  // ready_for_pickup that includes the dispatch chip + partner
+  // info). Keep the early returns above the helper call.
   if (order.status === 'ready_for_pickup' && order.pickedUpAt) {
     return 'Out for delivery';
   }
   if (order.status === 'ready_for_pickup') {
     return 'Almost ready';
   }
-  // PR 17 — prefer the shopkeeper-committed `readyByEstimate`
-  // when the order is in an accepted/preparing state (it's the
-  // tighter, more honest signal). Fall through to the customer's
-  // original estimated-delivery time for other states or when
-  // the shop didn't commit one.
-  const eta =
-    (order.status === 'accepted' || order.status === 'preparing') &&
-    typeof order.readyByEstimate === 'number'
-      ? order.readyByEstimate
-      : order.estimatedDeliveryAt;
-  if (typeof eta !== 'number' || eta <= 0) return '';
-  const minsLeft = Math.round((eta - nowMs) / 60_000);
-  if (minsLeft <= 0) return 'Arriving soon';
-  return `Arriving in ~${minsLeft} min`;
+  const eta = orderEtaDisplay(order, nowMs);
+  switch (eta.kind) {
+    case 'awaiting_confirmation':
+      // PR 43 — pre-acceptance copy. No minute count anchored on
+      // shop.etaMinutes; the shop hasn't committed yet.
+      return 'Awaiting shop confirmation';
+    case 'ready_by': {
+      const minsLeft = Math.round((eta.readyByEstimate - nowMs) / 60_000);
+      if (minsLeft <= 0) return 'Arriving soon';
+      return `Ready in ~${minsLeft} min`;
+    }
+    case 'eta_fallback':
+      return `Arriving in ~${eta.minutesLeft} min`;
+    case 'arriving_soon':
+      return 'Arriving soon';
+    case 'hidden':
+      // Caller checks `eta.length > 0` and skips rendering the
+      // row when blank, so terminal-state orders silently fall
+      // out without a "" placeholder showing up in the UI.
+      return '';
+  }
 }
 
 export default function ActiveOrdersRail({ orders, onTap, nowMs }: Props) {

@@ -6,6 +6,7 @@ import * as Notifications from 'expo-notifications';
 import { httpsCallable } from 'firebase/functions';
 import { Platform } from 'react-native';
 import { functions } from './firebase';
+import { Sentry } from './sentry';
 
 const isNative = Platform.OS !== 'web';
 
@@ -64,15 +65,33 @@ export const pushService = {
    *   - we couldn't obtain an Expo project id
    */
   async registerForPushNotifications(): Promise<string | null> {
+    // PR 45 — instrumented with Sentry breadcrumbs at every decision
+    // point + captures at every real failure. Pre-PR-45 every branch
+    // here exited via silent console.warn, so when push silently
+    // broke (build 17, May 27 2026) there was no signal pointing at
+    // the failure. Now every session leaves a trail in Sentry that
+    // tells us EXACTLY where registration stopped — token mint,
+    // permission, callable write, or never started.
+    Sentry.addBreadcrumb({
+      category: 'push',
+      message: 'register: start',
+    });
+
     // Web push would require VAPID configuration in app.json; we only
     // ship native push for now. Bail before touching expo-notifications
     // so we don't trigger its "missing vapidPublicKey" error.
     if (Platform.OS === 'web') {
-      console.log('[push] web platform — skipping (native-only feature)');
+      Sentry.addBreadcrumb({
+        category: 'push',
+        message: 'register: skip (web)',
+      });
       return null;
     }
     if (!Device.isDevice) {
-      console.log('[push] simulator/emulator — skipping registration');
+      Sentry.addBreadcrumb({
+        category: 'push',
+        message: 'register: skip (simulator)',
+      });
       return null;
     }
 
@@ -83,15 +102,29 @@ export const pushService = {
       finalStatus = status;
     }
     if (finalStatus !== 'granted') {
-      console.log('[push] permission denied');
+      Sentry.addBreadcrumb({
+        category: 'push',
+        message: 'register: permission denied',
+        data: { finalStatus },
+      });
+      // captureMessage at 'info' (not error) — permission denial is a
+      // legitimate user choice, not a bug. We still want visibility
+      // into how many sessions land here so adoption can be tracked.
+      Sentry.captureMessage(
+        'push registration: permission not granted',
+        'info',
+      );
       return null;
     }
 
     const projectId = getEasProjectId();
     if (!projectId) {
-      console.warn(
-        '[push] no EAS projectId in Constants.expoConfig.extra.eas — ' +
-          'cannot fetch Expo push token. Run `eas init` if missing.',
+      // captureMessage at 'warning' — projectId missing IS a config
+      // bug (eas init never ran or app.json got rewritten), but it's
+      // recoverable with a redeploy, not a crash.
+      Sentry.captureMessage(
+        'push registration: no EAS projectId',
+        'warning',
       );
       return null;
     }
@@ -100,11 +133,37 @@ export const pushService = {
     try {
       const result = await Notifications.getExpoPushTokenAsync({ projectId });
       token = result.data;
+      Sentry.addBreadcrumb({
+        category: 'push',
+        message: 'register: token obtained',
+        // Prefix only — full token is sensitive (semi-secret URL the
+        // Expo Push API uses to address the device). Prefix is enough
+        // to confirm it's a real ExponentPushToken[...] shape in the
+        // breadcrumb trail.
+        data: { tokenPrefix: token.slice(0, 24) },
+      });
     } catch (e) {
-      console.warn('[push] getExpoPushTokenAsync failed:', e);
+      // PR 45 — most likely failure point when push is broken (iOS APN
+      // entitlement / provisioning / expired push key). Capture the
+      // raw exception so Sentry surfaces the actual platform error
+      // text. Tag with `push_stage` so dashboards can group all
+      // token-mint failures together regardless of underlying cause.
+      //
+      // PR 45.1 hardening (kept post-cleanup) — `captureException`
+      // on a non-Error throw (string, undefined, plain object)
+      // historically gets dropped or mis-grouped by Sentry. Wrap
+      // with `new Error(...)` to guarantee a real exception is
+      // captured even when the native module throws a raw string
+      // or rejects with `undefined`.
+      const wrapped =
+        e instanceof Error
+          ? e
+          : new Error(`getExpoPushTokenAsync threw non-Error: ${String(e)}`);
+      Sentry.captureException(wrapped, {
+        tags: { push_stage: 'getExpoPushTokenAsync' },
+      });
       return null;
     }
-    console.log('[push] token:', token);
 
     // Android needs a notification channel on API 26+ — without one,
     // notifications silently never show.
@@ -142,9 +201,23 @@ export const pushService = {
         const fn = httpsCallable(functions, 'registerPushToken');
         await fn({ token });
       }
-      console.log('[push] token registered with backend');
+      Sentry.addBreadcrumb({
+        category: 'push',
+        message: 'register: backend write ok',
+      });
     } catch (e) {
-      console.warn('[push] registerPushToken call failed:', e);
+      // PR 45 — callable rejected. Could be IAM (allUsers binding
+      // dropped), auth-context (request.auth missing), validation
+      // (bad token shape). Capture so the dashboard tells us which.
+      Sentry.captureException(e, {
+        tags: { push_stage: 'registerPushToken_callable' },
+      });
+      // PR 45 KEY CHANGE — re-throw instead of swallowing. The
+      // caller (AuthBootstrap) needs to know this failed so its
+      // closure-gate can stay open and a later auth event will
+      // retry. Pre-PR-45 the silent catch caused the gate to
+      // latch closed on first failure for the entire session.
+      throw e;
     }
 
     return token;

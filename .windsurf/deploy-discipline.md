@@ -477,6 +477,50 @@ even when IAM is in a broken state). Treat IAM verification as
 "server-first deploy" hardening, same tier as the signed-URL
 gotcha above.
 
+## GCS v4 signed-URL 7-day expiry cap
+
+PR 42 → fixed in PR 42.0.2 (May 27 2026).
+
+`getSignedUrl({ version: 'v4', expires })` on a GCS file has a
+**hard maximum `expires` of 7 days** (604,800,000 ms). Anything
+larger throws `Error: Max allowed expiration is seven days
+(604800 seconds).` at the signer.
+
+PR 42 set `expires = Date.now() + 10 years` (per a prompt that
+asked for a long-lived shop-branding URL, not knowing the cap).
+The `approveShop` callable wrapped the signer in a non-fatal
+try/catch, so every approval **silently** failed the
+`imageUrl` write — shop storefront photos never appeared,
+no error surfaced, for the entire life of PR 42. The PR 42.0.1
+`regenerateShopImageUrl` callable (louder error posture) is
+what finally surfaced it.
+
+**Rule:** for long-lived / never-rotating asset URLs (shop
+branding, profile photos, category images — anything you want
+available indefinitely), do NOT use v4 signed URLs. Use a
+**Firebase Storage download token** instead:
+
+```ts
+import { randomUUID } from 'crypto';
+const token = randomUUID();
+await file.setMetadata({ metadata: { firebaseStorageDownloadTokens: token } });
+const url = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(path)}?alt=media&token=${token}`;
+```
+
+This is exactly what the Firebase client SDK's `getDownloadURL()`
+produces. No expiry, no 7-day cap, no `signBlob` IAM requirement
+(so it also sidesteps the PR 31 Service-Account-Token-Creator
+gotcha). Bonus: minting a fresh token invalidates the prior URL
+— a free kill-switch if a stale URL ever leaks.
+
+Reserve v4 signed URLs for genuinely short-lived, access-gated
+content (≤7 days), e.g. a one-time download of a sensitive
+document. For "display this image forever," download tokens win.
+
+**Symptom:** a `getSignedUrl`-derived URL field is silently
+never written despite the function appearing to complete; grep
+function logs for `"Max allowed expiration"`.
+
 ## Cross-references
 
 This doc is referenced from `PRELAUNCH_CHECKLIST.md` under the

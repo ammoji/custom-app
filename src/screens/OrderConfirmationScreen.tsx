@@ -6,7 +6,8 @@ import Button from '../components/common/Button';
 import { colors, radii, spacing, typography } from '../constants/theme';
 import { orderService } from '../services/orderService';
 import type { Order } from '../types';
-import { formatRupees } from '../utils/format';
+import { formatRupees, formatOrderTime } from '../utils/format';
+import { orderEtaDisplay } from '../utils/orderEtaDisplay';
 
 export default function OrderConfirmationScreen() {
   const route = useRoute<any>();
@@ -60,10 +61,12 @@ export default function OrderConfirmationScreen() {
     );
   }
 
-  const etaMinutes = Math.max(
-    1,
-    Math.round((order.estimatedDeliveryAt - order.createdAt) / 60_000),
-  );
+  // PR 43 — ETA copy varies by order status. This screen is shown
+  // immediately post-placement so `status` is always 'pending' in
+  // practice (the helper returns `awaiting_confirmation`), but the
+  // shared state machine keeps the surface consistent if a future
+  // flow ever re-routes here from a non-pending state.
+  const eta = orderEtaDisplay(order, Date.now());
 
   const isOnline = order.paymentMethod === 'online';
   const paymentStatus = order.paymentStatus;
@@ -107,7 +110,22 @@ export default function OrderConfirmationScreen() {
 
         <View style={styles.card}>
           <Row label="Order ID" value={order.id} />
-          <Row label="ETA" value={`~${etaMinutes} min`} />
+          {/* PR 43 — status-aware ETA row. Pending orders show
+              "Awaiting shop confirmation" instead of a misleading
+              minute count anchored on shop.etaMinutes (which is
+              just the shop's default wish, not a commitment). */}
+          {eta.kind === 'awaiting_confirmation' && (
+            <Row label="Status" value="Awaiting shop confirmation" />
+          )}
+          {eta.kind === 'ready_by' && (
+            <Row label="Ready by" value={formatOrderTime(eta.readyByEstimate)} />
+          )}
+          {eta.kind === 'eta_fallback' && (
+            <Row label="ETA" value={`~${eta.minutesLeft} min`} />
+          )}
+          {eta.kind === 'arriving_soon' && (
+            <Row label="ETA" value="Arriving soon" />
+          )}
           <Row label="Total" value={formatRupees(order.total)} />
           <Row label="Payment" value={paymentLabel} valueColor={paymentColor} />
         </View>

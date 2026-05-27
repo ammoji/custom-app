@@ -8274,6 +8274,762 @@ immediately. The checklist is the only thing that survives memory.
       helper is the high-value coverage target; transaction-shape
       tests are valuable but more setup. `[Post-launch]`
 
+## PR 43 — Hide ETA until shop accepts + KYC mandatory enforcement `[Phase 43]`
+
+- [x] **Why this PR exists.** Two customer-trust changes from the
+      May 26 2026 pilot smoke test bundled together because they
+      touch adjacent surfaces and share an OTA-only deploy
+      posture. Part A: pre-PR-43 the customer saw
+      "Arriving in ~29 min" the moment they placed an order, based
+      on `shop.etaMinutes` (the shop's default wish, not a
+      commitment). Trust Principle 2 (close the loop with honest
+      signals) violation — the shop owner hadn't even seen the
+      order yet. Part B: shop registration was admitting shops
+      without GST + without Owner ID proof; Section 24 of the
+      CGST Act requires GSTIN for every e-commerce supplier and
+      identity proof is baseline KYC against fraud.
+
+### Part A — Customer ETA hidden until acceptance
+
+- [x] **Pure helper — `orderEtaDisplay`** at
+      `@src/utils/orderEtaDisplay.ts:1-114`. Function of
+      `(order, nowMs)` → tagged union with 5 kinds:
+      `awaiting_confirmation` (status === 'pending'),
+      `ready_by` (shop set `readyByEstimate`),
+      `eta_fallback` (accepted+ but no `readyByEstimate` —
+      defensive for legacy orders), `arriving_soon`
+      (eta_fallback overshot), `hidden` (delivered / cancelled /
+      both estimates missing). Defensive against NaN / 0 /
+      negative timestamps + null Firestore values
+      (`readyByEstimate?: number | null` to match Order's
+      shape). Pure → unit-testable without RN / clock / store.
+
+- [x] **OrderConfirmationScreen wired** at
+      `@src/screens/OrderConfirmationScreen.tsx:64-69` +
+      `@src/screens/OrderConfirmationScreen.tsx:111-128`.
+      Replaced the always-on "ETA: ~29 min" row with a
+      status-aware Row that reads "Status: Awaiting shop
+      confirmation" on pending orders. Removed the old
+      `etaMinutes` calc entirely.
+
+- [x] **OrderDetailScreen wired** at
+      `@src/screens/OrderDetailScreen.tsx:277-283` +
+      `@src/screens/OrderDetailScreen.tsx:327-371`. The pending
+      branch renders a two-line block matching the existing
+      `pickupRow` visual: primary "Awaiting shop confirmation",
+      secondary "{shopName} will confirm shortly". The
+      readyByEstimate branch preserves PR 36.1's
+      `formatRelativeTime` countdown. Legacy fallback path
+      retained for accepted-without-readyByEstimate edge case.
+      Comment lineage extended: PR 12 → PR 36.1 → PR 43.
+
+- [x] **ActiveOrdersRail wired** at
+      `@src/components/order/ActiveOrdersRail.tsx:40-79`. The
+      `etaText()` helper now delegates to `orderEtaDisplay`
+      and produces 5 rail-specific strings: "Awaiting shop
+      confirmation" (pending), "Ready in ~22 min" (ready_by
+      with positive minutes), "Arriving soon" (ready_by
+      overshot OR eta_fallback overshot), "Arriving in ~25 min"
+      (eta_fallback fallback), "" (hidden → caller hides row).
+      Rail-specific early returns for `ready_for_pickup`
+      kept above the helper call ("Out for delivery" /
+      "Almost ready") since those are tight summary copy
+      unique to this surface.
+
+- [x] **Shop-owner + delivery-partner + admin surfaces
+      DELIBERATELY untouched.** Per the prompt's "shop-owner
+      and delivery-partner surfaces unchanged" rule. Verified
+      by grep: `src/screens/shop/ShopOrderDetailScreen.tsx`
+      still uses raw `minutesLeft` math for the shop-owner
+      audience; `src/screens/admin/AdminOrdersScreen.tsx`
+      still surfaces `readyByEstimate` directly. Those
+      audiences have legitimate reasons to see the pre-
+      acceptance estimate (shop owner: planning; admin:
+      diagnostics).
+
+- [x] **Tests** — 13 cases in
+      `@tests/utils/orderEtaDisplay.test.ts:1-141` covering
+      every union branch + defensive paths: pending →
+      `awaiting_confirmation`, pending IGNORES `readyByEstimate`
+      (trust boundary), all three accepted+ states return
+      `ready_by` when `readyByEstimate` set, accepted-without-
+      readyByEstimate → `eta_fallback`, eta_fallback overshot →
+      `arriving_soon`, delivered/cancelled → `hidden`,
+      double-missing → `hidden`, NaN / 0 / zero readyByEstimate
+      fall-through.
+
+### Part B — KYC mandatory enforcement
+
+- [x] **Decision: reused existing `ownerIdDoc` slot instead of
+      adding a `panDoc` schema field.** The prompt asked for
+      two separate Aadhaar + PAN tiles, but the existing
+      `ShopKycDocKind` enum already has a single
+      `ownerIdDoc` slot labelled "Owner ID (Aadhaar/PAN)" with
+      the hint "Aadhaar or PAN card of the proprietor". The
+      owner already chooses which physical document to
+      photograph. Adding a `panDoc` kind would require updating
+      `ShopKycDocKind` + `VALID_DOC_KINDS` server-side +
+      `getShopKycReadUrls` + admin review screens + storage
+      rule comments for **zero customer-trust benefit** — the
+      gate intent ("force identity proof at registration") is
+      enforceable with one slot. Documented divergence; if
+      operations later wants both, splitting is purely additive
+      (`panDoc?: ShopKycDocRef` next to the existing field).
+
+- [x] **`handleFinish` triple gate** at
+      `@src/screens/roles/RegisterShopScreen.tsx:283-326`.
+      Sequential check order: (1) storefront — PR 42 carry-over,
+      (2) `ownerIdDoc` — Aadhaar OR PAN, (3) `gstDoc` — Section
+      24 CGST Act compliance. Each gate alerts with actionable
+      copy. GST alert includes the gst.gov.in remediation hint
+      for owners without GSTIN. FSSAI deliberately NOT gated —
+      relevant only for prepared-food resellers and free-text
+      license number is an acceptable substitute.
+
+- [x] **Defensive double-guard on Finish button** at
+      `@src/screens/roles/RegisterShopScreen.tsx:758-765`.
+      `disabled` prop now considers all 3 mandatory slots —
+      both their `storagePath` populated AND not mid-upload.
+      Pairs with the `handleFinish` alert so an async
+      `setSlot` write that races the tap still hits the
+      validation re-check.
+
+- [x] **Tile reordering + label updates** at
+      `@src/screens/roles/RegisterShopScreen.tsx:58-81` +
+      `@src/screens/roles/RegisterShopScreen.tsx:706-745`.
+      Required tiles surface first in the order they're gated
+      (storefront → ownerIdDoc → gstDoc), then FSSAI last.
+      Labels: `gstDoc` "GST Certificate (required)",
+      `ownerIdDoc` "Owner ID — Aadhaar or PAN (required)".
+      Step-2 intro copy rewritten to enumerate the 3 required
+      docs and explicitly mark FSSAI optional.
+
+- [x] **GST helper line under tile** at
+      `@src/screens/roles/RegisterShopScreen.tsx:732-739`
+      + `kycHelper` style at
+      `@src/screens/roles/RegisterShopScreen.tsx:966-976`.
+      "Don't have GST yet? Register free at gst.gov.in. Takes
+      3-7 working days." Self-serve unblock path for kiranas
+      without GSTIN.
+
+- [x] **Existing approved shop grandfathered.** No retroactive
+      enforcement; gates only fire on the `RegisterShopScreen`
+      submit flow. Sudhir Grocery Store (active since May 26)
+      keeps functioning normally. No migration script, no
+      admin "non-compliant" flag — out of scope per prompt.
+
+- [x] **Server-side compat — no allowlist change needed.**
+      `VALID_DOC_KINDS` in
+      `@functions/src/kycUploadHelpers.ts` already includes
+      `ownerIdDoc` and `gstDoc` (PR 31 baseline). Client
+      uploads via `recordShopKycUpload` work without server
+      changes. Pure OTA-eligible client work for Part B.
+
+- [x] **Type checking + tests.** Root tsc 0 errors,
+      functions tsc 0 errors. **782 / 782 tests pass (76
+      suites)** — +13 cases for `orderEtaDisplay`. No
+      Part-B-specific test file added (RegisterShopScreen
+      has no existing test file; the gate logic is inline in
+      a React component, not a pure helper that warrants
+      isolated tests; coverage comes from the manual smoke
+      checklist below).
+
+- [x] **OTA-eligibility audit.** No `app.json`, `package.json`,
+      lockfile, or native plugin changes. No new SDKs, no new
+      permission requests. No Firebase Functions deploys
+      needed. Pure `eas update` ship.
+
+- [ ] **Smoke acceptance — Part A (customer ETA)** post-deploy:
+
+      1. Place a fresh order as a customer. OrderConfirmation
+         shows "Status: Awaiting shop confirmation" instead of
+         "ETA: ~30 min."
+      2. Open OrderDetailScreen for that pending order: status
+         card primary "Awaiting shop confirmation", secondary
+         "{Shop name} will confirm shortly". No minute count.
+      3. HomeScreen active-orders rail card: "Awaiting shop
+         confirmation" replaces "Arriving in ~28 min."
+      4. As shop owner, accept order + set readyByEstimate.
+         Customer's OrderDetail switches to PR 36.1 countdown;
+         rail card flips to "Ready in ~22 min."
+      5. Cancel pending order. Detail screen shows cancelled
+         status; no ETA copy at all.
+      6. Delivered order in Past Orders: tap → no ETA line.
+      7. Shop-owner ShopOrderDetailScreen still shows
+         "ETA ~N min" for pre-acceptance orders — confirm
+         intentional, no regression. `[Phase 43A-smoke]`
+
+- [ ] **Smoke acceptance — Part B (KYC gates)** post-deploy:
+
+      8. As a fresh shop owner, complete step 1 + step 2 KYC
+         except skip both ownerIdDoc and gstDoc. Tap Finish →
+         disabled (button greyed). Force-tap by completing
+         only storefront → Alert "Owner ID required".
+      9. Upload Aadhaar (or PAN — either works) → Finish still
+         disabled until GST too. Tap → Alert "GST Certificate
+         required" with the gst.gov.in helper text in the body.
+      10. Upload GST → Finish enables → submit succeeds →
+          routes to WaitingForApproval.
+      11. Helper line "Don't have GST yet? Register free at
+          gst.gov.in. Takes 3-7 working days." visible
+          immediately under the GST tile.
+      12. Admin reviews the new pending shop in
+          PendingShops → ShopRegistrationDetail: all three
+          uploaded docs preview correctly via
+          `getShopKycReadUrls` (PR 31 path unchanged).
+      13. Existing Sudhir Grocery Store: admin opens it via
+          ShopManagement → ShopDetailManagement. No
+          "non-compliant" flag, no GST warning, no Identity
+          Proof flag. Continues functioning. `[Phase 43B-smoke]`
+
+- [ ] **Deploy.**
+
+      ```powershell
+      # No server changes — pure client OTA.
+      eas update --branch production --message "PR 43 hide ETA until accepted + KYC mandatory enforcement"
+      ```
+
+      Force-quit + reopen app twice on TestFlight to load the
+      new bundle. No Cloud Run IAM verification needed (no
+      callable touched). `[Phase 43-deploy]`
+
+- [ ] **DEFERRED — Push notification when shop accepts.**
+      "Sharma Kirana has accepted your order — ETA 25 min."
+      Useful UX to mask the silent
+      `Awaiting...` → `Ready in...` transition for customers
+      who left the screen. Out of scope for PR 43 (push
+      infrastructure tied to PR 41). Consider PR 43.1 if pilot
+      feedback flags the silent transition. `[Post-launch]`
+
+- [ ] **DEFERRED — Hindi/Devanagari ETA copy.** PR 40
+      territory. PR 43 is English-only. `[Post-launch]`
+
+- [ ] **DEFERRED — Retroactive KYC compliance scan against
+      existing approved shops.** Admin tool to flag
+      already-approved shops missing GST or ownerIdDoc.
+      One-shop pilot doesn't need it; revisit when shop count
+      grows past ~10. `[Post-launch]`
+
+- [ ] **DEFERRED — GSTIN registry validation.** Today we
+      accept whatever file the owner uploads as proof; not
+      verifying that the GSTIN actually maps to a registered
+      business at the GSTN portal. The portal has an API but
+      requires paid access. Defer until operations confirms
+      the file-only check is being abused. `[Post-launch]`
+
+- [ ] **DEFERRED — Split `ownerIdDoc` into `aadhaarDoc` +
+      `panDoc`.** Per the original PR 43 prompt's UI spec. If
+      operations decides distinguishing the two doc types is
+      worth admin reviewer time (e.g. for cross-referencing
+      against the address proof or for PAN-specific tax
+      flows), the schema split is purely additive. `[Post-launch]`
+
+## PR 45.2 — Fix push registering to anonymous user `[Phase 45.2]`
+
+- [x] **Root cause confirmed via PR 45.1 probes (May 27 2026).**
+      The Sentry breadcrumb on the `bootstrap: reached push branch`
+      event read `{ alreadyRegistered: false, isAnonymous: true,
+      uidPrefix: Lb5D6Ske }` — that's the THROWAWAY anonymous
+      user from `signInAnonymouslyIfNeeded`, NOT the admin's
+      real `Nb452wQ...`. The chain ran cleanly to
+      `push: registerPushToken callable RESOLVED` — pipeline
+      works end-to-end, just for the wrong user. Sequence:
+      (1) AuthBootstrap mounts → (2) Firebase signs anon user
+      first → (3) PR 45 boolean gate fires push for anon →
+      (4) gate flips closed → (5) user types phone+OTP, auth
+      upgrades to real uid → (6) push branch re-evaluates →
+      (7) gate says "already done" → real user's `fcmTokens`
+      stays empty forever. **Pure client-side bug, OTA-fixable,
+      no build 18 needed.**
+
+- [x] **Why it surfaced on build 17 specifically.** Latent race;
+      build 17's startup ordering (post-PR-39 rebrand bundle)
+      consistently let the anonymous-sign-in →
+      push-registration sequence beat the user's OTP confirm.
+      Build 15 happened to lose this race. Both builds had the
+      same bug; only build 17 exposed it consistently.
+
+### Fix design
+
+- [x] **Orchestrator promoted from boolean → uid-aware** at
+      `@c:\Users\dahiy\grocery-mvp\src\services\pushRegistrationOrchestrator.ts:1-145`.
+      New input shape: `{ currentUid, isAnonymous,
+      lastRegisteredUid, registerForPush, logger? }`. New gate
+      logic in priority order:
+      1. `currentUid === null` → return `null` (no user, no
+         report). Auth-state-null ticks don't litter Sentry.
+      2. `isAnonymous === true` → `skipped(anonymous)` +
+         breadcrumb. The direct fix.
+      3. `lastRegisteredUid === currentUid` →
+         `skipped(already_registered_this_uid)`. Permission-
+         prompt-spam guard, scoped to THIS uid.
+      4. Otherwise → register. On success, return outcome with
+         `uid` so the caller knows which uid to remember.
+
+- [x] **AuthBootstrap tracks `lastRegisteredUid` ref instead of
+      a boolean** at `@c:\Users\dahiy\grocery-mvp\src\components\AuthBootstrap.tsx:42-180`.
+      Same useEffect-scoped lifetime (resets on remount, persists
+      across auth events within a session). Updated ONLY on a
+      `registered` outcome — `skipped` / `failed` / `null` leave
+      the ref unchanged so the next qualifying auth event
+      (anon→real upgrade, account switch) retries.
+
+- [x] **PR 45.1 diagnostic probes preserved.** All six
+      `captureMessage` milestones in
+      `@c:\Users\dahiy\grocery-mvp\src\services\pushService.ts`
+      stay so the next reproduce confirms the fix. The
+      `bootstrap: reached push branch` breadcrumb payload now
+      carries `{ currentUidPrefix, isAnonymous,
+      lastRegisteredUidPrefix }` — a successful PR 45.2 fix
+      shows `isAnonymous: false` and the REAL uid prefix on the
+      first event that creates a token.
+
+### Tests — uid-aware suite
+
+- [x] **Rewrote `pushRegistrationOrchestrator.test.ts`** —
+      14 cases (was 11 boolean-gate). All boolean-era contracts
+      preserved via the new uid-aware signature. New cases at
+      `@c:\Users\dahiy\grocery-mvp\tests\services\pushRegistrationOrchestrator.test.ts`:
+      - **CRITICAL anonymous skip** — registerForPush must NOT
+        be called for `isAnonymous: true`. Direct regression
+        test for the May 27 production bug.
+      - **CRITICAL anonymous→real upgrade re-registers** — pins
+        the multi-call sequence (anon skipped → real signs in →
+        token claims the REAL uid).
+      - **Account switch** — `real_A` → `real_B` re-registers.
+      - **Same real uid short-circuits** — permission-prompt
+        spam guard.
+      - **No-user → null, NO breadcrumb** — sign-out doesn't
+        litter Sentry trails.
+      - **Anonymous wins over already-registered** — defensive
+        priority pin.
+
+- [x] **Full suite green: 825 / 825 (79 suites).** +3 net new
+      cases over PR 45 (was 822). Root tsc + functions tsc
+      0 errors.
+
+### Deploy plan — pure client OTA
+
+- [ ] **OTA only** (no functions, no IAM, no native rebuild):
+
+      ```powershell
+      eas update --branch production --message "PR 45.2 fix push registering to anonymous user"
+      ```
+
+      `[Phase 45.2-ota]`
+
+- [ ] **Force-quit twice + reopen** to load the OTA, sign in
+      with admin phone, wait 15s. `[Phase 45.2-load]`
+
+### Smoke acceptance — the definitive verification
+
+- [ ] **Real account `fcmTokens` populated.** Firebase Console →
+      `users/{admin-uid}` (the REAL uid, e.g. `Nb452wQ...`) →
+      `fcmTokens` has an `ExponentPushToken[...]` entry.
+
+- [ ] **Anonymous doc has NO token.** Whatever anon uid the
+      current launch generated (e.g. `Lb5D6Ske...`) has empty /
+      missing `fcmTokens`. (May contain stale tokens from
+      pre-fix sessions — harmless; reset-pilot-data wipes them.)
+
+- [ ] **Sentry breadcrumb shows the fix worked.** `bootstrap:
+      reached push branch` event has
+      `data.isAnonymous: false` and `data.currentUidPrefix`
+      matching the real admin uid. The full chain (`register
+      ENTERED` → `before getExpoPushTokenAsync` → `token
+      obtained` → `before registerPushToken callable` →
+      `callable RESOLVED`) all fire — for the real user.
+
+- [ ] **End-to-end push.** Customer places order → shop owner
+      accepts → customer device receives push within ~5s.
+
+- [ ] **Account-switch test.** Sign out, sign in as a different
+      test phone. That account's `fcmTokens` gets the token
+      (uid-change re-registration works). The previous
+      account's tokens stay (multi-device semantics — only the
+      explicit unregister callable removes a token).
+
+### Follow-up
+
+- [x] **DONE — stripped PR 45.1 diagnostic probes (May 27 2026
+      same-day cleanup).** After Sudhir confirmed multi-device
+      sign-in (different phones, different users, all received
+      their push) the six temporary success-path
+      `captureMessage('info')` probes in
+      `@c:\Users\dahiy\grocery-mvp\src\services\pushService.ts`
+      and the one in
+      `@c:\Users\dahiy\grocery-mvp\src\components\AuthBootstrap.tsx`
+      were removed:
+      - `push: register ENTERED`
+      - `push: before getExpoPushTokenAsync`
+      - `push: token obtained`
+      - `push: getExpoPushTokenAsync THREW`
+      - `push: before registerPushToken callable`
+      - `push: registerPushToken callable RESOLVED`
+      - `bootstrap: reached push branch` (captureMessage only;
+        the breadcrumb with the same name stays — payload is
+        valuable on any future error report at zero cost)
+      KEPT (legitimate observability, not diagnostic):
+      - All `Sentry.addBreadcrumb(...)` calls.
+      - `captureMessage('push registration: permission not
+        granted', 'info')` — adoption-funnel metric.
+      - `captureMessage('push registration: no EAS projectId',
+        'warning')` — real config-bug signal.
+      - All failure-branch `captureException(...)` calls.
+      - The non-Error throw hardening (`new Error(...)` wrap in
+        the `getExpoPushTokenAsync` catch). Pinned by the
+        `getExpoPushTokenAsync throws non-Error → wraps before
+        capture` test in `pushService.test.ts`.
+      Ship via the same small OTA that already carries PR 45.2:
+
+      ```powershell
+      eas update --branch production --message "PR 45.2 fix push registering to anonymous user + strip 45.1 diagnostic probes"
+      ```
+
+      `[Phase 45.2-cleanup]`
+
+## PR 45.1 — Push diagnostic probes (TEMPORARY) `[Phase 45.1]`
+
+- [x] **Why this exists.** Original PR 45 instrumented FAILURE
+      branches (permission denied, no projectId, token-fetch
+      throw, callable throw) but the SUCCESS path emitted only
+      breadcrumbs — and breadcrumbs alone create no Sentry
+      issue. So when build 17's push pipeline broke after
+      Sudhir's reproduce + clean cold-start sign-in,
+      `users/{uid}.fcmTokens` stayed empty AND Sentry showed
+      zero events. Per the diagnostic handoff, the silence is
+      ambiguous — could be (1) function never entered, (2) Sentry
+      capture dead, or (3) `getExpoPushTokenAsync` hangs / throws
+      a non-Error value that capture filters. PR 45.1 disambiguates.
+
+- [x] **Code audit confirmed Sentry IS wired.**
+      `@App.js:1-2` calls `initSentry()` synchronously at module
+      load. DSN at `@app.json:107-108`. `tracesSampleRate: 0.5`
+      controls TRANSACTIONS only — error / message capture
+      defaults to 100%. `moduleNameMapper` is jest-only — Metro
+      never sees the test mock. **Hypothesis 2 (Sentry dead) is
+      structurally unlikely.** If diagnostic still shows zero
+      events post-deploy, then it IS Hypothesis 2 and the
+      investigation moves to Sentry init at runtime.
+
+- [x] **Code audit confirmed call path is structurally correct.**
+      `@src/components/AuthBootstrap.tsx:116` reaches the push
+      branch on every truthy user (incl. anonymous).
+      `pushRegisteredOk` declared INSIDE useEffect so it's always
+      false on cold-start remount. Orchestrator at
+      `@src/services/pushRegistrationOrchestrator.ts:75-78`
+      doesn't short-circuit when `alreadyRegistered=false`. **No
+      structural reason for the call to be skipped.**
+
+- [x] **Probes added.** Five new `captureMessage('info')` /
+      `captureMessage('error')` calls along the success path so
+      every milestone produces a Sentry issue:
+      1. `@src/components/AuthBootstrap.tsx:125` —
+         `'bootstrap: reached push branch'`
+      2. `@src/services/pushService.ts:92` —
+         `'push: register ENTERED'` (very first line)
+      3. `@src/services/pushService.ts:155` —
+         `'push: before getExpoPushTokenAsync'`
+      4. `@src/services/pushService.ts:166` —
+         `'push: token obtained'`
+      5. `@src/services/pushService.ts:230` —
+         `'push: before registerPushToken callable'`
+      6. `@src/services/pushService.ts:250` —
+         `'push: registerPushToken callable RESOLVED'`
+
+- [x] **Hardened the `getExpoPushTokenAsync` catch** at
+      `@src/services/pushService.ts:182-198` to wrap non-Error
+      throws as `new Error("getExpoPushTokenAsync threw
+      non-Error: <stringified>")` and ALSO emit a
+      `captureMessage('error')` so we see the failure path even
+      if `captureException` filters the value.
+
+### How to read the result after device reproduce
+
+After OTA + force-quit + fresh sign-in, count Sentry messages:
+
+| Last message seen | Diagnosis |
+|---|---|
+| **None at all** | Hypothesis 2 — Sentry capture is dead in release. Audit `initSentry()` execution at runtime. |
+| `bootstrap: reached push branch` only | Orchestrator throws synchronously before pushService is called. Inspect orchestrator stack frame. |
+| `bootstrap` + `register ENTERED` only | `expo-notifications` permission/projectId check hangs (would be unprecedented). |
+| `... before getExpoPushTokenAsync` (no `token obtained` and no `THREW`) | **Hypothesis 3a — getExpoPushTokenAsync HANGS.** Native APN registration never completes. Fix: rebuild (build 18) to regenerate provisioning profile with the `aps-environment` entitlement. |
+| `... THREW` event present | Hypothesis 3b/c — APN registration fails with a throwable. Read the captured exception text for the actual platform error. |
+| `... before registerPushToken callable` only | Callable hangs (IAM, network, function cold-start timeout > callable client timeout). Check Cloud Run logs for `registerPushToken` invocation. |
+| All 6 messages including `callable RESOLVED` but `fcmTokens` still empty | Server-side bug. Callable returned but `request.auth.uid` resolved to a different uid than expected (anon→phone link race), or arrayUnion no-op'd. Audit `users/{uid}` writes by timestamp. |
+
+### Deploy plan
+
+- [ ] **OTA only** (no functions, no native rebuild — these are
+      pure client changes):
+
+      ```powershell
+      eas update --branch production --message "PR 45.1 push diagnostic probes"
+      ```
+
+      `[Phase 45.1-ota]`
+
+- [ ] **Force-quit twice + reopen** to load the OTA, sign in,
+      wait 30s, then check Sentry → Issues (filter by
+      environment=production, last 1H, all severities). Use the
+      table above to identify the failure point.
+      `[Phase 45.1-reproduce]`
+
+- [ ] **Tear-out follow-up.** Once root cause is confirmed,
+      remove the six `captureMessage` probes and the
+      `THREW` captureMessage. The breadcrumbs + failure-branch
+      captures from original PR 45 stay. `[Phase 45.1-cleanup]`
+
+## PR 45 — Push reliability + observability + test coverage `[Phase 45]`
+
+- [x] **Why this PR exists.** Push notifications worked on build
+      15, silently broke by build 17. Symptom: `users/{uid}.fcmTokens`
+      empty even after a fresh sign-in. Three compounding failures
+      let this hide for days:
+      (1) every error in the registration pipeline swallowed via
+      silent `console.warn` — no Sentry signal, no alert;
+      (2) closure-gate retry bug in `AuthBootstrap.tsx:95`
+      (`pushRegistered = true` set BEFORE the async register
+      resolved, so a single transient failure poisoned the gate
+      for the whole session);
+      (3) ZERO test coverage on the push pipeline — client
+      registration, the callables, the triggers — none of it
+      tested.
+
+      Sudhir's directive (May 27 2026): *"I really want PR for
+      test coverage debt. My preference is to cover such issues
+      using our automated tests wherever possible. The more test
+      coverage we have, the faster manual testing it would be."*
+      PR 45 fixes all three classes of failure in one ship.
+
+      Note: PR 45 does NOT pre-suppose the build-17 root cause.
+      The Part-A instrumentation makes the cause VISIBLE on the
+      next device-reproduce — the Sentry breadcrumb trail tells
+      us definitively whether it's a client-code issue (Part B
+      fixed it) or platform-credential issue (`eas credentials`
+      iOS push key — outside this PR).
+
+### Part A — Observability
+
+- [x] **`pushService.registerForPushNotifications` instrumented**
+      at `@src/services/pushService.ts:67-213`. Sentry breadcrumb
+      at every decision point ("register: start", "skip (web)",
+      "skip (simulator)", "permission denied", "token obtained",
+      "backend write ok"). Real failures captured with
+      `captureException` + `push_stage` tag for dashboard
+      grouping. Permission-denial and missing-projectId raised
+      via `captureMessage` at 'info' / 'warning' severity
+      respectively (legitimate non-bug states; still want
+      visibility for adoption tracking).
+
+- [x] **Token prefix only in breadcrumbs** at
+      `@src/services/pushService.ts:142-144`. Full Expo push
+      token is a semi-secret URL the relay uses to address the
+      device; logging the full string to Sentry would be a
+      leak. First 24 chars confirm it's a real
+      `ExponentPushToken[...]` shape without compromising the
+      device's addressability.
+
+- [x] **CRITICAL: callable failure re-throws.** Pre-PR-45 the
+      `try/catch` around `registerPushToken` swallowed every
+      backend rejection. Post-PR-45 at
+      `@src/services/pushService.ts:204-210` it re-throws so
+      `AuthBootstrap`'s orchestrator can distinguish "skipped"
+      (null token, legitimate) from "failed" (real error, retry
+      eligible). This is the closure-gate contract that
+      unblocks Part B's retry semantics.
+
+### Part B — Closure-gate reliability fix
+
+- [x] **Pure orchestrator extracted** at
+      `@src/services/pushRegistrationOrchestrator.ts:1-104`.
+      The retry-aware gate logic is now a function of
+      `(alreadyRegistered, registerForPush, logger)` →
+      `PushRegistrationOutcome | null`. Three outcomes:
+      `registered` (gate flips closed), `skipped` (null token —
+      gate stays open), `failed` (threw — gate stays open).
+      Caller (AuthBootstrap) only flips `pushRegisteredOk = true`
+      when the outcome is `registered`. Mirrors
+      `signOutAndClearLocalState`'s injection-of-deps pattern
+      so the test exercises pure logic without rendering React
+      or mocking expo-notifications.
+
+- [x] **AuthBootstrap wired to orchestrator** at
+      `@src/components/AuthBootstrap.tsx:103-135`. Renamed
+      `pushRegistered` → `pushRegisteredOk` to make the
+      "only-true-on-success" semantics obvious at the call
+      site. Variable scoped INSIDE the `useEffect` (resets on
+      remount / cold-start), NOT module-level (would persist
+      across remounts and re-break the retry-on-cold-start
+      behaviour). Sentry breadcrumb + captureException
+      injected as the logger so a bootstrap-level retry attempt
+      shows up alongside the pushService breadcrumbs in the
+      same Sentry trace.
+
+### Part C — Test coverage
+
+- [x] **C1 — `pushService` tests (10 cases)** at
+      `@tests/services/pushService.test.ts:1-229`. Every branch
+      covered: web/simulator skip, permission denied → info
+      capture, missing projectId → warning capture, token-mint
+      throw → exception capture (returns null, does NOT
+      re-throw), happy path → callable invoked with token +
+      backend-write-ok breadcrumb, **CRITICAL: callable
+      rejects → exception capture + promise re-throws** (the
+      contract Part B depends on), Android channel setup, iOS
+      channel-skip. Uses `jest.mock` for expo-notifications /
+      expo-device / expo-constants + RNFB; spies on the
+      shared Sentry mock via the `__mocks__/services-sentry.ts`
+      file (the moduleNameMapper rewrite for `./sentry` only
+      fires for that exact relative spec, so direct import
+      of `src/services/sentry.ts` would crash on the real
+      `@sentry/react-native` ESM bundle).
+
+- [x] **C2 — `pushRegistrationOrchestrator` tests (11 cases)**
+      at `@tests/services/pushRegistrationOrchestrator.test.ts:1-191`.
+      Every union outcome + the CRITICAL retry-on-failure
+      regression test that pins the build-17 closure-gate bug.
+      The "first call throws → gate stays false → second call
+      retries" sequence at lines 79-103 is the test that
+      would have caught the original bug on PR submission.
+
+- [x] **C3 — server-side validator + plan tests (19 cases)**
+      at `@tests/functions/pushHelpers.test.ts:1-225`. Pure
+      helpers extracted to `@functions/src/pushHelpers.ts:1-184`:
+      `validatePushTokenInput` (shared by `registerPushToken`
+      + `unregisterPushToken`; auth + token-shape gates) and
+      `buildOrderStatusPushPlan` (state machine for
+      `sendOrderStatusPush`; emits `{send, messages}` or
+      `{skip, reason}`). All three callables/triggers refactored
+      at `@functions/src/index.ts:2470-2607` to use the
+      helpers — identical runtime behaviour, just with the
+      logic now mockable from Jest without firebase-admin.
+
+- [x] **Helper-extraction precedent followed.** Mirrors
+      `approveShopHelpers.ts` / `ratingHelpers.ts` /
+      `pendingCountsHelpers.ts` / `customerCrmHelpers.ts`. The
+      repo's testability posture (Rule 5 — audit safety net) is
+      now applied to push exactly the way it was applied to
+      every other server domain.
+
+- [x] **`ORDER_STATUS_LABELS` migrated** from
+      `@functions/src/index.ts` (pre-PR-45 inline constant)
+      into `@functions/src/pushHelpers.ts:80-87`. Trigger code
+      no longer holds the title-mapping; one place for future
+      copy edits + the mapping is exercised by the helper
+      tests.
+
+- [x] **Type checking + full suite.** Root tsc 0 errors,
+      functions tsc 0 errors. **822 / 822 tests pass (79
+      suites)** — +40 new cases (10 pushService + 11
+      orchestrator + 19 pushHelpers).
+
+### Deploy plan
+
+- [ ] **Functions deploy.** Three callables/triggers
+      refactored (logic unchanged; just delegating to extracted
+      helpers). MUST deploy to get the refactored code on the
+      server so its behaviour matches the test suite:
+
+      ```powershell
+      firebase deploy --only "functions:registerPushToken,functions:unregisterPushToken,functions:sendOrderStatusPush"
+      ```
+
+      `[Phase 45-deploy-functions]`
+
+- [ ] **Cloud Run IAM re-verify** for the three callables after
+      deploy (mandatory per discipline rule — each deploy may
+      need allUsers re-binding):
+
+      ```powershell
+      gcloud run services get-iam-policy registerpushtoken --region=asia-south1 --project=grocery-mvp-dev
+      gcloud run services get-iam-policy unregisterpushtoken --region=asia-south1 --project=grocery-mvp-dev
+      # sendOrderStatusPush is a Firestore trigger — no allUsers binding
+      # needed (invoked by the platform, not clients).
+      ```
+
+      If `allUsers + roles/run.invoker` missing on either
+      callable:
+
+      ```powershell
+      gcloud run services add-iam-policy-binding registerpushtoken --region=asia-south1 --member=allUsers --role=roles/run.invoker --project=grocery-mvp-dev
+      gcloud run services add-iam-policy-binding unregisterpushtoken --region=asia-south1 --member=allUsers --role=roles/run.invoker --project=grocery-mvp-dev
+      ```
+
+      `[Phase 45-iam]`
+
+- [ ] **Client OTA.**
+
+      ```powershell
+      eas update --branch production --message "PR 45 push reliability + observability + tests"
+      ```
+
+      `[Phase 45-ota]`
+
+- [ ] **Reproduce on device + read the breadcrumb trail.**
+      Force-quit + reopen + sign in. Check the Sentry dashboard
+      for the breadcrumb trail from that session. The
+      breadcrumb pattern tells you the root cause:
+
+      | Trail stops at... | Diagnosis |
+      |---|---|
+      | `getExpoPushTokenAsync` + exception | Platform/APN credential — fix via `eas credentials` iOS push key setup (outside PR 45) |
+      | `registerPushToken_callable` + exception | Backend issue (IAM, auth context, validation) — investigate captured error |
+      | Reaches `backend write ok` but token not in Firestore | Deeper callable bug |
+      | Reaches `backend write ok` AND token IS in Firestore | Closure-gate WAS the only bug; Part B fixed it |
+
+      `[Phase 45-diagnose]`
+
+### Smoke acceptance
+
+- [ ] **1. Fresh-install token registration.** Force-quit,
+      reopen, sign in. Within ~10s, `users/{uid}.fcmTokens` has
+      an `ExponentPushToken[...]` entry. (If it doesn't,
+      Sentry now shows WHY.)
+
+- [ ] **2. End-to-end push.** With a token registered, customer
+      places an order → shop owner accepts → customer device
+      receives a push within ~5s.
+
+- [ ] **3. Retry-on-failure (hard to trigger manually; covered
+      by tests).** If registration fails once, a later sign-in
+      retries rather than staying broken for the session.
+
+- [ ] **4. Sentry visibility.** After any failed registration,
+      Sentry dashboard shows the breadcrumb trail + captured
+      exception with the `push_stage` tag. No more silent
+      failures. `[Phase 45-smoke]`
+
+### Deferred follow-ups
+
+- [ ] **DEFERRED — `tests/components/AuthBootstrap.test.tsx`
+      (React-component-level integration test).** The prompt
+      asked for a mount-the-component test that drives the
+      `onAuthStateChanged` emitter. The orchestrator suite
+      (`pushRegistrationOrchestrator.test.ts`) already pins
+      the gate logic that bug 17 exposed, so this is belt-and-
+      braces. Skipped because it requires either
+      `@testing-library/react-native` (not in the repo's jest
+      setup) or a hand-rolled hook test which adds infra for
+      negligible incremental coverage. Revisit if a future bug
+      lives in the bootstrap-level wiring (between the
+      orchestrator and the auth subscribe) rather than in the
+      orchestrator. `[Post-launch]`
+
+- [ ] **DEFERRED — Daily IAM audit job.** Cloud Scheduler job
+      that nightly scans all callables for the
+      `allUsers + roles/run.invoker` binding and pages on
+      missing ones. Useful infra (especially after the
+      PR 41 / PR 42 / PR 42.0.1 IAM-drop incidents) but
+      separate Phase-B work. `[Post-launch]`
+
+- [ ] **DEFERRED — Notification preferences UI.** Let users
+      toggle which push types they receive. Future feature.
+      `[Post-launch]`
+
+- [ ] **DEFERRED — Rich notifications.** Images, action
+      buttons. Future feature. `[Post-launch]`
+
 - [ ] **DEFERRED — Per-shop delivery partner leaderboard** for
       admin. Useful later for roster management (admin can
       deprioritize chronically late partners, reward consistent

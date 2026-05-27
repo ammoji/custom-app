@@ -56,14 +56,28 @@ const initialSlotState: KycSlotState = {
 };
 
 const KYC_LABELS: Record<ShopKycDocKind, string> = {
-  // PR 42 — storefront is now MANDATORY. The "(required)" suffix
-  // mirrors the `Finish & wait for approval` gate below; the other
-  // three slots remain admin-discretion (free-text GST/FSSAI numbers
-  // are an acceptable substitute at MVP scale).
+  // PR 42 → PR 43 — three of four slots are now MANDATORY. The
+  // "(required)" suffix mirrors each `handleFinish` gate below.
+  //
+  // - storefront: PR 42 — drives the customer-facing shop card.
+  // - gstDoc:     PR 43 — Section 24 of the CGST Act requires
+  //               GST registration for all suppliers selling
+  //               through an e-commerce operator (regardless of
+  //               the ₹20-40 lakh threshold). HamaraSetu is an
+  //               e-commerce operator; every shop must have GSTIN.
+  // - ownerIdDoc: PR 43 — baseline KYC. Owner uploads either
+  //               Aadhaar OR PAN (their choice; the slot stores
+  //               whichever they photographed). Without proof of
+  //               identity, the platform has no recourse against
+  //               fraudulent listings or undelivered paid orders.
+  //
+  // FSSAI remains optional — relevant only for prepared-food
+  // resellers and even then the free-text license number can
+  // substitute. Don't gate on it.
   storefront: 'Storefront photo (required)',
-  gstDoc: 'GST certificate',
+  gstDoc: 'GST Certificate (required)',
   fssaiDoc: 'FSSAI license',
-  ownerIdDoc: 'Owner ID (Aadhaar/PAN)',
+  ownerIdDoc: 'Owner ID — Aadhaar or PAN (required)',
 };
 
 /**
@@ -266,21 +280,47 @@ export default function RegisterShopScreen() {
     }
   };
 
-  // PR 31 — Step 2 finish. All four slots are optional — admin can
-  // approve on whatever evidence exists (free-text GST/FSSAI numbers
-  // + whatever docs were uploaded). Routes to WaitingForApproval.
+  // PR 31 → PR 42 → PR 43 — Step 2 finish. Three slots are now
+  // mandatory (storefront, gstDoc, ownerIdDoc); FSSAI stays
+  // optional. Order of checks is fixed so the user gets one
+  // clear remediation at a time rather than a cascading wall of
+  // alerts. Each check pairs with the `disabled` gate on the
+  // Finish button (defensive double-guard — async upload writes
+  // can race the user's tap so we both disable the button AND
+  // re-validate here).
   const handleFinish = () => {
     if (!submittedShopId) return;
-    // PR 42 — storefront photo is mandatory. The customer-facing
-    // shop card uses this image (signed-URL'd into shop.imageUrl by
-    // approveShop); without it the card shows a 🏪 placeholder which
-    // hurts Trust Principle 1 (visual quality). We gate at finish
-    // time rather than per-slot because step 2 also lets the user
-    // set up the other three docs in any order.
+    // 1. Storefront — PR 42. Customer-facing shop card uses this
+    //    image; without it the card shows a 🏪 placeholder which
+    //    hurts Trust Principle 1 (visual quality).
     if (!storefront.storagePath) {
       Alert.alert(
         'Storefront photo required',
         'Please upload a photo of your storefront before submitting. This will be your shop\'s main image in the app.',
+      );
+      return;
+    }
+    // 2. Owner ID — PR 43. Aadhaar OR PAN satisfies the gate;
+    //    the slot stores whichever the owner photographed. No
+    //    distinction between the two doc types at this layer —
+    //    admin reviews the uploaded image regardless.
+    if (!ownerIdDoc.storagePath) {
+      Alert.alert(
+        'Owner ID required',
+        'Please upload a photo of your Aadhaar OR PAN card. Either one works — this confirms the shop owner\'s identity.',
+      );
+      return;
+    }
+    // 3. GST Certificate — PR 43. Section 24 of the CGST Act
+    //    requires GST registration for all suppliers selling
+    //    through an e-commerce operator. HamaraSetu = e-commerce
+    //    operator → every shop needs GSTIN. The gst.gov.in
+    //    helper text under the upload tile gives the owner a
+    //    self-serve unblock path (3-7 working days to register).
+    if (!gstDoc.storagePath) {
+      Alert.alert(
+        'GST Certificate required',
+        'Please upload your GST registration certificate. HamaraSetu requires GST registration for all shops per Section 24 of the CGST Act.\n\nDon\'t have GST yet? Register free at gst.gov.in (takes 3-7 working days).',
       );
       return;
     }
@@ -664,12 +704,11 @@ export default function RegisterShopScreen() {
           {step === 2 && (
             <>
               <Text style={styles.intro}>
-                Help us verify your shop is genuine. The storefront photo
-                is required — it becomes your shop's main image on the
-                customer app. The other three documents are optional but
-                help admin confirm your registration is real; you can
-                add or replace any of them while your shop is pending
-                review.
+                Help us verify your shop is genuine. Three documents are
+                required to submit: the storefront photo (becomes your
+                shop's main image), your GST Certificate, and one Owner
+                ID (Aadhaar or PAN). FSSAI is optional — only relevant
+                if you sell prepared food.
               </Text>
 
               <KycSlotCard
@@ -679,22 +718,30 @@ export default function RegisterShopScreen() {
                 onPress={() => pickAndUpload('storefront', setStorefront)}
               />
               <KycSlotCard
+                label={KYC_LABELS.ownerIdDoc}
+                hint="Aadhaar or PAN — either one works"
+                state={ownerIdDoc}
+                onPress={() => pickAndUpload('ownerIdDoc', setOwnerIdDoc)}
+              />
+              <KycSlotCard
                 label={KYC_LABELS.gstDoc}
                 hint="Photo or scan of your GST certificate"
                 state={gstDoc}
                 onPress={() => pickAndUpload('gstDoc', setGstDoc)}
               />
+              {/* PR 43 — GST helper line. Many small kiranas don't
+                  have GSTIN yet; rather than block them at the gate
+                  with no remediation path, point them to gst.gov.in
+                  for the (free, ~3-7 working day) registration. */}
+              <Text style={styles.kycHelper}>
+                Don't have GST yet? Register free at gst.gov.in.
+                Takes 3-7 working days.
+              </Text>
               <KycSlotCard
                 label={KYC_LABELS.fssaiDoc}
                 hint="Photo or scan of your FSSAI license"
                 state={fssaiDoc}
                 onPress={() => pickAndUpload('fssaiDoc', setFssaiDoc)}
-              />
-              <KycSlotCard
-                label={KYC_LABELS.ownerIdDoc}
-                hint="Aadhaar or PAN card of the proprietor"
-                state={ownerIdDoc}
-                onPress={() => pickAndUpload('ownerIdDoc', setOwnerIdDoc)}
               />
 
               <View style={{ marginTop: spacing.lg }}>
@@ -702,12 +749,20 @@ export default function RegisterShopScreen() {
                   title="Finish & wait for approval"
                   onPress={handleFinish}
                   size="lg"
-                  // PR 42 — disable until storefront upload completes.
-                  // The handleFinish gate above also alerts if a tap
-                  // somehow reaches it without a storefront (defence
-                  // in depth — disabled state can race with the
-                  // upload's `setStorefront` write).
-                  disabled={!storefront.storagePath || storefront.uploading}
+                  // PR 42 → PR 43 — disable until ALL three mandatory
+                  // uploads complete. The handleFinish gate above also
+                  // alerts on tap if a race lets the user reach it
+                  // without one of the slots populated (defence in
+                  // depth — disabled state can race with the upload's
+                  // `setSlot` write). FSSAI is excluded — optional.
+                  disabled={
+                    !storefront.storagePath ||
+                    storefront.uploading ||
+                    !ownerIdDoc.storagePath ||
+                    ownerIdDoc.uploading ||
+                    !gstDoc.storagePath ||
+                    gstDoc.uploading
+                  }
                 />
               </View>
 
@@ -908,6 +963,17 @@ const styles = StyleSheet.create({
     marginBottom: spacing.sm,
   },
   row: { flexDirection: 'row' },
+  // PR 43 — small helper line under the GST upload tile pointing
+  // owners without GSTIN to the free gst.gov.in registration. Tight
+  // top margin (sits flush under the tile) + negative-ish bottom
+  // so it doesn't push the next tile down the screen.
+  kycHelper: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    marginTop: -spacing.xs,
+    marginBottom: spacing.sm,
+    paddingHorizontal: spacing.xs,
+  },
   footnote: {
     ...typography.caption,
     color: colors.textSecondary,

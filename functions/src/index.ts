@@ -173,6 +173,15 @@ import {
   pickStorefrontPath,
   buildFirebaseStorageDownloadUrl,
 } from './approveShopHelpers';
+// PR 45 — DO NOT REMOVE. Used by registerPushToken / unregisterPushToken
+// callables (input validation) and sendOrderStatusPush trigger
+// (message-construction state machine). Auto-formatter risk per
+// code-discipline; if tsc complains about validatePushTokenInput or
+// buildOrderStatusPushPlan, re-add this block.
+import {
+  buildOrderStatusPushPlan,
+  validatePushTokenInput,
+} from './pushHelpers';
 import { randomUUID } from 'crypto';
 import {
     aggregateShopCustomers,
@@ -2461,20 +2470,19 @@ export const cleanupAbandonedOrders = onSchedule(
 export const registerPushToken = onCall<{ token: string }>(
   { cors: true, enforceAppCheck: false },
   async request => {
-    const auth = request.auth;
-    if (!auth) {
-      throw new HttpsError('unauthenticated', 'Sign in required');
+    // PR 45 — input validation extracted to `validatePushTokenInput`
+    // so the auth + token-shape gates are exercised by
+    // `tests/functions/pushHelpers.test.ts` without spinning up
+    // firebase-admin. Loose validation kept (any non-empty string
+    // accepted) so this endpoint can later carry raw FCM/APN tokens
+    // if we drop the Expo Push relay.
+    const v = validatePushTokenInput(request.auth, request.data);
+    if (!v.ok) {
+      throw new HttpsError(v.code, v.message);
     }
-    const { token } = request.data ?? ({} as { token?: string });
-    if (!token || typeof token !== 'string') {
-      throw new HttpsError('invalid-argument', 'token required');
-    }
-    // Loose validation — Expo tokens look like ExponentPushToken[…] or
-    // ExpoPushToken[…]. We don't enforce strictly so the same endpoint
-    // can accept raw FCM/APNs tokens later if we migrate.
-    await db.doc(`users/${auth.uid}`).set(
+    await db.doc(`users/${v.uid}`).set(
       {
-        fcmTokens: FieldValue.arrayUnion(token),
+        fcmTokens: FieldValue.arrayUnion(v.token),
         updatedAt: FieldValue.serverTimestamp(),
       },
       { merge: true },
@@ -2502,17 +2510,17 @@ export const registerPushToken = onCall<{ token: string }>(
 export const unregisterPushToken = onCall<{ token: string }>(
   { cors: true, enforceAppCheck: false },
   async request => {
-    const auth = request.auth;
-    if (!auth) {
-      throw new HttpsError('unauthenticated', 'Sign in required');
+    // PR 45 — shares `validatePushTokenInput` with registerPushToken;
+    // the gate rules are identical and centralising the check keeps
+    // any future tightening (e.g. enforcing `ExponentPushToken[…]`
+    // shape) a single-file edit.
+    const v = validatePushTokenInput(request.auth, request.data);
+    if (!v.ok) {
+      throw new HttpsError(v.code, v.message);
     }
-    const { token } = request.data ?? ({} as { token?: string });
-    if (!token || typeof token !== 'string') {
-      throw new HttpsError('invalid-argument', 'token required');
-    }
-    await db.doc(`users/${auth.uid}`).set(
+    await db.doc(`users/${v.uid}`).set(
       {
-        fcmTokens: FieldValue.arrayRemove(token),
+        fcmTokens: FieldValue.arrayRemove(v.token),
         updatedAt: FieldValue.serverTimestamp(),
       },
       { merge: true },
@@ -2521,23 +2529,25 @@ export const unregisterPushToken = onCall<{ token: string }>(
   },
 );
 
-const ORDER_STATUS_LABELS: Record<string, string> = {
-  pending: 'Order received',
-  accepted: 'Order accepted',
-  preparing: 'Preparing your order',
-  ready_for_pickup: 'Out for delivery',
-  delivered: 'Order delivered',
-  cancelled: 'Order cancelled',
-};
+// PR 45 — ORDER_STATUS_LABELS moved into `pushHelpers.ts` so the
+// title-mapping is exercised by buildOrderStatusPushPlan tests.
 
 export const sendOrderStatusPush = onDocumentUpdated(
   { document: 'orders/{orderId}', region: 'asia-south1' },
   async event => {
+    // PR 45 — IO + helper split. The trigger reads Firestore, the
+    // helper decides what to send. Each skip reason maps to a
+    // distinct log line so production debugging stays as good as
+    // pre-refactor.
     const before = event.data?.before.data();
     const after = event.data?.after.data();
     if (!before || !after) return;
     if (before.status === after.status) return;
 
+    // Need the customerUid early to know WHICH user doc to read.
+    // The helper re-checks this in `missing_customer_uid` to keep
+    // its contract self-contained, but we short-circuit here to
+    // avoid an unnecessary `users/undefined` doc read.
     const customerUid = after.customerUid as string | undefined;
     if (!customerUid) {
       console.warn(
@@ -2554,27 +2564,27 @@ export const sendOrderStatusPush = onDocumentUpdated(
       return;
     }
     const tokens: string[] = userSnap.data()?.fcmTokens ?? [];
-    if (!tokens.length) {
-      console.log(
-        `[sendOrderStatusPush] no tokens for ${customerUid} — skipping`,
-      );
+
+    const plan = buildOrderStatusPushPlan({
+      before,
+      after,
+      tokens,
+      orderId: event.params.orderId,
+    });
+    if (plan.kind === 'skip') {
+      // Each skip reason gets its own log line — preserves the
+      // pre-refactor debug visibility.
+      if (plan.reason === 'no_tokens') {
+        console.log(
+          `[sendOrderStatusPush] no tokens for ${customerUid} — skipping`,
+        );
+      } else {
+        console.log(
+          `[sendOrderStatusPush] skipped order ${event.params.orderId} reason=${plan.reason}`,
+        );
+      }
       return;
     }
-
-    const title =
-      ORDER_STATUS_LABELS[after.status as string] ?? String(after.status);
-    const itemCount = Array.isArray(after.items) ? after.items.length : 0;
-    const body = `${after.shopName ?? 'Your shop'} — ${itemCount} item${
-      itemCount === 1 ? '' : 's'
-    }`;
-
-    const messages = tokens.map(token => ({
-      to: token,
-      sound: 'default' as const,
-      title,
-      body,
-      data: { orderId: after.id ?? event.params.orderId, type: 'order_status' },
-    }));
 
     try {
       const res = await fetch('https://exp.host/--/api/v2/push/send', {
@@ -2583,11 +2593,11 @@ export const sendOrderStatusPush = onDocumentUpdated(
           Accept: 'application/json',
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(messages),
+        body: JSON.stringify(plan.messages),
       });
       const data = await res.json();
       console.log(
-        `[sendOrderStatusPush] sent ${tokens.length} push(es) for ${event.params.orderId} ` +
+        `[sendOrderStatusPush] sent ${plan.messages.length} push(es) for ${event.params.orderId} ` +
           `(${before.status} → ${after.status}):`,
         JSON.stringify(data),
       );
