@@ -1,5 +1,5 @@
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../components/common/Button';
@@ -13,7 +13,19 @@ import { profileService } from '../services/profileService';
 import { Sentry } from '../services/sentry';
 import { useAuthStore } from '../store/useAuthStore';
 import { useCartStore } from '../store/useCartStore';
-import type { Address, PaymentMethod, SavedAddress, SubstitutionPreference, UserProfile } from '../types';
+import { locationService } from '../services/locationService';
+import type {
+  Address,
+  DeliveryLocation,
+  PaymentMethod,
+  SavedAddress,
+  SubstitutionPreference,
+  UserProfile,
+} from '../types';
+// PR 47 — preview tiered delivery charge from the shop's snapshot
+// tier table + the live distance estimate. Pure helper; the server
+// re-computes authoritatively at placeOrder time.
+import { chargeForDistance } from '../utils/deliveryChargeHelpers';
 // PR 5 — DO NOT REMOVE. Auto-formatter stripped this import once during
 // PR 5. Used in the Razorpay `prefill.email` field below.
 import { deriveCheckoutEmail } from '../utils/checkoutEmail';
@@ -41,9 +53,23 @@ export default function CheckoutScreen() {
   const shopId = useCartStore(s => s.shopId);
   const shopName = useCartStore(s => s.shopName);
   const deliveryFee = useCartStore(s => s.deliveryFee);
+  // PR 47 — read the snapshot tier table that addItem/addMenuItem
+  // stamped onto the cart. Null on legacy shops + on carts persisted
+  // from a pre-PR-47 build → falls back to the flat `deliveryFee`
+  // via `chargeForDistance`'s legacy branch.
+  const deliveryChargeTiers = useCartStore(s => s.deliveryChargeTiers);
   const subtotal = useCartStore(s => s.subtotal());
-  const total = useCartStore(s => s.total());
   const clearCart = useCartStore(s => s.clearCart);
+
+  // PR 47 — preview tiered delivery charge. Computed locally from
+  // the cart's tier snapshot + the live distance estimate (set
+  // further down by the getDeliveryEstimate effect). When the
+  // estimate hasn't resolved yet we pass `0` km, which lands in
+  // the cheapest tier — slight visual flicker is preferable to
+  // hiding the line entirely. The server re-derives at placeOrder
+  // time so a stale or under-estimated preview can never under-charge
+  // the customer.
+  // (Value computed below, after `deliveryEstimate` state is declared.)
 
   const [name, setName] = useState('');
   const [line1, setLine1] = useState('');
@@ -99,6 +125,63 @@ export default function CheckoutScreen() {
   const [profileLoadError, setProfileLoadError] = useState<string | null>(null);
   const isAnonymous = useAuthStore(s => s.isAnonymous);
 
+  // PR 46 — locked delivery location target. Three logical states
+  // tracked together as a small discriminated union:
+  //   - { mode: 'saved' }: customer picked a saved address. The
+  //     coords come from the address row IF it has lat/lng, else
+  //     we fall back to live GPS at order time and surface a note.
+  //   - { mode: 'current' }: customer tapped "Deliver to my current
+  //     location". coords come straight from useLocationStore /
+  //     locationService. addressId is omitted on the locked
+  //     DeliveryLocation server-side.
+  //   - null: nothing chosen yet (e.g. picker hasn't loaded).
+  const [deliveryTargetMode, setDeliveryTargetMode] = useState<
+    'saved' | 'current' | null
+  >(null);
+  // Live-captured coords for the 'current' branch AND the
+  // saved-address-without-coords fallback. Captured lazily on
+  // first need so we don't hit GPS just because the user opened
+  // the screen.
+  const [liveCoords, setLiveCoords] = useState<{
+    lat: number;
+    lng: number;
+    source: 'gps' | 'fallback';
+  } | null>(null);
+  const [liveCoordsError, setLiveCoordsError] = useState<string | null>(null);
+  const [capturingLive, setCapturingLive] = useState(false);
+  // Estimate preview returned by getDeliveryEstimate — cleared
+  // whenever the target changes, recomputed when target + coords
+  // resolve. `null` means "haven't computed yet"; an explicit
+  // `{ failed: true }` shape would be over-engineering since we
+  // gracefully render "Estimating…" while loading and just hide
+  // the line if the call rejects (server already falls back to
+  // haversine, so a hard failure means the shop has no `location`
+  // — rare and expected to be handled at the listing-filter level
+  // in PR 48).
+  const [deliveryEstimate, setDeliveryEstimate] = useState<{
+    distanceKm: number;
+    durationMin: number;
+  } | null>(null);
+  const [estimating, setEstimating] = useState(false);
+
+  // PR 47 — derived preview charge. Pure function over (tiers,
+  // distance, fallback); recomputed every render which is cheap.
+  // The shown bill total uses this value, NOT the legacy flat
+  // `deliveryFee` — so a customer 0.5km away really sees the
+  // ≤1km tier price, and a customer 7km away sees the catch-all.
+  // When `deliveryEstimate` is null (form-mode-no-target, or the
+  // estimate call failed) we fall back to 0km which lands in the
+  // cheapest band; the server's authoritative re-derivation at
+  // placeOrder time fixes any under-estimate. Acceptable because
+  // (a) this is preview, (b) the placeOrder doc is the source of
+  // truth, (c) hiding the line entirely is worse UX.
+  const previewDeliveryCharge = chargeForDistance(
+    deliveryChargeTiers,
+    deliveryEstimate?.distanceKm ?? 0,
+    deliveryFee,
+  );
+  const total = subtotal + previewDeliveryCharge;
+
   // Hydrate from saved profile every time the screen focuses. Anonymous
   // users have no profile to hydrate from — they'll get the form. The
   // call is auth-required so we skip it cleanly.
@@ -122,6 +205,10 @@ export default function CheckoutScreen() {
             applySavedToForm(def);
             setSelectedAddressId(def.id);
             setUsingForm(false);
+            // PR 46 — default to 'saved' mode when we autoselected
+            // a default address. Customer can still tap "current
+            // location" to override.
+            setDeliveryTargetMode('saved');
           } else {
             setSelectedAddressId(null);
             setUsingForm(true);
@@ -175,6 +262,9 @@ export default function CheckoutScreen() {
     applySavedToForm(addr);
     setSelectedAddressId(addr.id);
     setUsingForm(false);
+    // PR 46 — picking a saved address makes 'saved' the active
+    // delivery target (overrides any prior 'current location' tap).
+    setDeliveryTargetMode('saved');
   };
 
   const onUseDifferent = () => {
@@ -183,6 +273,180 @@ export default function CheckoutScreen() {
     // Don't clear fields — let the user edit on top of the
     // selected address. They can manually clear if they want.
   };
+
+  // PR 46 — set the picker mode AND, when switching back to
+  // saved-address mode after the user previously tapped "current
+  // location", auto-restore the default saved address selection.
+  // Centralized so the option-card press handlers stay short.
+  const onPickCurrentLocation = useCallback(async () => {
+    setDeliveryTargetMode('current');
+    setSelectedAddressId(null);
+    // Capture live coords IF we don't already have a fresh capture.
+    // Re-tapping the option re-runs the GPS prompt so the customer
+    // can refresh stale coords if they're in the middle of moving.
+    setLiveCoordsError(null);
+    setCapturingLive(true);
+    try {
+      const result = await locationService.getCurrentLocation();
+      setLiveCoords({
+        lat: result.location.lat,
+        lng: result.location.lng,
+        source: result.source,
+      });
+    } catch (err: any) {
+      setLiveCoords(null);
+      setLiveCoordsError(err?.message ?? 'Could not get current location');
+    } finally {
+      setCapturingLive(false);
+    }
+  }, []);
+
+  // Build the locked DeliveryLocation that will ride along with
+  // placeOrder. Returns null when no decision can be made (e.g.
+  // 'current' mode with no live coords yet) — caller decides
+  // whether that's a hard block (place-order) or a noop (estimate
+  // preview).
+  //
+  // Decision matrix:
+  //   - mode 'saved' + selected address has lat/lng → use them.
+  //   - mode 'saved' + selected address has NO lat/lng → fall
+  //     back to liveCoords if captured. We surface a yellow note
+  //     in the UI so the customer knows the saved address has no
+  //     pin and we're using live GPS for distance only — the
+  //     order's deliveryLocation still records type='saved_address'
+  //     + addressId so analytics can trace the source.
+  //   - mode 'current' + liveCoords set → use them with type='current_location'.
+  //   - any other combination → null (display blocks until resolved).
+  const resolveDeliveryLocation = useCallback((): DeliveryLocation | null => {
+    if (deliveryTargetMode === 'current') {
+      if (!liveCoords) return null;
+      return {
+        lat: liveCoords.lat,
+        lng: liveCoords.lng,
+        type: 'current_location',
+        label: 'Current location',
+      };
+    }
+    if (deliveryTargetMode === 'saved') {
+      const picked = profile?.addresses.find(a => a.id === selectedAddressId);
+      if (!picked) return null;
+      // saved with coords on row → primary path
+      if (
+        typeof picked.lat === 'number' &&
+        typeof picked.lng === 'number' &&
+        Number.isFinite(picked.lat) &&
+        Number.isFinite(picked.lng)
+      ) {
+        return {
+          lat: picked.lat,
+          lng: picked.lng,
+          type: 'saved_address',
+          addressId: picked.id,
+          label: picked.label?.trim() || picked.line1 || 'Saved address',
+        };
+      }
+      // saved without coords — fall back to live GPS if we have it
+      if (liveCoords) {
+        return {
+          lat: liveCoords.lat,
+          lng: liveCoords.lng,
+          type: 'saved_address',
+          addressId: picked.id,
+          label: picked.label?.trim() || picked.line1 || 'Saved address',
+        };
+      }
+      return null;
+    }
+    return null;
+  }, [deliveryTargetMode, liveCoords, profile?.addresses, selectedAddressId]);
+
+  // PR 46 — derived flag: the picked saved address has no GPS pin
+  // AND we haven't yet captured live fallback coords. UI uses this
+  // to (a) auto-trigger a one-time live capture and (b) show a
+  // "we'll use your current location" note next to the picker.
+  const savedAddressMissingCoords = (() => {
+    if (deliveryTargetMode !== 'saved') return false;
+    const picked = profile?.addresses.find(a => a.id === selectedAddressId);
+    if (!picked) return false;
+    const hasCoords =
+      typeof picked.lat === 'number' &&
+      typeof picked.lng === 'number' &&
+      Number.isFinite(picked.lat) &&
+      Number.isFinite(picked.lng);
+    return !hasCoords;
+  })();
+
+  // Auto-capture live coords once when a coordless saved address
+  // is picked. Idempotent — guarded on capturingLive + liveCoords
+  // so re-renders don't spam GPS. The customer can re-trigger by
+  // explicitly switching to "current location".
+  useEffect(() => {
+    if (
+      savedAddressMissingCoords &&
+      !liveCoords &&
+      !capturingLive &&
+      !liveCoordsError
+    ) {
+      setCapturingLive(true);
+      locationService
+        .getCurrentLocation()
+        .then(result => {
+          setLiveCoords({
+            lat: result.location.lat,
+            lng: result.location.lng,
+            source: result.source,
+          });
+        })
+        .catch(err => {
+          setLiveCoordsError(err?.message ?? 'Could not get current location');
+        })
+        .finally(() => setCapturingLive(false));
+    }
+  }, [savedAddressMissingCoords, liveCoords, capturingLive, liveCoordsError]);
+
+  // PR 46 — fetch the delivery estimate whenever the resolved
+  // location changes. Debounced to a single in-flight call by
+  // tracking a request id; stale completions are dropped. The call
+  // is purely for the display preview — placeOrder re-derives
+  // server-side for the authoritative stamp, so a missed/stale
+  // preview here is safe (worst case the estimate line briefly
+  // shows the previous value before refreshing).
+  useEffect(() => {
+    if (!shopId) return;
+    const dl = resolveDeliveryLocation();
+    if (!dl) {
+      setDeliveryEstimate(null);
+      setEstimating(false);
+      return;
+    }
+    let cancelled = false;
+    setEstimating(true);
+    orderService
+      .getDeliveryEstimate({
+        shopId,
+        dest: { lat: dl.lat, lng: dl.lng },
+      })
+      .then(res => {
+        if (cancelled) return;
+        setDeliveryEstimate({
+          distanceKm: res.distanceKm,
+          durationMin: res.durationMin,
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // Server's haversine fallback means this only triggers on
+        // hard failures (no shop.location, IAM problem). UI hides
+        // the estimate line in that case.
+        setDeliveryEstimate(null);
+      })
+      .finally(() => {
+        if (!cancelled) setEstimating(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [shopId, resolveDeliveryLocation]);
 
   const validate = (): Errors => {
     const e: Errors = {};
@@ -323,6 +587,15 @@ export default function CheckoutScreen() {
       deliveryInstructions: orderInstructions.trim() || undefined,
     };
 
+    // PR 46 — resolve the locked delivery location. May be null if
+    // the user opened checkout, never picked a saved address, never
+    // tapped "current location", and is in form mode (entering a
+    // brand-new address). In that case we still place the order but
+    // without the locked-fields stamp — back-compat clean. This is
+    // the primary place we surface "current location" to: when the
+    // user is in form mode without saved addresses.
+    const lockedDl = resolveDeliveryLocation();
+
     try {
       const result = await orderService.placeOrder({
         shopId,
@@ -335,6 +608,11 @@ export default function CheckoutScreen() {
         // shop doesn't have to call mid-fulfillment for unavailable
         // items the customer already decided about.
         substitutionPreference,
+        // PR 46 — locked delivery location. Server validates,
+        // re-derives the distance/duration estimate authoritatively,
+        // and stamps all three fields onto the order doc. Skipped
+        // entirely when null — the order doc stays back-compat-clean.
+        ...(lockedDl ? { deliveryLocation: lockedDl } : {}),
       });
       Analytics.place_order({
         order_id: result.orderId,
@@ -507,6 +785,7 @@ export default function CheckoutScreen() {
                         applySavedToForm(def);
                         setSelectedAddressId(def.id);
                         setUsingForm(false);
+                        setDeliveryTargetMode('saved');
                       } else {
                         setUsingForm(true);
                       }
@@ -528,6 +807,64 @@ export default function CheckoutScreen() {
                 <Text style={styles.profileLoadBannerRetry}>Retry</Text>
               </Pressable>
             </View>
+          )}
+
+          {/* PR 46 — "Deliver to my current location" option.
+              Renders above the saved-address picker so it's the
+              first thing the customer sees in their address
+              section. Tapping captures live GPS via expo-location
+              and switches the delivery target to live coords; the
+              saved-address picker visually unselects but the form
+              fields stay populated so an order placed in this
+              mode still has an Address (street/pincode/etc.) for
+              the delivery partner to navigate to.
+              When the customer hasn't filled the form (form mode
+              with empty fields) the form's pincode/phone validation
+              will reject Place Order — they must complete the
+              physical address even if delivery distance comes from
+              live GPS. */}
+          {profileLoaded && (
+            <Pressable
+              onPress={onPickCurrentLocation}
+              accessibilityRole="radio"
+              accessibilityState={{
+                selected: deliveryTargetMode === 'current',
+              }}
+              accessibilityLabel="Deliver to my current location"
+              style={[
+                styles.savedCard,
+                deliveryTargetMode === 'current' && styles.savedCardSelected,
+                { marginBottom: spacing.md },
+              ]}
+            >
+              <View
+                style={[
+                  styles.radio,
+                  deliveryTargetMode === 'current' && styles.radioSelected,
+                ]}
+              >
+                {deliveryTargetMode === 'current' && (
+                  <View style={styles.radioDot} />
+                )}
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={typography.bodyBold}>
+                  📍 Deliver to my current location
+                </Text>
+                <Text
+                  style={[typography.caption, { marginTop: 2 }]}
+                  numberOfLines={2}
+                >
+                  {capturingLive && deliveryTargetMode === 'current'
+                    ? 'Getting your location…'
+                    : deliveryTargetMode === 'current' && liveCoords
+                      ? liveCoords.source === 'gps'
+                        ? `Live GPS captured (${liveCoords.lat.toFixed(4)}, ${liveCoords.lng.toFixed(4)})`
+                        : "Couldn't get GPS — using approximate location"
+                      : 'Use live GPS for delivery distance'}
+                </Text>
+              </View>
+            </Pressable>
           )}
 
           {/* Picker mode: profile has saved addresses and user hasn't
@@ -582,6 +919,23 @@ export default function CheckoutScreen() {
               >
                 <Text style={styles.useDifferentText}>Use a different address</Text>
               </Pressable>
+              {/* PR 46 — saved address has no GPS pin. We surface a
+                  note explaining we'll use the customer's live
+                  location for the delivery distance estimate (the
+                  street address still drives navigation). The fix
+                  is: open the address in AddressEdit and tap
+                  "Use my current location" to backfill the pin —
+                  surfaced here as a soft prompt rather than a hard
+                  block to keep the checkout flow moving. */}
+              {savedAddressMissingCoords && (
+                <View style={styles.coordsFallbackBanner}>
+                  <Text style={styles.coordsFallbackText}>
+                    📍 This saved address has no map pin. We&apos;ll use
+                    your current location to estimate delivery distance
+                    for this order. To save a pin, edit the address.
+                  </Text>
+                </View>
+              )}
             </View>
           )}
 
@@ -636,10 +990,50 @@ export default function CheckoutScreen() {
               <Text style={typography.body}>Item total</Text>
               <Text style={typography.body}>{formatRupees(subtotal)}</Text>
             </View>
+            {/* PR 47 — distance-based delivery charge replaces the
+                flat fee row. When we have a resolved estimate we
+                also show the matched distance band ("Delivery
+                (2.3 km)") so the customer can see WHY the charge
+                is what it is — same UX shape as the design doc.
+                When no estimate is resolved yet we render the row
+                without the (… km) suffix; the value still updates
+                live as the customer picks a target. */}
             <View style={styles.summaryRow}>
-              <Text style={typography.body}>Delivery fee</Text>
-              <Text style={typography.body}>{formatRupees(deliveryFee)}</Text>
+              <Text style={typography.body}>
+                {deliveryEstimate
+                  ? `Delivery (${deliveryEstimate.distanceKm.toFixed(1)} km)`
+                  : 'Delivery'}
+              </Text>
+              <Text style={typography.body}>
+                {formatRupees(previewDeliveryCharge)}
+              </Text>
             </View>
+            {/* PR 46 — estimated delivery time. Only renders when we
+                have a resolved estimate; deliberately silent when
+                we don't (saves a "—" placeholder line that adds
+                visual noise in the form-mode-no-target case). The
+                charge stays flat at `deliveryFee` until PR 47
+                flips it to distance-tiered. */}
+            {estimating && (
+              <View style={styles.summaryRow}>
+                <Text style={[typography.body, { color: colors.textSecondary }]}>
+                  Estimated delivery
+                </Text>
+                <Text style={[typography.body, { color: colors.textSecondary }]}>
+                  Estimating…
+                </Text>
+              </View>
+            )}
+            {!estimating && deliveryEstimate && (
+              <View style={styles.summaryRow}>
+                <Text style={typography.body}>Estimated delivery</Text>
+                <Text style={typography.body}>
+                  ~{Math.max(1, Math.round(deliveryEstimate.durationMin))} min
+                  {' · '}
+                  {deliveryEstimate.distanceKm.toFixed(1)} km
+                </Text>
+              </View>
+            )}
             <View style={styles.divider} />
             <View style={styles.summaryRow}>
               <Text style={typography.bodyBold}>Total</Text>
@@ -927,5 +1321,20 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     alignSelf: 'flex-end',
     marginBottom: spacing.lg,
+  },
+  // PR 46 — yellow note shown under the saved-address picker when
+  // the picked address has no GPS pin AND we'll be substituting
+  // live GPS for the delivery distance estimate. Distinct visual
+  // weight from the address row itself so the customer parses it
+  // as informational rather than a selection.
+  coordsFallbackBanner: {
+    marginTop: spacing.sm,
+    padding: spacing.sm,
+    borderRadius: radii.sm,
+    backgroundColor: '#FEF3C7', // amber-100
+  },
+  coordsFallbackText: {
+    ...typography.caption,
+    color: '#92400E', // amber-700
   },
 });

@@ -1010,6 +1010,7 @@ sessions don't have to re-litigate.
 | Dark store / warehouse optimization | ⛔ Out of scope, permanently | Kirana marketplace model, not quick-commerce. Different business. |
 | ML-based ETA prediction | ⛔ Deferred 6+ months | Manual shop-owner ETA is more accurate at our data scale. Revisit at 1M+ orders. |
 | Live delivery-partner GPS on map | ⛔ Deferred to Phase D | High eng cost (battery, geofencing, infra) for marginal trust gain on short kirana deliveries. |
+| **Enable Google Distance Matrix (geo system PRs 46–50)** | ⛔ Deferred until ~50 shops / 100s of customers | Geo system (delivery charges, ETA, routing, radius) ships pre-pilot on FREE **haversine ×1.4 + 15km/h proration**. Distance Matrix code is BUILT but dormant behind `aiFeatures/distanceMatrix.enabled` (default false) — flip the flag at scale for road-accurate distance/duration, no code change. APIs already enabled + key set (May 27 2026). Sudhir's cost-conservative call: don't accrue ANY Maps cost (not even the $200/mo free credit) during pilot. Before flipping: set up Maps billing alert. See `docs/GEO_DISTANCE_SYSTEM_DESIGN.md` → "FUTURE TO-DO". |
 | Voice search | ⛔ Deferred to Phase E+ | Native voice infra is heavy; LLM-based dictation could replace it but isn't a priority. |
 | Wallet (RBI PPI flavor) | ⛔ Out of scope unless we get a PPI license | Heavy compliance for marginal gain over internal store credit. |
 | `@react-native-firebase/messaging` migration | ⛔ Keep Expo Push | Existing setup works; migration risk outweighs benefit. Documented in PRELAUNCH. |

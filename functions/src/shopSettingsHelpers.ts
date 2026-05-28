@@ -36,13 +36,23 @@ export type ShopSettingsInput = {
   shopId?: unknown;
   deliveryFee?: unknown;
   minOrder?: unknown;
+  // PR 48 — service radius in km. Third whitelisted field. Same
+  // integer-only / range-clamped posture as `deliveryFee` /
+  // `minOrder`. Drives the visibility gate in `listShopsPublic`
+  // (`filterShopsByServiceRadius`).
+  serviceRadiusKm?: unknown;
 };
 
 export type ShopSettingsResult =
   | {
       ok: true;
       shopId: string;
-      updates: { deliveryFee?: number; minOrder?: number };
+      updates: {
+        deliveryFee?: number;
+        minOrder?: number;
+        // PR 48 — service radius (1–50 km, integer-only).
+        serviceRadiusKm?: number;
+      };
     }
   | {
       ok: false;
@@ -52,6 +62,11 @@ export type ShopSettingsResult =
 
 const DELIVERY_FEE_MAX = 500;
 const MIN_ORDER_MAX = 10000;
+// PR 48 — urban kirana realistic ceiling. Above 50 km the haversine
+// fallback's accuracy degrades sharply and the road-distance estimate
+// from Distance Matrix gets dominated by intercity routing nuances
+// that aren't relevant to a same-day-delivery model.
+const SERVICE_RADIUS_MAX_KM = 50;
 
 function isFiniteInteger(v: unknown): v is number {
   return (
@@ -62,7 +77,7 @@ function isFiniteInteger(v: unknown): v is number {
 export function validateShopSettings(
   input: ShopSettingsInput,
 ): ShopSettingsResult {
-  const { auth, deliveryFee, minOrder } = input;
+  const { auth, deliveryFee, minOrder, serviceRadiusKm } = input;
 
   // 1. Auth gate.
   if (!auth) {
@@ -118,15 +133,21 @@ export function validateShopSettings(
   //    deliveryFee (mirrors ShopMenuItemEdit's dirty-field pattern).
   const hasDelivery = deliveryFee !== undefined;
   const hasMinOrder = minOrder !== undefined;
-  if (!hasDelivery && !hasMinOrder) {
+  const hasRadius = serviceRadiusKm !== undefined;
+  if (!hasDelivery && !hasMinOrder && !hasRadius) {
     return {
       ok: false,
       code: 'invalid-argument',
-      message: 'At least one of deliveryFee or minOrder is required',
+      message:
+        'At least one of deliveryFee, minOrder, or serviceRadiusKm is required',
     };
   }
 
-  const updates: { deliveryFee?: number; minOrder?: number } = {};
+  const updates: {
+    deliveryFee?: number;
+    minOrder?: number;
+    serviceRadiusKm?: number;
+  } = {};
 
   if (hasDelivery) {
     if (!isFiniteInteger(deliveryFee)) {
@@ -162,6 +183,28 @@ export function validateShopSettings(
       };
     }
     updates.minOrder = minOrder;
+  }
+
+  // PR 48 — service radius. Integer-only (sub-km service areas aren't
+  // meaningful for kirana delivery) and 1–50 km. The 1-km floor
+  // matches the cheapest `chargeForDistance` band so an owner can
+  // never set a radius that would hide them from EVERY customer.
+  if (hasRadius) {
+    if (!isFiniteInteger(serviceRadiusKm)) {
+      return {
+        ok: false,
+        code: 'invalid-argument',
+        message: 'serviceRadiusKm must be a finite integer',
+      };
+    }
+    if (serviceRadiusKm < 1 || serviceRadiusKm > SERVICE_RADIUS_MAX_KM) {
+      return {
+        ok: false,
+        code: 'invalid-argument',
+        message: `serviceRadiusKm must be between 1 and ${SERVICE_RADIUS_MAX_KM}`,
+      };
+    }
+    updates.serviceRadiusKm = serviceRadiusKm;
   }
 
   return { ok: true, shopId, updates };

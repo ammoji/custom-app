@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import { Analytics } from '../services/analytics';
-import { CartItem, MenuItem, Product, Shop } from '../types';
+import { CartItem, DeliveryChargeTier, MenuItem, Product, Shop } from '../types';
 import { formatPackLabel } from '../utils/format';
 
 type AddResult = { ok: true } | { ok: false; reason: 'different_shop' };
@@ -11,6 +11,15 @@ type CartState = {
   shopId: string | null;
   shopName: string | null;
   deliveryFee: number;
+  // PR 47 — snapshot the shop's distance-based delivery charge tier
+  // table at add-to-cart time so CheckoutScreen can render the
+  // tiered charge preview without re-fetching the shop. Persisted
+  // to AsyncStorage along with the rest of the cart so a relaunch
+  // mid-flow keeps the preview accurate. May be `null` for legacy
+  // shops without a tier table or for carts persisted from a
+  // pre-PR-47 build (the checkout screen falls back to the flat
+  // `deliveryFee` in that case).
+  deliveryChargeTiers: DeliveryChargeTier[] | null;
   items: CartItem[];
 
   // Legacy product-based add (still used by SearchScreen, which reads
@@ -37,7 +46,14 @@ type CartState = {
   // guarantees this).
   replaceCartWithItems: (
     items: CartItem[],
-    shop: { id: string; name: string; deliveryFee: number },
+    shop: {
+      id: string;
+      name: string;
+      deliveryFee: number;
+      // PR 47 — optional so legacy callers (no tier table) keep
+      // compiling; null at this entry point clears the snapshot.
+      deliveryChargeTiers?: DeliveryChargeTier[] | null;
+    },
   ) => void;
 
   subtotal: () => number;
@@ -72,6 +88,7 @@ export const useCartStore = create<CartState>()(
   shopId: null,
   shopName: null,
   deliveryFee: 0,
+  deliveryChargeTiers: null,
   items: [],
 
   addItem: (product, shop) => {
@@ -129,6 +146,9 @@ export const useCartStore = create<CartState>()(
         shopId: shop.id,
         shopName: shop.name,
         deliveryFee: shop.deliveryFee,
+        // PR 47 — snapshot the tier table so checkout can show
+        // the tiered preview without re-fetching.
+        deliveryChargeTiers: shop.deliveryChargeTiers ?? null,
       };
     });
     Analytics.add_to_cart({
@@ -179,6 +199,9 @@ export const useCartStore = create<CartState>()(
         shopId: shop.id,
         shopName: shop.name,
         deliveryFee: shop.deliveryFee,
+        // PR 47 — snapshot the tier table so checkout can show
+        // the tiered preview without re-fetching.
+        deliveryChargeTiers: shop.deliveryChargeTiers ?? null,
       };
     });
     Analytics.add_to_cart({
@@ -206,7 +229,13 @@ export const useCartStore = create<CartState>()(
           : []
       );
       return next.length === 0
-        ? { items: [], shopId: null, shopName: null, deliveryFee: 0 }
+        ? {
+            items: [],
+            shopId: null,
+            shopName: null,
+            deliveryFee: 0,
+            deliveryChargeTiers: null,
+          }
         : { items: next };
     }),
 
@@ -214,14 +243,26 @@ export const useCartStore = create<CartState>()(
     set(state => {
       const next = state.items.filter(i => i.productId !== id);
       return next.length === 0
-        ? { items: [], shopId: null, shopName: null, deliveryFee: 0 }
+        ? {
+            items: [],
+            shopId: null,
+            shopName: null,
+            deliveryFee: 0,
+            deliveryChargeTiers: null,
+          }
         : { items: next };
     });
     Analytics.remove_from_cart({ product_id: id });
   },
 
   clearCart: () =>
-    set({ items: [], shopId: null, shopName: null, deliveryFee: 0 }),
+    set({
+      items: [],
+      shopId: null,
+      shopName: null,
+      deliveryFee: 0,
+      deliveryChargeTiers: null,
+    }),
 
   // PR 13 — repeat order. Atomic clear-and-replace so the reorder
   // flow swaps the cart in one Zustand set() call instead of N
@@ -237,6 +278,10 @@ export const useCartStore = create<CartState>()(
       shopId: shop.id,
       shopName: shop.name,
       deliveryFee: shop.deliveryFee,
+      // PR 47 — carry the tier snapshot through the reorder path
+      // too. May be undefined when the caller built the shop
+      // object from a legacy source; null clears the snapshot.
+      deliveryChargeTiers: shop.deliveryChargeTiers ?? null,
     });
     // One synthetic add_to_cart event for the whole bundle. Using
     // product_id: 'reorder' to distinguish reorder-driven adds in
@@ -269,6 +314,9 @@ export const useCartStore = create<CartState>()(
         shopId: state.shopId,
         shopName: state.shopName,
         deliveryFee: state.deliveryFee,
+        // PR 47 — persist the tier snapshot too so a relaunch
+        // mid-checkout still renders the tiered preview.
+        deliveryChargeTiers: state.deliveryChargeTiers,
         items: state.items,
       }),
     }

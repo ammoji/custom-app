@@ -23,9 +23,16 @@ import { colors, radii, shadow, spacing, typography } from '../../constants/them
 // 'shouldRollbackOptimistic', re-add this block.
 import { Analytics } from '../../services/analytics';
 import { authService } from '../../services/authService';
+import { locationService } from '../../services/locationService';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
-import type { Order } from '../../types';
+import type { GeoPoint, Order } from '../../types';
+// PR 49 — nearest-first sort + per-card ride distance. Pure helper
+// so the routing math is unit-tested without booting React Native.
+import {
+    rideLegsForOrder,
+    sortPickupsByProximity,
+} from '../../utils/deliveryRoutingHelpers';
 import {
     formatOrderTime,
     formatRelativeDeliveryTime,
@@ -80,6 +87,12 @@ export default function DeliveryDashboardScreen() {
   // reach the live action lists above.
   const [showHistory, setShowHistory] = useState(false);
   const [retryNonce, setRetryNonce] = useState(0);
+  // PR 49 — partner's foreground GPS, captured on dashboard focus
+  // (best-effort; permission-denial / GPS-timeout leaves this null
+  // and the sort silently falls back to time order). Sits with the
+  // other useState declarations ABOVE the conditional early returns
+  // (code-discipline Rule 2).
+  const [partnerLoc, setPartnerLoc] = useState<GeoPoint | null>(null);
 
   // Subscribe to the two pollers. Both fire immediately on mount and
   // then every 10/15s respectively. The "loading" flag flips once
@@ -162,6 +175,34 @@ export default function DeliveryDashboardScreen() {
   useFocusEffect(
     useCallback(() => {
       setRetryNonce(n => n + 1);
+      // PR 49 — foreground-only location capture. Wrapped in
+      // `locationService.getCurrentLocation` so we share PR 46's
+      // permission UX (denial → 'fallback' source, never throws).
+      // We DROP the fallback case here — reporting the mock pin
+      // would pollute the partner's `currentLocation` doc and
+      // mislead PR 50's push-radius filter. Permission denied or
+      // GPS timeout: silently leave `partnerLoc` null; the sort
+      // gracefully degrades and the cards skip the ride line.
+      let cancelled = false;
+      void (async () => {
+        try {
+          const result = await locationService.getCurrentLocation();
+          if (cancelled || result.source === 'fallback') return;
+          const loc: GeoPoint = {
+            lat: result.location.lat,
+            lng: result.location.lng,
+          };
+          setPartnerLoc(loc);
+          // Persist for PR 50's push-fanout filter. Best-effort —
+          // a failed write must NEVER break the dashboard.
+          orderService.reportDeliveryLocation(loc).catch(() => {});
+        } catch {
+          // swallow — location is an enhancement, not a requirement.
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
     }, []),
   );
 
@@ -192,16 +233,28 @@ export default function DeliveryDashboardScreen() {
   //     so partners can plan routes / batches before the shop
   //     signals "ready".
   //   - availableNow (ready_for_pickup) — the existing claim pool.
+  // PR 49 — nearest-shop-first sort applied to BOTH pools after the
+  // status partition. `partnerLoc === null` (no GPS yet) makes the
+  // sort a stable no-op (every distance Infinity → original order
+  // preserved), so a freshly-mounted dashboard reads the same as
+  // pre-PR-49 until the location resolves a beat later.
   const headsUp = useMemo(
     () =>
-      available.filter(
-        o => o.status === 'accepted' || o.status === 'preparing',
+      sortPickupsByProximity(
+        available.filter(
+          o => o.status === 'accepted' || o.status === 'preparing',
+        ),
+        partnerLoc,
       ),
-    [available],
+    [available, partnerLoc],
   );
   const availableNow = useMemo(
-    () => available.filter(o => o.status === 'ready_for_pickup'),
-    [available],
+    () =>
+      sortPickupsByProximity(
+        available.filter(o => o.status === 'ready_for_pickup'),
+        partnerLoc,
+      ),
+    [available, partnerLoc],
   );
 
   // Delivery History = orders this partner has delivered, newest
@@ -456,6 +509,7 @@ export default function DeliveryDashboardScreen() {
                 <View key={`mine-${o.id}`} style={{ marginBottom: spacing.md }}>
                   <ActiveDeliveryCard
                     order={o}
+                    partnerLoc={partnerLoc}
                     pending={pendingAction === o.id}
                     onPickedUp={() => handlePickedUp(o)}
                     onDelivered={() => handleDelivered(o)}
@@ -520,6 +574,7 @@ export default function DeliveryDashboardScreen() {
                 <View key={`heads-${o.id}`} style={{ marginBottom: spacing.md }}>
                   <HeadsUpCard
                     order={o}
+                    partnerLoc={partnerLoc}
                     onPress={() =>
                       nav.navigate('DeliveryOrderDetail', { orderId: o.id })
                     }
@@ -548,6 +603,7 @@ export default function DeliveryDashboardScreen() {
         renderItem={({ item }) => (
           <AvailablePickupCard
             order={item}
+            partnerLoc={partnerLoc}
             onPress={() =>
               nav.navigate('DeliveryOrderDetail', { orderId: item.id })
             }
@@ -621,14 +677,18 @@ function Stat({
  */
 function HeadsUpCard({
   order,
+  partnerLoc,
   onPress,
 }: {
   order: Order;
+  partnerLoc: GeoPoint | null;
   onPress: () => void;
 }) {
   const itemCount = order.items.reduce((n, i) => n + i.quantity, 0);
   const stateLabel =
     order.status === 'preparing' ? 'Shop preparing' : 'Shop accepted';
+  // PR 49 — ride distance + locked drop-location label.
+  const legs = rideLegsForOrder(order, partnerLoc);
   return (
     <Pressable
       onPress={onPress}
@@ -665,6 +725,8 @@ function HeadsUpCard({
           : ''}
         , {order.deliveryAddress.pincode}
       </Text>
+      <RideDistanceLine legs={legs} />
+      <DeliveryLocationLabel order={order} />
       <Text style={styles.meta}>
         {itemCount} item{itemCount > 1 ? 's' : ''} ·{' '}
         {formatRupees(order.total)}
@@ -676,9 +738,11 @@ function HeadsUpCard({
 
 function AvailablePickupCard({
   order,
+  partnerLoc,
   onPress,
 }: {
   order: Order;
+  partnerLoc: GeoPoint | null;
   onPress: () => void;
 }) {
   // View-first card: body is the only tap target. Accept lives
@@ -686,6 +750,8 @@ function AvailablePickupCard({
   // exact drop address before committing. The previous inline
   // Accept button caused accidental commits in solo testing.
   const itemCount = order.items.reduce((n, i) => n + i.quantity, 0);
+  // PR 49 — ride distance + locked drop-location label.
+  const legs = rideLegsForOrder(order, partnerLoc);
   return (
     <Pressable
       onPress={onPress}
@@ -708,6 +774,8 @@ function AvailablePickupCard({
           : ''}
         , {order.deliveryAddress.pincode}
       </Text>
+      <RideDistanceLine legs={legs} />
+      <DeliveryLocationLabel order={order} />
       <Text style={styles.meta}>
         {itemCount} item{itemCount > 1 ? 's' : ''} ·{' '}
         {formatRupees(order.total)} · {formatOrderTime(order.createdAt)}
@@ -715,6 +783,47 @@ function AvailablePickupCard({
       <Text style={styles.tapHint}>Tap to view items & accept</Text>
     </Pressable>
   );
+}
+
+/**
+ * PR 49 — per-card ride-distance line. Three render branches
+ * matching the helper's tri-state output:
+ *   - both legs known     → "🛵 ~X.X km ride · A to shop + B to drop"
+ *   - only drop known     → "Drop ~B km from shop" (no partner GPS yet,
+ *                            but PR 46 stamped the shop→customer leg).
+ *   - neither known       → render nothing (legacy order, no
+ *                            regression vs pre-PR-49 layout).
+ */
+function RideDistanceLine({ legs }: { legs: ReturnType<typeof rideLegsForOrder> }) {
+  if (legs.totalKm != null && legs.toShopKm != null && legs.toCustomerKm != null) {
+    return (
+      <Text style={styles.rideLine}>
+        🛵 ~{legs.totalKm.toFixed(1)} km ride · {legs.toShopKm.toFixed(1)} to shop
+        + {legs.toCustomerKm.toFixed(1)} to drop
+      </Text>
+    );
+  }
+  if (legs.toCustomerKm != null) {
+    return (
+      <Text style={styles.rideLine}>
+        Drop ~{legs.toCustomerKm.toFixed(1)} km from shop
+      </Text>
+    );
+  }
+  return null;
+}
+
+/**
+ * PR 49 — surfaces the locked delivery-location label so the
+ * partner can tell at a glance whether they're delivering to a
+ * saved address ("Home", "Work") or a live pin ("Current location").
+ * Falls back to nothing when absent (pre-PR-46 orders) so legacy
+ * cards keep their original layout.
+ */
+function DeliveryLocationLabel({ order }: { order: Order }) {
+  const label = order.deliveryLocation?.label;
+  if (!label) return null;
+  return <Text style={styles.locationLabel}>📍 {label}</Text>;
 }
 
 /**
@@ -759,12 +868,14 @@ function DeliveryHistoryCard({
 
 function ActiveDeliveryCard({
   order,
+  partnerLoc,
   pending,
   onPickedUp,
   onDelivered,
   onPress,
 }: {
   order: Order;
+  partnerLoc: GeoPoint | null;
   pending: boolean;
   onPickedUp: () => void;
   onDelivered: () => void;
@@ -772,6 +883,10 @@ function ActiveDeliveryCard({
 }) {
   const itemCount = order.items.reduce((n, i) => n + i.quantity, 0);
   const pickedUp = !!order.pickedUpAt;
+  // PR 49 — surface the same ride-distance + locked-location label
+  // on active-delivery cards so the partner sees the legs whether
+  // they're staring at an unclaimed pickup or one in their queue.
+  const legs = rideLegsForOrder(order, partnerLoc);
   return (
     <Pressable
       style={styles.card}
@@ -797,6 +912,8 @@ function ActiveDeliveryCard({
         {order.deliveryAddress.line2 ? `, ${order.deliveryAddress.line2}` : ''},{' '}
         {order.deliveryAddress.pincode}
       </Text>
+      <RideDistanceLine legs={legs} />
+      <DeliveryLocationLabel order={order} />
       <Text style={styles.meta}>
         {itemCount} item{itemCount > 1 ? 's' : ''} ·{' '}
         {formatRupees(order.total)}
@@ -870,6 +987,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     gap: spacing.md,
+  },
+  // PR 49 — ride-distance + locked-location lines on pickup cards.
+  // Slightly tighter color than `meta` so the eye picks them out
+  // without screaming, and a tad more spacing above so they don't
+  // crowd the address line.
+  rideLine: {
+    ...typography.bodyBold,
+    color: colors.primaryDark,
+    marginTop: spacing.xs,
+  },
+  locationLabel: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    marginTop: 2,
   },
   stat: { flex: 1 },
   statValue: { ...typography.h2 },

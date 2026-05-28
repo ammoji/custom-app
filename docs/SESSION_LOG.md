@@ -2007,3 +2007,98 @@ storefront photos working, ratings split, KYC enforced, ETA
 honest. Remaining is non-code: source category photos, onboard
 the first real shop in person, print QR posters, run the
 PILOT_LAUNCH_CHECKLIST (not yet drafted — next session candidate).
+
+---
+
+## 2026-05-27 — Geo/distance system: PRs 46–49 shipped (4 of 5); pausing for full re-test + Android validation
+
+Built the bulk of the geo/distance system this session
+(`docs/GEO_DISTANCE_SYSTEM_DESIGN.md`). Cadence held throughout:
+Claude drafts the prompt → Windsurf executes → Sudhir deploys +
+on-device smoke-tests → Claude verifies the diff → next PR.
+
+**Shipped (all code-complete + Sudhir-tested on iOS):**
+- **PR 46** — geo foundation. Locked delivery location on the
+  order (`deliveryLocation` + `deliveryDistanceKm` +
+  `deliveryDurationMin`), `getDeliveryEstimate` callable, GPS
+  capture in AddressEditScreen + "deliver to current location" in
+  CheckoutScreen. **Cost decision (Sudhir):** the paid Google
+  Distance Matrix API is BUILT BUT DORMANT — `aiFeatures/
+  distanceMatrix.enabled` defaults false, the disabled branch
+  never calls fetch (pinned by a cost-guarantee test). Haversine
+  ×1.4 during pilot; flip the flag at ~50 shops scale (logged as
+  a FUTURE TO-DO in the design doc so it isn't missed).
+- **PR 47** — distance-based delivery charges. Per-shop tier table
+  (`deliveryChargeTiers`, inclusive `maxKm` bands + null catch-all),
+  `chargeForDistance` + `validateDeliveryChargeTiers` pure helpers
+  (functions + `src/utils/` client mirror), `updateShopDeliveryTiers`
+  callable, ShopSettings tier editor, CheckoutScreen tiered preview.
+  placeOrder computes the charge server-side from the re-derived
+  distance and stamps `deliveryCharge` + `deliveryFee = deliveryCharge`
+  (back-compat shim). approveShop seeds the default table.
+- **PR 48** — shop service radius + customer distance visibility.
+  Replaced the hardcoded `SHOW_ALL_SHOPS = true` with a real
+  per-shop `serviceRadiusKm` gate. **Key architectural point:** the
+  gate had to live SERVER-SIDE in `listShopsPublic` (native can't
+  read Firestore — the Plan B reason) and the "show all" override
+  had to be a server-read Firestore flag, `appConfig/shopVisibility
+  .showAllShops`, NOT `__DEV__` (which is false in TestFlight and
+  blinded the old flag — the documented bug). Sudhir created the
+  flag doc set to `true` for the cross-city offshore-testing window;
+  flip to false at real 1-shop pilot. Bundled two PR-47 follow-up
+  fixes: the tier-save-doesn't-persist bug + removal of the now-
+  redundant flat Delivery-fee input.
+- **PR 49** — delivery-partner routing. `Order.shopLocation`
+  stamped in placeOrder (the pickup coord, no extra read);
+  `reportDeliveryLocation` callable writing `users/{uid}.
+  currentLocation` (foreground-only, on dashboard focus — sets up
+  PR 50); nearest-shop-first sort of available pickups; ride-distance
+  breakdown (partner→shop haversine + shop→customer via stored
+  `deliveryDistanceKm`); locked delivery-location label on cards.
+  Bundled the PR-48 service-area-save regression fix.
+
+**Two bugs found-and-fixed this session, both the same shape:**
+the PR-47 tier-save revert and the PR-48 service-area-save failure
+were both cases where a *pure helper* learned a new field but the
+thin *callable wrapper* feeding it didn't.
+- Tier save (PR 48 §I): `getMyShop`'s `orderBy('updatedAt')` query
+  returned a stale sibling doc because `updateShopDeliveryTiers`
+  wrote `updatedAt: Date.now()` (number) while everything else
+  writes a Timestamp — Firestore sorts mixed types by type first.
+  Fixed by normalizing to `serverTimestamp()` AND making `getMyShop`
+  read `shops/{claims.shopId}` directly when the owner has a claim
+  (query fallback preserved only for pending pre-approval owners).
+- Service-area save (PR 49 §F): `updateShopSettings`'s onCall type
+  omitted `serviceRadiusKm` and didn't forward it to the validator,
+  so a radius-only payload tripped the "at least one field" guard.
+  Two-line wrapper fix.
+
+**Recurring lesson reinforced:** when a validator/helper gains a
+field, grep every caller/wrapper for the field name before calling
+it done. (Pairs with the existing "verify exact field names before
+implementing" note from my prompt-error history.)
+
+**Process note — Windsurf weekly quota exhausted; resets 5/31
+morning.** PR 50 (notification radius — the last geo PR) is
+designed in the doc but NOT yet drafted as a prompt; holding it
+until the quota resets AND the re-test/Android pass surfaces
+whatever it surfaces.
+
+**Next phase (Sudhir's plan):** full end-to-end re-test of
+everything on iOS, PLUS set up and validate on Android (build 6
+was unblocked May 26). Collect any bugs / critical enhancements
+into a list as they come up. So the next session likely starts
+from a testing-findings list rather than PR 50.
+
+**Deploy state:** PRs 46–49 each deployed by Sudhir
+(server-first, IAM-verified) + OTA'd. Geo callables live:
+`getDeliveryEstimate`, `updateShopDeliveryTiers`,
+`updateShopSettings` (now radius-aware), `reportDeliveryLocation`,
+`listShopsPublic` (radius gate), `getMyShop` (claim-read).
+Test suite 825 → 930 across the four PRs.
+
+**Still queued / deferred (unchanged):** PR 50 (notification
+radius), PR 44 (category photos — needs Pexels PNGs), PR 39.2
+(reset-pilot-data live-pilot guard), PR 42.1.2 (admin order-comment
+surfacing), strip the PR 45.1 + PR 48 §I diagnostic logs, RNFB
+modular-API migration, PILOT_LAUNCH_CHECKLIST (not yet drafted).

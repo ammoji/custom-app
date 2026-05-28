@@ -131,6 +131,10 @@ describe('validateAddressInput', () => {
       pincode: '110016',
       // PR 22 — validator now always emits this key; null = absent.
       deliveryInstructions: null,
+      // PR 46 — validator emits these too; null = absent (no GPS pin
+      // captured for this address).
+      lat: null,
+      lng: null,
     });
   });
 
@@ -174,6 +178,94 @@ describe('validateAddressInput', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.field).toBe('line1');
+  });
+
+  // ────────────────────────────────────────────────────────────
+  // PR 46 — optional GPS pin (lat/lng) on saved addresses.
+  // ────────────────────────────────────────────────────────────
+
+  test('PR 46: address without lat/lng (legacy shape) still validates', () => {
+    const result = validateAddressInput(valid);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.lat).toBeNull();
+    expect(result.value.lng).toBeNull();
+  });
+
+  test('PR 46: valid lat/lng pair round-trips', () => {
+    const result = validateAddressInput({
+      ...valid,
+      lat: 28.6139,
+      lng: 77.209,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.lat).toBe(28.6139);
+    expect(result.value.lng).toBe(77.209);
+  });
+
+  test('PR 46: half-set pair (lat without lng) rejected', () => {
+    // Client bug — most likely a payload-assembly mistake. We
+    // reject loudly so the address doesn't land on the doc with a
+    // corrupt-looking single coord.
+    const result = validateAddressInput({ ...valid, lat: 28.6139 });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.field).toBe('lng');
+  });
+
+  test('PR 46: half-set pair (lng without lat) rejected', () => {
+    const result = validateAddressInput({ ...valid, lng: 77.209 });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.field).toBe('lat');
+  });
+
+  test('PR 46: NaN lat rejected', () => {
+    const result = validateAddressInput({
+      ...valid,
+      lat: Number.NaN,
+      lng: 77.209,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.field).toBe('lat');
+  });
+
+  test('PR 46: out-of-range lat rejected', () => {
+    const result = validateAddressInput({
+      ...valid,
+      lat: 91,
+      lng: 77.209,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.field).toBe('lat');
+  });
+
+  test('PR 46: out-of-range lng rejected', () => {
+    const result = validateAddressInput({
+      ...valid,
+      lat: 28.6139,
+      lng: 181,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.field).toBe('lng');
+  });
+
+  test('PR 46: explicit null lat AND null lng treated as absent (round-trips)', () => {
+    // Some clients send null instead of omitting — we accept both
+    // representations of "no coords" and normalise to null.
+    const result = validateAddressInput({
+      ...valid,
+      lat: null,
+      lng: null,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.lat).toBeNull();
+    expect(result.value.lng).toBeNull();
   });
 
   test('rejects label longer than 32 chars', () => {

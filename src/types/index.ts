@@ -44,6 +44,21 @@ export type ShopRegistrationData = {
   kycDocs?: Partial<Record<ShopKycDocKind, ShopKycDocRef>>;
 };
 
+// PR 47 — distance-based delivery charge tiers. One row per band;
+// the resolver in `functions/src/deliveryChargeHelpers.ts` sorts by
+// `maxKm` ascending and picks the first row whose `maxKm >= distance`.
+// `maxKm: null` is the "everything beyond the last numbered band"
+// catch-all (validator pins exactly one such row per tier table).
+export type DeliveryChargeTier = {
+  /**
+   * Inclusive upper bound of this band, in km. `null` = the
+   * catch-all for distances beyond every numbered band.
+   */
+  maxKm: number | null;
+  /** Charge for this band, in ₹. */
+  charge: number;
+};
+
 export type Shop = {
   id: string;
   name: string;
@@ -56,6 +71,27 @@ export type Shop = {
   imageUrl: string;
   categories: CategoryId[];
   deliveryFee: number;
+  // PR 47 — distance-based delivery charges. OPTIONAL for back-compat:
+  // legacy shops (and the existing seeded shops without it) fall back
+  // to the flat `deliveryFee` field above via `chargeForDistance`'s
+  // legacy-fallback branch. New shops get
+  // `DEFAULT_DELIVERY_CHARGE_TIERS` seeded by `approveShop` at the
+  // moment of approval. Owners edit via `updateShopDeliveryTiers`
+  // (Shop Settings → Delivery charges editor).
+  //
+  // Tier semantics: `maxKm` is INCLUSIVE upper bound; first matching
+  // band wins. Exactly one entry has `maxKm: null` (catch-all for
+  // "beyond the last band"). See `deliveryChargeHelpers.ts` for the
+  // resolution logic + validation rules.
+  deliveryChargeTiers?: DeliveryChargeTier[];
+  // PR 48 — shop service radius. OPTIONAL for back-compat: legacy
+  // shops (and the existing seeded shops) without it fall back to
+  // `DEFAULT_SERVICE_RADIUS_KM` in the filter helper, so they keep a
+  // sane 5 km reach until the owner customizes it. New shops get the
+  // default seeded by `approveShop` at approval time. Owner edits via
+  // Shop Settings → Service area (`updateShopSettings`). The integer-
+  // only / 1-50 range is enforced server-side in `shopSettingsHelpers`.
+  serviceRadiusKm?: number;
   minOrder: number;
   etaMinutes: number;
   // Phase 12a-v2-i. Optional so existing mocks (MOCK_SHOPS) and any
@@ -253,6 +289,52 @@ export type SavedAddress = {
   // 280 chars server-side. See the comment on Address above for
   // semantics + override-at-checkout rules.
   deliveryInstructions?: string;
+  // PR 46 — optional GPS pin captured at address-save time via
+  // expo-location ("Use my current location" button in
+  // AddressEditScreen). When present, CheckoutScreen uses these
+  // coords to compute the delivery distance + duration estimate.
+  // When absent (legacy addresses, or saved before PR 46 shipped),
+  // checkout falls back to the customer's live GPS at order time
+  // and shows a "using current location for delivery" note. Both
+  // paths still record the addressId on the order's locked
+  // DeliveryLocation so analytics can trace which saved address
+  // the customer picked, even when the coords came from live GPS.
+  //
+  // Draggable map pin (react-native-maps) is intentionally NOT in
+  // PR 46 — that's a follow-up so this PR stays OTA-safe (no new
+  // native modules). Until then, "Use my current location" is the
+  // only way coords land on a saved address.
+  lat?: number;
+  lng?: number;
+};
+
+// PR 46 — locked delivery location stamped onto an Order at
+// checkout time. Server is authoritative for `lat`/`lng` (placeOrder
+// re-derives them from the chosen source so a tampered client can't
+// fake a short distance to dodge future tier-based delivery
+// charges in PR 47). The combination of `type` + `addressId` records
+// WHICH source the customer picked — useful for analytics ("how
+// often do customers override their saved address with live GPS at
+// checkout?") even when the coords ultimately came from GPS.
+//
+// `label` is the human-readable display string snapshotted at order
+// time. It does NOT live-track changes the customer makes to their
+// saved address book afterwards (the whole point of "locked").
+export type DeliveryLocation = {
+  lat: number;
+  lng: number;
+  type: 'saved_address' | 'current_location';
+  // Present when `type === 'saved_address'`. Allows tracing back to
+  // the source SavedAddress row even though the row's coords may
+  // drift afterwards (or may have been absent at checkout time and
+  // backfilled from live GPS).
+  addressId?: string;
+  // Display snapshot — locked at order time. Examples:
+  //   - "Home" (saved-address label)
+  //   - "Current location" (current_location with no reverse-geocode)
+  //   - "Near Sector 12, Ballabgarh" (current_location with future
+  //     reverse-geocode wired in)
+  label: string;
 };
 
 // User profile doc shape returned by the getMyProfile callable.
@@ -334,8 +416,45 @@ export type Order = {
   items: CartItem[];
   subtotal: number;
   deliveryFee: number;
+  // PR 47 — server-computed tiered delivery charge. New orders get
+  // this stamped alongside `deliveryFee` (which mirrors it for
+  // back-compat — every existing reader of `order.deliveryFee` keeps
+  // working unchanged). Pre-PR-47 orders predate this; readers that
+  // need the explicit field should fall back to `deliveryFee`.
+  deliveryCharge?: number;
   total: number;
   deliveryAddress: Address;
+  // PR 46 — locked delivery location. Optional for back-compat
+  // with pre-PR-46 orders (which only carry `deliveryAddress`).
+  // Stamped server-side at placeOrder time and never mutated
+  // afterwards — even if the customer edits the source saved
+  // address, the order keeps the snapshot it was placed against.
+  // PR 47 will read `deliveryDistanceKm` to compute the
+  // distance-based delivery charge; until then the charge is
+  // still flat `shop.deliveryFee` and these three fields are
+  // observability/data-capture only.
+  deliveryLocation?: DeliveryLocation;
+  // Road distance (shop → delivery location), in km. Server-
+  // authoritative — re-derived in placeOrder via
+  // computeDeliveryEstimate, never trusted from the client.
+  // Source partition (Distance Matrix vs haversine fallback) is
+  // logged on the server-side audit, not stamped on the order
+  // doc itself (kept the wire shape minimal). Missing on
+  // pre-PR-46 orders.
+  deliveryDistanceKm?: number;
+  // Estimated drive time (shop → delivery location), in minutes.
+  // PR 51+ will surface this in the post-acceptance ETA
+  // computation; PR 46 captures the field but does not yet wire
+  // it into the orderEtaDisplay helper.
+  deliveryDurationMin?: number;
+  // PR 49 — shop pickup coordinate, snapshotted at order time so the
+  // delivery partner can compute the partner→shop leg + sort pickups
+  // nearest-first without a shop-doc read per order. OPTIONAL /
+  // back-compat: omitted when the shop had no `location` (legacy
+  // seeded shops) or on pre-PR-49 orders. Locked at order time, like
+  // every other geo field on this doc (design decision #1 in
+  // GEO_DISTANCE_SYSTEM_DESIGN.md).
+  shopLocation?: GeoPoint;
   paymentMethod: PaymentMethod;
   // Present for online orders; COD orders may omit these entirely.
   paymentStatus?: PaymentStatus;

@@ -22,6 +22,7 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -33,6 +34,7 @@ import Button from '../components/common/Button';
 import Input from '../components/common/Input';
 import ScreenHeader from '../components/common/ScreenHeader';
 import { colors, radii, spacing, typography } from '../constants/theme';
+import { locationService } from '../services/locationService';
 import { profileService } from '../services/profileService';
 import type { SavedAddress } from '../types';
 
@@ -81,6 +83,27 @@ export default function AddressEditScreen() {
   // empty/whitespace).
   const [deliveryInstructions, setDeliveryInstructions] = useState('');
 
+  // PR 46 — optional GPS pin for the address. Captured via the
+  // "📍 Use my current location" button using expo-location only
+  // (NO react-native-maps — keeps this OTA-safe). When set, the
+  // coords are stamped onto the SavedAddress on save and
+  // CheckoutScreen reads them to compute the delivery distance
+  // estimate without re-prompting the customer for location at
+  // checkout. Either both lat AND lng are non-null or both are
+  // null; the validator (server + client-side below) rejects
+  // half-set pairs.
+  const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(
+    null,
+  );
+  // 'idle' = no capture in progress; 'capturing' = expo-location
+  // call in flight; 'done' = coords successfully captured (button
+  // collapses to a "captured" status row); 'error' = permission
+  // denied or location service errored — banner explains.
+  const [coordsStatus, setCoordsStatus] = useState<
+    'idle' | 'capturing' | 'done' | 'error' | 'fallback'
+  >('idle');
+  const [coordsError, setCoordsError] = useState<string | null>(null);
+
   const [hydrating, setHydrating] = useState(isEditing);
   const [hydrateError, setHydrateError] = useState<string | null>(null);
   const [errors, setErrors] = useState<FormErrors>({});
@@ -115,6 +138,20 @@ export default function AddressEditScreen() {
         // PR 22 — hydrate instructions on edit. Missing field on
         // legacy saved addresses → empty string (no pre-fill).
         setDeliveryInstructions(found.deliveryInstructions ?? '');
+        // PR 46 — hydrate the saved GPS pin if present. Legacy
+        // addresses (saved before PR 46) lack the fields entirely;
+        // those stay at null and CheckoutScreen falls back to live
+        // GPS at order time. Strict typeof checks defend against
+        // half-set legacy data (shouldn't exist but cheap to gate).
+        if (
+          typeof found.lat === 'number' &&
+          typeof found.lng === 'number' &&
+          Number.isFinite(found.lat) &&
+          Number.isFinite(found.lng)
+        ) {
+          setCoords({ lat: found.lat, lng: found.lng });
+          setCoordsStatus('done');
+        }
       })
       .catch(e => {
         if (cancelled) return;
@@ -143,6 +180,48 @@ export default function AddressEditScreen() {
     return e;
   };
 
+  // PR 46 — capture the customer's current GPS pin via expo-location
+  // (wrapped by locationService). On success the coords stamp onto
+  // local state and get persisted with saveAddress on submit. On
+  // permission-denied / location-service-error we fall back to the
+  // mock fallback (locationService returns 'fallback' source) so
+  // the customer at least gets *something* on file rather than a
+  // hard block — but we surface the fallback status visibly so they
+  // know the pin isn't their actual location. They can re-tap the
+  // button after enabling permissions to get the real coords.
+  const onCaptureCurrentLocation = async () => {
+    setCoordsStatus('capturing');
+    setCoordsError(null);
+    try {
+      const result = await locationService.getCurrentLocation();
+      setCoords({
+        lat: result.location.lat,
+        lng: result.location.lng,
+      });
+      // 'fallback' source means permission was denied OR the
+      // location call threw — either way the coords are the
+      // MOCK_USER_LOCATION constant, not the real device. Surface
+      // that distinction so the customer doesn't think we just
+      // pinned their roof onto a default-Delhi coordinate.
+      setCoordsStatus(result.source === 'gps' ? 'done' : 'fallback');
+    } catch (err: any) {
+      // locationService swallows most errors and returns the
+      // fallback, so reaching this catch means something more
+      // exotic failed (Sentry will surface it). UI treats this
+      // identically to fallback — coords are unset, error message
+      // is shown.
+      setCoords(null);
+      setCoordsStatus('error');
+      setCoordsError(err?.message ?? 'Could not capture location');
+    }
+  };
+
+  const onClearCoords = () => {
+    setCoords(null);
+    setCoordsStatus('idle');
+    setCoordsError(null);
+  };
+
   const onSave = async () => {
     const e = validate();
     setErrors(e);
@@ -163,6 +242,12 @@ export default function AddressEditScreen() {
         // so the server-side normalizer omits the field entirely
         // rather than persisting an empty string.
         deliveryInstructions: deliveryInstructions.trim() || undefined,
+        // PR 46 — pass through the captured GPS pin if any. Server
+        // validates both must be set or both absent; we pass either
+        // both fields or neither (never a half-set pair).
+        ...(coords
+          ? { lat: coords.lat, lng: coords.lng }
+          : {}),
       });
       nav.goBack();
     } catch (err: any) {
@@ -298,6 +383,83 @@ export default function AddressEditScreen() {
                 </View>
               </View>
 
+              {/* PR 46 — GPS pin capture. expo-location only (no
+                  react-native-maps wired in this PR — that's a
+                  follow-up so this stays OTA-safe). Three render
+                  states:
+                    - idle / fallback / error: show the capture
+                      button + (optionally) status text.
+                    - capturing: button shows "Capturing…", disabled.
+                    - done: collapsed status row with the captured
+                      coords + a re-capture / clear pair.
+                  When `coords` is non-null and status === 'fallback'
+                  we show a yellow warning so the customer knows the
+                  pin is the default-Delhi mock, not their real
+                  location. */}
+              <Text style={styles.label}>Location pin (optional)</Text>
+              {coordsStatus === 'done' && coords ? (
+                <View style={styles.coordsCapturedRow}>
+                  <Text style={styles.coordsCapturedText}>
+                    📍 Captured ({coords.lat.toFixed(5)},{' '}
+                    {coords.lng.toFixed(5)})
+                  </Text>
+                  <View style={styles.coordsActions}>
+                    <Pressable
+                      onPress={onCaptureCurrentLocation}
+                      accessibilityRole="button"
+                      accessibilityLabel="Re-capture current location"
+                    >
+                      <Text style={styles.coordsActionText}>Re-capture</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={onClearCoords}
+                      accessibilityRole="button"
+                      accessibilityLabel="Clear captured location"
+                    >
+                      <Text
+                        style={[styles.coordsActionText, styles.coordsClear]}
+                      >
+                        Clear
+                      </Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ) : (
+                <Pressable
+                  onPress={onCaptureCurrentLocation}
+                  disabled={coordsStatus === 'capturing'}
+                  accessibilityRole="button"
+                  accessibilityLabel="Use my current location"
+                  style={[
+                    styles.coordsButton,
+                    coordsStatus === 'capturing' && styles.coordsButtonDisabled,
+                  ]}
+                >
+                  <Text style={styles.coordsButtonText}>
+                    {coordsStatus === 'capturing'
+                      ? 'Capturing…'
+                      : '📍 Use my current location'}
+                  </Text>
+                </Pressable>
+              )}
+              {coordsStatus === 'fallback' && (
+                <Text style={styles.coordsFallbackNote}>
+                  Couldn&apos;t access GPS — captured the default city
+                  centre instead. Enable location permission and tap
+                  again for a precise pin.
+                </Text>
+              )}
+              {coordsStatus === 'error' && (
+                <Text style={styles.coordsErrorNote}>
+                  {coordsError ?? 'Could not capture location.'}
+                </Text>
+              )}
+              <Text style={styles.coordsHelp}>
+                Used to estimate delivery time + distance from the
+                shop. Skip if you&apos;d rather use your live location
+                at checkout instead.
+              </Text>
+
               {/* PR 22 — delivery instructions input. Multi-line
                   TextInput (not the shared Input component which is
                   single-line) so the customer can compose a short
@@ -401,5 +563,71 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     alignSelf: 'flex-end',
     marginTop: 2,
+  },
+  // PR 46 — GPS pin capture UI. Distinct visual treatment from
+  // the saveAddress submit button (which is the primary action) —
+  // an outlined pill rather than a filled button so the customer
+  // doesn't accidentally tap it thinking it submits the form.
+  coordsButton: {
+    marginTop: spacing.xs,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    backgroundColor: colors.surface,
+    alignItems: 'center',
+  },
+  coordsButtonDisabled: {
+    opacity: 0.5,
+  },
+  coordsButtonText: {
+    ...typography.bodyBold,
+    color: colors.primary,
+  },
+  coordsCapturedRow: {
+    marginTop: spacing.xs,
+    padding: spacing.md,
+    borderRadius: radii.md,
+    backgroundColor: '#E6F4EA', // light green = success
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+  },
+  coordsCapturedText: {
+    ...typography.body,
+    color: colors.textPrimary,
+    flex: 1,
+  },
+  coordsActions: {
+    flexDirection: 'row',
+    gap: spacing.md,
+  },
+  coordsActionText: {
+    ...typography.caption,
+    color: colors.primary,
+    fontWeight: '600',
+  },
+  coordsClear: {
+    color: colors.danger,
+  },
+  coordsFallbackNote: {
+    ...typography.caption,
+    color: '#92400E', // amber-700
+    backgroundColor: '#FEF3C7', // amber-100
+    padding: spacing.sm,
+    borderRadius: radii.sm,
+    marginTop: spacing.xs,
+  },
+  coordsErrorNote: {
+    ...typography.caption,
+    color: colors.danger,
+    marginTop: spacing.xs,
+  },
+  coordsHelp: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    marginTop: spacing.xs,
   },
 });

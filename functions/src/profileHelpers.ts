@@ -36,6 +36,13 @@ export type AddressInput = {
   // deliveryInstructionsHelpers); validator below treats it like
   // line2 (collapse empty/whitespace to null, length-capped).
   deliveryInstructions?: string | null;
+  // PR 46 — optional GPS pin captured by AddressEditScreen via
+  // expo-location. Validator rejects junk (non-numeric, NaN,
+  // out-of-range) AND rejects half-set pairs (one without the
+  // other) so the stored doc shape stays clean. Either both are
+  // present-and-valid or both are absent.
+  lat?: number | null;
+  lng?: number | null;
 };
 
 export type ValidatedAddress = {
@@ -53,6 +60,12 @@ export type ValidatedAddress = {
   // Function strips null before writing so we don't store an
   // explicit null on Firestore.
   deliveryInstructions: string | null;
+  // PR 46 — normalized GPS pin. Both `null` (absent) or both
+  // valid finite numbers; the half-set case is rejected by the
+  // validator above. saveAddress strips nulls before writing
+  // so the stored doc keeps the legacy shape on legacy addresses.
+  lat: number | null;
+  lng: number | null;
 };
 
 export type ProfilePatch = {
@@ -264,6 +277,52 @@ export function validateAddressInput(
   }
   const deliveryInstructions = instr.value ?? null;
 
+  // PR 46 — optional GPS pin. Either both `lat` AND `lng` are
+  // present-and-valid (finite numbers in [-90, 90] / [-180, 180]),
+  // or both are absent / null. A half-set pair is a client bug
+  // (probably a forgotten field on saveAddress payload assembly)
+  // so we reject loudly rather than silently dropping the half
+  // and getting a corrupt-looking address.
+  const latPresent = input.lat !== undefined && input.lat !== null;
+  const lngPresent = input.lng !== undefined && input.lng !== null;
+  let lat: number | null = null;
+  let lng: number | null = null;
+  if (latPresent !== lngPresent) {
+    return {
+      ok: false,
+      field: latPresent ? 'lng' : 'lat',
+      message: 'lat and lng must both be set or both be absent',
+    };
+  }
+  if (latPresent && lngPresent) {
+    if (
+      typeof input.lat !== 'number' ||
+      !Number.isFinite(input.lat) ||
+      input.lat < -90 ||
+      input.lat > 90
+    ) {
+      return {
+        ok: false,
+        field: 'lat',
+        message: 'lat must be a finite number in [-90, 90]',
+      };
+    }
+    if (
+      typeof input.lng !== 'number' ||
+      !Number.isFinite(input.lng) ||
+      input.lng < -180 ||
+      input.lng > 180
+    ) {
+      return {
+        ok: false,
+        field: 'lng',
+        message: 'lng must be a finite number in [-180, 180]',
+      };
+    }
+    lat = input.lat;
+    lng = input.lng;
+  }
+
   return {
     ok: true,
     value: {
@@ -275,6 +334,8 @@ export function validateAddressInput(
       city: city.value,
       pincode: input.pincode.trim(),
       deliveryInstructions,
+      lat,
+      lng,
     },
   };
 }

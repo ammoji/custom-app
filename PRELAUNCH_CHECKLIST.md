@@ -8524,6 +8524,562 @@ immediately. The checklist is the only thing that survives memory.
       against the address proof or for PAN-specific tax
       flows), the schema split is purely additive. `[Post-launch]`
 
+## PR 49 — Delivery partner routing + service-area save fix `[Phase 49]`
+
+- [x] **Why this PR exists.** Fourth PR of the geo system. The
+      customer + shop sides are geo-aware (PR 46–48); PR 49 makes
+      the **delivery partner** side distance-aware. A partner
+      opening the dashboard today sees pickups in arbitrary
+      server order with no sense of how far each ride is. PR 49:
+      sorts pickups nearest-first, shows each card's two ride
+      legs (partner→shop + shop→drop), surfaces the locked
+      `deliveryLocation.label` ("Home" / "Current location"),
+      and writes `users/{uid}.currentLocation` server-side so
+      PR 50's push-fanout can filter to nearby partners.
+      Also bundles a one-line server fix for a PR 48 regression
+      (Service-area-only save fails with "At least one of …
+      required") — see section F.
+
+- [x] **What shipped.**
+      - **`Order.shopLocation?: GeoPoint`** added to `@c:\Users\dahiy\grocery-mvp\src\types\index.ts`. `placeOrder` stamps it from the already-read shop doc (no extra Firestore read), skipped when `shop.location` missing — back-compat-clean for pre-PR-49 readers.
+      - **`reportDeliveryLocation` callable** in `@c:\Users\dahiy\grocery-mvp\functions\src\index.ts` (asia-south1, delivery-role-only via `requireDeliveryRole`). Strict lat/lng range + finite checks. Writes `users/{uid}.currentLocation` + `currentLocationUpdatedAt` (serverTimestamp); mirrors `isDelivery: true` so PR 50's push-fanout query keeps working.
+      - **Profile-projection guard:** `currentLocation` + `currentLocationUpdatedAt` added to `PROFILE_INTERNAL_FIELDS` so `getMyProfile` (and the four other profile readers) never leak partner location.
+      - **`orderService.reportDeliveryLocation`** added to `@c:\Users\dahiy\grocery-mvp\src\services\orderService.ts` (native + web branches mirroring `setDeliveryStatus`).
+      - **Pure helper** `@c:\Users\dahiy\grocery-mvp\src\utils\deliveryRoutingHelpers.ts` with `rideLegsForOrder` + `sortPickupsByProximity`. Client-only (server doesn't sort); no `functions/` mirror needed. Pure / no-mutation; stable nearest-first sort with the original index as a tiebreaker.
+      - **`DeliveryDashboardScreen` wiring** (`@c:\Users\dahiy\grocery-mvp\src\screens\delivery\DeliveryDashboardScreen.tsx`): `partnerLoc` state captured via `locationService.getCurrentLocation` inside the existing `useFocusEffect` (foreground-only; fallback / denial silently leaves `partnerLoc` null). Both pools (`headsUp` + `availableNow`) wrapped in `sortPickupsByProximity`. New `RideDistanceLine` + `DeliveryLocationLabel` components surface the legs and the locked label on `AvailablePickupCard`, `HeadsUpCard`, and `ActiveDeliveryCard`.
+      - **Section F — PR 48 regression fix.** `updateShopSettings`'s `onCall<{…}>` request type was missing `serviceRadiusKm` (the validator in `shopSettingsHelpers` had been updated for PR 48 but the wrapper wasn't), so a radius-only payload arrived at the validator with all three fields undefined and tripped the "at least one of …" guard. Added the field to the generic + the validator-input object, plus included `serviceRadiusKm` in the audit-log `before` snapshot for clean before/after diffs.
+
+- [x] **Tests.** 14 new cases. Suite green at **930 / 930**, up from 916.
+      - `@c:\Users\dahiy\grocery-mvp\tests\utils\deliveryRoutingHelpers.test.ts` (14 cases): `rideLegsForOrder` — both legs / null partner / missing shopLocation / missing deliveryDistanceKm / NaN-Infinity rejection / no-mutation. `sortPickupsByProximity` — nearer-first, no-shopLocation-to-bottom, null-partner stable, ties stable, no-mutation, empty array, mixed list integration.
+      - PR 48's `shopSettingsHelpers.test.ts` already covers the validator's `serviceRadiusKm` rules (12 cases shipped with PR 48); the wrapper bug surfaced because the wrapper has no unit-test seam — verified via the on-device repro in step 1 of smoke acceptance below.
+
+- [ ] **Cloud Run IAM verification (post-deploy).** New + redeployed callables:
+
+      ```powershell
+      gcloud run services get-iam-policy reportdeliverylocation `
+        --region=asia-south1 --project=grocery-mvp-dev
+      gcloud run services get-iam-policy updateshopsettings `
+        --region=asia-south1 --project=grocery-mvp-dev
+      gcloud run services get-iam-policy getmyprofile `
+        --region=asia-south1 --project=grocery-mvp-dev
+      gcloud run services get-iam-policy placeorder `
+        --region=asia-south1 --project=grocery-mvp-dev
+      ```
+
+      Add the `allUsers / run.invoker` binding to any missing service:
+
+      ```powershell
+      gcloud run services add-iam-policy-binding <svc> `
+        --region=asia-south1 --project=grocery-mvp-dev `
+        --member=allUsers --role=roles/run.invoker
+      ```
+
+- [ ] **Deploy plan.**
+      1. `npm run test:unit` — green (930/930 currently).
+      2. ```powershell
+         firebase deploy --only `
+           functions:placeOrder,functions:reportDeliveryLocation,functions:updateShopSettings,functions:getMyProfile
+         ```
+      3. Cloud Run IAM verify (above).
+      4. `eas update --branch production --message "PR 49 partner routing + service-area save fix"`. OTA-safe — `expo-location` already shipped (PR 46), no new native module / permission, no `app.json` change.
+
+- [ ] **Smoke acceptance (run all seven).**
+      1. **Section F repro** → Shop Settings, change ONLY Service area (e.g. 5 → 20), Save → succeeds, persists across reload. (Pre-fix: "At least one of deliveryFee, minOrder, or serviceRadiusKm is required.")
+      2. **Partner location prompt** → first dashboard open shows the foreground location prompt once. Granting it does not block the screen; denying it leaves the dashboard fully usable (pickups simply aren't distance-sorted, ride lines fall back to drop-only or hide).
+      3. **Nearest-first sort** → with two available pickups at different shops, the nearer shop's pickup sorts to the top of "Available now."
+      4. **Ride distance on card** → an available pickup shows `🛵 ~X.X km ride · A to shop + B to drop`, where B matches the order's stored `deliveryDistanceKm` and A is plausible for the partner's current spot.
+      5. **Locked location label** → a pickup placed against "Current location" shows `📍 Current location`; one against a saved address shows `📍 Home` (or whatever label the customer saved).
+      6. **Legacy order** (no `shopLocation` / no `deliveryDistanceKm`) → renders without a ride line, sorts to the bottom; no crash.
+      7. **`currentLocation` written + stripped** → after opening the dashboard with permission granted, the partner's `users/{uid}` doc has `currentLocation` + `currentLocationUpdatedAt`. Confirm `getMyProfile` (Profile screen) does NOT return either field — sets up PR 50 cleanly.
+
+- [ ] **Out of scope (later geo PRs).** Notification-radius push filtering (PR 50 — consumes the `currentLocation` this PR writes); background / live location tracking; partner map view; any Distance Matrix call; reverse-geocoding partner or customer location to a label.
+
+## PR 48 — Shop service radius + tier-save bug fix `[Phase 48]`
+
+- [x] **Why this PR exists.** Two fronts in one PR:
+      (1) **Visibility gate (sections A–H).** Today every active
+      shop shows to every customer (the hardcoded
+      `SHOW_ALL_SHOPS = true` in `shopService.ts`); a Faridabad
+      shop showing to a Delhi customer is wrong for real launch.
+      Each shop now sets `serviceRadiusKm`; `listShopsPublic`
+      filters customers outside it.
+      (2) **PR 47 smoke-test bug (sections I + J).** Sudhir
+      reported tier saves don't survive a reload (5 km charge
+      reverts 65→60), AND the now-redundant flat "Delivery fee"
+      input on Shop Settings was confusing owners (the tier table
+      governs pricing, not the flat field). Folded both fixes
+      into PR 48 — one migration, one test pass, one IAM verify.
+
+- [x] **What shipped.**
+      - **Pure helpers** in
+        `@c:\Users\dahiy\grocery-mvp\functions\src\geoVisibilityHelpers.ts`
+        (server) +
+        `@c:\Users\dahiy\grocery-mvp\src\utils\geoVisibilityHelpers.ts`
+        (client mirror): `filterShopsByServiceRadius(shops,
+        { showAll })` + `DEFAULT_SERVICE_RADIUS_KM = 5`. Fail-OPEN
+        on missing `distanceKm` (no customer location → don't
+        hide). INCLUSIVE radius boundary; treats `serviceRadiusKm`
+        ≤ 0 / NaN as missing → falls back to default.
+      - **Shop type** got `serviceRadiusKm?: number` (optional;
+        legacy fallback to 5 km via the helper).
+      - **`listShopsPublic`** now reads
+        `appConfig/shopVisibility.showAllShops` (defaults FALSE
+        on missing doc / read error — secure default) and applies
+        `filterShopsByServiceRadius` after `rankShopsByDistance`.
+      - **`shopService.getNearbyShops`** stripped of
+        `SHOW_ALL_SHOPS = true` / `NEAR_KM` constants. Native
+        path trusts the server's filtered list. Web Plan B path
+        reads the flag via Web SDK + applies the same pure
+        helper. Both `haversineKm` + `DEFAULT_SERVICE_RADIUS_KM`
+        kept imported with explicit `void` references (Rule 1
+        auto-formatter shield — both have been stripped before).
+      - **`shopSettingsHelpers`** whitelisted `serviceRadiusKm`
+        as a third field (integer-only, 1–50 km). Updated the
+        "at least one of" message to include the new field.
+      - **`approveShop`** seeds `DEFAULT_SERVICE_RADIUS_KM` only
+        when the doc doesn't already have a positive radius
+        (preserves a customized radius across re-approval; same
+        posture as PR 47's tier seeding).
+      - **ShopSettingsScreen** gained "Service area (km)" field
+        (pre-fills to default for legacy shops) and **lost** the
+        flat "Delivery fee (₹)" input. The schema field
+        `shop.deliveryFee` is INTENTIONALLY KEPT — it's still the
+        legacy fallback for `chargeForDistance` and the
+        `deliveryFee = deliveryCharge` shim placeOrder stamps.
+        Only the UI control was removed.
+      - **`orderService.updateShopSettings`** signature gained
+        `serviceRadiusKm?: number` on input + the response's
+        `updates` shape.
+      - **Section I — tier-save persistence fix.** Three-part:
+        - **`updatedAt` type normalization.** Both
+          `updateShopSettings` (~line 5287) and
+          `updateShopDeliveryTiers` (~line 5370) wrote
+          `updatedAt: Date.now()` (a number); every other shop
+          write uses `FieldValue.serverTimestamp()` (a Timestamp).
+          Firestore orders mixed-type fields by type first
+          (numbers sort below Timestamps), so a `getMyShop`
+          `.orderBy('updatedAt', 'desc')` returned the WRONG
+          (stale) doc immediately after a save. Both writes now
+          use `serverTimestamp()`.
+        - **`getMyShop` reads by claim.** When `auth.token.shopId`
+          is present, `getMyShop` now reads
+          `shops/{claims.shopId}` directly — the SAME key the
+          writers use. The legacy `ownerUid + status + orderBy`
+          query is preserved ONLY for pending owners (no claim
+          yet — `WaitingForApproval` relies on it). This
+          guarantees writer + reader resolve to the same doc.
+        - **Temporary diagnostic logs** in `getMyShop`
+          (`[getMyShop] resolved via claim.shopId` and
+          `... via ownerUid fallback`) capture path / hasTiers /
+          updatedAt-type for one repro from Sudhir.
+          **Strip these logs in the same PR once verified** —
+          tracked as a TODO below (PR 45.1 diagnostic-cleanup
+          lesson).
+      - **Section J.** Removed only the UI control. The data
+        field, type, cart snapshot, and server fallback logic
+        all stay intact.
+
+- [x] **Tests.** 28 new cases. Suite green at **916 / 916**, up
+      from 888.
+      - `@c:\Users\dahiy\grocery-mvp\tests\functions\geoVisibilityHelpers.test.ts`
+        (16 cases): inclusive boundary, beyond-radius, missing /
+        zero / negative / NaN radius → default fallback, undefined
+        / Infinity / NaN distance → fail-open, `showAll: true`
+        bypass, empty array, no-input-mutation guard, slice-not-
+        same-reference on showAll path, mixed-table integration,
+        `DEFAULT_SERVICE_RADIUS_KM === 5` pin.
+      - `@c:\Users\dahiy\grocery-mvp\tests\functions\shopSettingsHelpers.test.ts`
+        +12 cases: valid radius / partial-only / missing-all-three
+        rejection / non-integer / 0 / negative / 51 / non-numeric /
+        NaN / boundary 1 + 50 / combined three-field update.
+
+- [ ] **Cloud Run IAM verification (post-deploy).** Modified
+      callables — verify after every redeploy:
+
+      ```powershell
+      gcloud run services get-iam-policy listshopspublic `
+        --region=asia-south1 --project=grocery-mvp-dev
+      gcloud run services get-iam-policy updateshopsettings `
+        --region=asia-south1 --project=grocery-mvp-dev
+      gcloud run services get-iam-policy getmyshop `
+        --region=asia-south1 --project=grocery-mvp-dev
+      gcloud run services get-iam-policy updateshopdeliverytiers `
+        --region=asia-south1 --project=grocery-mvp-dev
+      ```
+
+      `approveShop` is admin-auth-only; it does NOT need an
+      `allUsers` binding (verifying it is harmless but expect no
+      public binding).
+
+      Add the `allUsers / run.invoker` binding to any missing
+      service:
+
+      ```powershell
+      gcloud run services add-iam-policy-binding <svc> `
+        --region=asia-south1 --project=grocery-mvp-dev `
+        --member=allUsers --role=roles/run.invoker
+      ```
+
+- [ ] **Deploy plan (server-FIRST so the offshore team doesn't
+      go blind).**
+      1. **Set the testing override BEFORE deploying.** In
+         Firestore, create `appConfig/shopVisibility` →
+         `{ showAllShops: true }`. Once PR 48's server lands, this
+         keeps every cross-city tester seeing every shop until you
+         flip it.
+      2. `npm run test:unit` — green (916/916 currently).
+      3. ```powershell
+         firebase deploy --only `
+           functions:listShopsPublic,functions:updateShopSettings,functions:approveShop,functions:getMyShop,functions:updateShopDeliveryTiers
+         ```
+      4. Cloud Run IAM verify (above) on the four public callables
+         (`approveShop` skipped intentionally).
+      5. `eas update --branch production --message "PR 48 service radius + tier-save fix"`.
+      6. **At real 1-shop pilot:** flip
+         `appConfig/shopVisibility.showAllShops` → `false` (or
+         delete the doc) so the radius gate goes live for real
+         customers. **No redeploy required.**
+
+- [ ] **Smoke acceptance (run all nine).**
+      1. **Testing override ON** (`showAllShops: true`) →
+         cross-city tester still sees every active shop. No
+         regression for the offshore team.
+      2. **Override OFF**, customer near pilot shop → shop
+         appears, card shows "~X.X km".
+      3. **Override OFF**, simulate a far location (or set the
+         shop's `serviceRadiusKm: 1` and stand >1 km away) →
+         shop disappears; "No shops near you" empty state
+         renders.
+      4. **Owner → Settings → Service area** → field pre-fills
+         (5 for default), edit to 3, Save → succeeds; re-open
+         confirms persisted.
+      5. **Legacy shop without `serviceRadiusKm`** → still
+         visible within 5 km (default fallback), hidden beyond.
+      6. **GPS denied / no location** → list does NOT go empty
+         (fail-open).
+      7. **Newly-approved shop** → has `serviceRadiusKm: 5`
+         seeded.
+      8. **Section I — tier-save persistence (Sudhir's repro).**
+         Owner changes 5 km charge 60→65, Save, **leave the
+         screen and come back** → field shows **65** (the bug;
+         must now stick). Re-open a second time. Place a real
+         order at ~4 km destination → delivery charge reflects
+         65.
+      9. **Section J — flat fee control gone.** Shop Settings no
+         longer has "Delivery fee (₹)" input; "Minimum order" +
+         "Service area" remain; saving them works. Checkout
+         pricing unchanged (tiers still drive it).
+
+- [ ] **Strip the temporary `getMyShop` diagnostic logs.** After
+      step 8 confirms the tier-save fix sticks, remove the two
+      `console.info('[getMyShop] resolved via …')` lines (and the
+      `console.warn` for the missing-doc branch can stay — it's
+      a real anomaly, not a diagnostic). Per the PR 45.1
+      diagnostic-probe-cleanup lesson.
+
+- [ ] **Out of scope (later geo PRs).** Partner routing /
+      sorting / location reporting (PR 49); partner notification
+      radius (PR 50); per-customer "deliver here" radius preview
+      on the shop card; reverse-geocoding the customer location
+      to a label.
+
+## PR 47 — Distance-based delivery charges `[Phase 47]`
+
+- [x] **Why this PR exists.** PR 46 stamped
+      `order.deliveryDistanceKm` on every order; PR 47 turns that
+      into money. The flat `shop.deliveryFee` overcharged 1km
+      deliveries and undercharged 8km deliveries — wrong for both
+      the customer and the shop economics. PR 47 makes the charge
+      scale with distance via per-shop configurable tiers.
+
+- [x] **What shipped.**
+      - **Pure helpers** in
+        `@c:\Users\dahiy\grocery-mvp\functions\src\deliveryChargeHelpers.ts`:
+        `chargeForDistance(tiers, distanceKm, fallbackFlat)`,
+        `validateDeliveryChargeTiers(tiers)`,
+        `DEFAULT_DELIVERY_CHARGE_TIERS = [{≤1km, ₹20}, {≤3km, ₹40},
+        {≤5km, ₹60}, {beyond, ₹100}]`. INCLUSIVE `maxKm`
+        boundaries; sort-on-read so storage order is irrelevant;
+        legacy fallback to flat `deliveryFee` for shops without a
+        tier table. Pure-function discipline (input array never
+        mutated) — pinned by a regression test.
+      - **Client-side mirror** at
+        `@c:\Users\dahiy\grocery-mvp\src\utils\deliveryChargeHelpers.ts`
+        (same shape; client doesn't import from `functions/` per
+        repo convention). Used by ShopSettingsScreen for inline
+        validation + CheckoutScreen for the preview charge.
+      - **`placeOrder` extension** (functions/src/index.ts ~line
+        676): replaced `const deliveryFee = shop.deliveryFee` with
+        the tier-resolved `chargeForDistance(...)` using the
+        server-derived `stampedDeliveryDistanceKm`. Stamps both
+        `deliveryCharge` (new) and `deliveryFee = deliveryCharge`
+        (back-compat shim) onto the order doc. Tampered-client
+        distance values are NOT trusted — server re-derives via
+        `deriveShopDeliveryEstimate` (same helper as
+        `getDeliveryEstimate`).
+      - **`approveShop` extension** (~line 3737): seeds
+        `DEFAULT_DELIVERY_CHARGE_TIERS` onto every newly-approved
+        shop. Skipped on re-approval when tiers already exist
+        (preserves a previously-customized table after a suspend
+        cycle). New shops get working tiers immediately.
+      - **`updateShopDeliveryTiers` callable** (asia-south1, shop
+        owner only — server reads `claims.shopId`; request-body
+        shopId is intentionally unsupported here). Server validates
+        via the same `validateDeliveryChargeTiers` the client uses,
+        writes audit log entry of action `shop.update_delivery_tiers`.
+      - **ShopSettingsScreen** got a "Delivery charges (by
+        distance)" card with editable km + ₹ per band, dashed
+        "+ Add band" pill, ✕ remove (catch-all unremovable),
+        live "More than X km" label on the catch-all row, inline
+        save with friendly validation errors. Separate Save button
+        from the existing flat-fee form (different callable,
+        different validation surface).
+      - **CheckoutScreen** now reads the cart's snapshot
+        `deliveryChargeTiers`, computes `previewDeliveryCharge =
+        chargeForDistance(tiers, deliveryEstimate?.distanceKm ?? 0,
+        deliveryFee)`, and renders `Delivery (X.X km)  ₹N` in the
+        bill. Total derived from the preview — no longer the flat
+        fee. Server is authoritative; preview is for display only.
+      - **Cart store** (`@c:\Users\dahiy\grocery-mvp\src\store\useCartStore.ts`)
+        gained a `deliveryChargeTiers: DeliveryChargeTier[] | null`
+        field, snapshotted at every add path (addItem,
+        addMenuItem, replaceCartWithItems) and persisted via
+        partialize so a relaunch mid-checkout still renders the
+        tiered preview.
+      - **`Shop.deliveryChargeTiers?`** + **`Order.deliveryCharge?`**
+        + **`DeliveryChargeTier`** added to
+        `@c:\Users\dahiy\grocery-mvp\src\types\index.ts`. All
+        optional for back-compat with pre-PR-47 docs.
+
+- [x] **Tests.** 30 new cases in
+      `@c:\Users\dahiy\grocery-mvp\tests\functions\deliveryChargeHelpers.test.ts`
+      covering: boundary inclusivity (0.5 / 1.0 / 1.0001 / 5 / 5.0001),
+      catch-all behavior, sort-on-read with shuffled input,
+      negative / NaN / Infinity distance clamping, legacy fallback
+      branches, partial-malformed cherry-picking, default-table
+      pin, no-catch-all safety net, and all
+      `validateDeliveryChargeTiers` rejection paths (empty,
+      missing/duplicate catch-all, ascending overlap, negative
+      charge, non-numeric maxKm, NaN). Suite green at **888 /
+      888**, up from 858.
+
+- [ ] **Cloud Run IAM verification (post-deploy).** New callable
+      + modified callables all need `allUsers / run.invoker`:
+
+      ```powershell
+      gcloud run services get-iam-policy updateshopdeliverytiers `
+        --region=asia-south1 --project=grocery-mvp-dev
+      gcloud run services get-iam-policy placeorder `
+        --region=asia-south1 --project=grocery-mvp-dev
+      gcloud run services get-iam-policy approveshop `
+        --region=asia-south1 --project=grocery-mvp-dev
+      ```
+
+      Add the binding to any missing service:
+
+      ```powershell
+      gcloud run services add-iam-policy-binding <service> `
+        --region=asia-south1 --project=grocery-mvp-dev `
+        --member=allUsers --role=roles/run.invoker
+      ```
+
+- [ ] **Smoke acceptance.**
+      1. **Shop owner edits tiers.** Sign in as shop owner →
+         Settings → Delivery charges → see the seeded default →
+         change ≤1km to ₹15, add a band (≤2km, ₹30), save → re-open
+         Settings → values persisted. Audit log has a
+         `shop.update_delivery_tiers` entry with before/after.
+      2. **Invalid tiers rejected (client + server).** Try to save
+         with no catch-all → inline error "Add a 'beyond the last
+         band' catch-all tier...". Try duplicate maxKm → inline
+         "Tier distances must be strictly ascending". Editor never
+         hits the server in either case.
+      3. **Charge scales with distance — near.** Customer with a
+         delivery location ~0.5km from the shop → checkout bill
+         shows the tier-1 charge (₹20 default). Distance-bearing
+         label visible: "Delivery (0.5 km)  ₹20".
+      4. **Charge scales with distance — far.** Customer ~4km
+         away → bill shows tier-3 charge (₹60). Total updates.
+      5. **Order locks the charge.** Place the order → order doc
+         has `deliveryCharge` matching the tier for its
+         `deliveryDistanceKm`, AND `deliveryFee` mirrors it. Total
+         = subtotal + deliveryCharge. ShopOrderDetail / receipts /
+         refund logic all keep working unchanged (read
+         `deliveryFee`).
+      6. **Legacy shop fallback.** A shop without `deliveryChargeTiers`
+         (any of the pre-PR-47 seed shops that haven't been
+         re-approved) should still place orders successfully,
+         charging its flat `deliveryFee`. No crash, no ₹0.
+      7. **New shop gets defaults.** Register + approve a fresh
+         shop → its doc has `deliveryChargeTiers` matching
+         `DEFAULT_DELIVERY_CHARGE_TIERS`.
+
+- [ ] **Deploy plan.**
+      1. `npm run test:unit` — green (888/888 currently).
+      2. `firebase deploy --only functions:placeOrder,functions:approveShop,functions:updateShopDeliveryTiers`.
+      3. Cloud Run IAM verify (above) — especially the new
+         `updateshopdeliverytiers` service.
+      4. `eas update --branch production --message "PR 47 distance-based delivery charges"`.
+      5. Force-quit + reopen twice; run smoke acceptance steps
+         1–7.
+
+- [ ] **Out of scope (later geo PRs).** Shop service radius +
+      customer distance display (PR 48); partner routing / total
+      ride distance (PR 49); partner notification radius (PR 50);
+      delivery-charge payout split between shop and partner
+      (separate economics PR — not part of the geo system).
+
+## PR 46 — Geo foundation: locked delivery location + Distance Matrix `[Phase 46]`
+
+- [x] **Why this PR exists.** Keystone of the geo/distance system
+      (PRs 47–50). Today an order carries only the saved address
+      and a flat `shop.deliveryFee`; PR 47's tier-based delivery
+      charge needs (a) a **locked delivery location** on every
+      order and (b) a **server-authoritative road distance +
+      duration**. PR 46 lands the foundation; PR 47 flips the
+      charge.
+
+- [x] **COST DECISION (Sudhir, May 27 2026): paid Distance Matrix
+      is BUILT BUT DORMANT.** Default path during pilot is the
+      free haversine × 1.4 + 15 km/h proration. Distance Matrix is
+      gated behind the kill-switch `aiFeatures/distanceMatrix.enabled`
+      (default FALSE — missing doc OR explicit false → disabled).
+      The disabled branch in `computeDeliveryEstimate` NEVER calls
+      `fetch` — pinned by `tests/functions/distanceMatrixHelpers.test.ts`
+      under "CRITICAL: flagEnabled=false → fetchImpl NEVER called
+      (cost guarantee)". One Firestore doc-flip turns the paid
+      path on; until then zero Google billing.
+
+- [x] **What shipped.**
+      - **Pure helpers**:
+        `@c:\Users\dahiy\grocery-mvp\functions\src\distanceMatrixHelpers.ts`
+        — `ROAD_FACTOR=1.4`, `FALLBACK_SPEED_KMH=15`,
+        `parseDistanceMatrixResponse`, `haversineFallbackEstimate`,
+        `buildDistanceMatrixUrl`, and the orchestrator
+        `computeDeliveryEstimate({shop, dest, flagEnabled, apiKey,
+        fetchImpl, logger})`. Never throws; every external failure
+        gracefully falls back to haversine. 25 unit tests pin the
+        decision matrix.
+      - **`getDeliveryEstimate` callable** (`onCall`, asia-south1,
+        secrets: `[GOOGLE_MAPS_API_KEY]`). Auth required. Loads
+        shop, reads kill-switch via `readDistanceMatrixFlag`,
+        invokes `deriveShopDeliveryEstimate` → returns
+        `{ distanceKm, durationMin, source }`. Throws
+        `failed-precondition` only when the shop has no
+        `location` field (legacy seed shops); haversine fallback
+        otherwise.
+      - **`placeOrder` extension**: accepts optional
+        `deliveryLocation: { lat, lng, type, addressId?, label }`,
+        validates the shape, **re-derives** the estimate
+        server-side (via the same `deriveShopDeliveryEstimate`),
+        stamps `deliveryLocation` + `deliveryDistanceKm` +
+        `deliveryDurationMin` onto the order doc. Pre-PR-46
+        clients omitting the field round-trip unchanged. Tampered
+        client distance/duration values are NOT trusted — the
+        server's re-derivation is authoritative for PR 47.
+      - **`SavedAddress.lat?` / `lng?`** added to client + server
+        types. `validateAddressInput` accepts both (range-checked
+        [-90,90] / [-180,180], Number.isFinite required) and
+        rejects half-set pairs (`'lat and lng must both be set or
+        both be absent'`). 8 new tests in `profileValidation.test.ts`.
+      - **`AddressEditScreen`**: new "📍 Use my current location"
+        outlined button, expo-location only (NO react-native-maps
+        — keeps OTA-safe). Three states: idle / capturing /
+        captured (collapses to status row + Re-capture/Clear).
+        Fallback-source coords surface a yellow warning so the
+        customer doesn't think the mock-Delhi default is their
+        real pin. Coords forwarded to `saveAddress` on submit.
+      - **`CheckoutScreen`**: new "📍 Deliver to my current
+        location" radio option above the saved-address picker.
+        When the picked saved address has no GPS pin we
+        auto-capture live coords as fallback (one-time per
+        selection) AND surface a yellow note explaining the
+        substitution. The `getDeliveryEstimate` preview re-fires
+        on every target change (debounced via cancellation flag);
+        result renders as `~N min · X.X km` in the bill summary.
+        `deliveryLocation` flows through `placeOrder`.
+      - **PR 47 dependency satisfied**: `deliveryDistanceKm` is now
+        a stamped, server-authoritative field on every new order
+        whose customer has a coord-bearing target.
+
+- [x] **What was DEFERRED (out of PR 46 scope; flagged here for
+      future PRs).**
+      - **Draggable map pin** (react-native-maps) on
+        `AddressEditScreen` — would require a native module and
+        breaks OTA. Sudhir's call: ship expo-location button only.
+        Future PR.
+      - **ETA coupling** — PR 46 stores `deliveryDurationMin` on
+        the order but does NOT yet wire it into PR 43's
+        `orderEtaDisplay` helper. The post-acceptance ETA still
+        uses `readyByEstimate`. Deferred to PR 51+ when the
+        partner-side timing data lands.
+      - **Reverse geocoding** of current-location label
+        (e.g. "Near Sector 12") — label currently snapshots as
+        the literal string `'Current location'`. Not blocking
+        any downstream PR.
+
+- [ ] **Cost-guarantee verification (post-deploy).** With the
+      kill-switch unset / false, place a test order from a
+      saved-address path. Check Cloud Logging filtered to
+      `getDeliveryEstimate` and `placeOrder`: no outbound HTTP
+      calls to `maps.googleapis.com`. Optional belt-and-braces:
+      `gcloud logging read` filtered to fetch traces should
+      return zero hits during the pilot week.
+
+- [ ] **Cloud Run IAM verification (post-deploy).** New callable
+      `getDeliveryEstimate` needs allUsers → run.invoker like
+      every other public callable:
+
+      ```powershell
+      gcloud run services get-iam-policy getdeliveryestimate `
+        --region=asia-south1 `
+        --project=grocery-mvp-dev
+      ```
+
+      If allUsers is missing:
+
+      ```powershell
+      gcloud run services add-iam-policy-binding getdeliveryestimate `
+        --region=asia-south1 `
+        --project=grocery-mvp-dev `
+        --member=allUsers `
+        --role=roles/run.invoker
+      ```
+
+- [ ] **Smoke acceptance.**
+      1. Saved-address-with-pin order: edit a saved address, tap
+         "Use my current location" (verify GPS source on the
+         captured row), save. Open checkout → pick that address →
+         "Estimated delivery ~N min · X.X km" line appears in the
+         summary → place order. Firestore: order doc has
+         `deliveryLocation { type: 'saved_address', addressId,
+         lat, lng, label }` + `deliveryDistanceKm` +
+         `deliveryDurationMin`.
+      2. Saved-address-without-pin order: pick a legacy address
+         (no lat/lng on the row). Yellow note appears in the
+         picker; live GPS auto-captures; estimate line still
+         renders; order doc has `deliveryLocation` with
+         `type: 'saved_address'`, `addressId`, AND coords (from
+         live GPS, not the address row).
+      3. Current-location order: tap "📍 Deliver to my current
+         location" → estimate updates → place order. Order doc
+         has `deliveryLocation { type: 'current_location' }`,
+         no `addressId`.
+      4. Locked semantic: after placing, edit the source saved
+         address (move it to a different street). The order's
+         `deliveryLocation` does NOT change.
+      5. Cost guarantee: kill-switch stays unset. Function logs
+         show `source: 'haversine_fallback'` on every call.
+
+- [ ] **Deploy plan.**
+      1. `npm run test:unit` — green (858/858 currently).
+      2. `firebase deploy --only functions:getDeliveryEstimate,functions:placeOrder,functions:saveAddress`.
+      3. Cloud Run IAM verify (above).
+      4. `eas update --branch production --message "PR 46 geo
+         foundation: locked delivery location + Distance Matrix
+         (dormant)"`.
+      5. Smoke acceptance steps 1–5.
+
 ## PR 45.2 — Fix push registering to anonymous user `[Phase 45.2]`
 
 - [x] **Root cause confirmed via PR 45.1 probes (May 27 2026).**

@@ -233,3 +233,131 @@ describe('validateShopSettings — minOrder range', () => {
     expect(hi.ok).toBe(true);
   });
 });
+
+// PR 48 — third whitelisted field: `serviceRadiusKm` (integer-only,
+// 1–50 km). Mirrors the existing `deliveryFee` / `minOrder` test
+// posture.
+describe('validateShopSettings — serviceRadiusKm (PR 48)', () => {
+  test('valid radius (3) → ok, in updates', () => {
+    const r = validateShopSettings({
+      auth: ownerAuth(),
+      serviceRadiusKm: 3,
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.updates.serviceRadiusKm).toBe(3);
+      // Partial update — other fields must NOT leak in.
+      expect(r.updates.deliveryFee).toBeUndefined();
+      expect(r.updates.minOrder).toBeUndefined();
+    }
+  });
+
+  test('partial update with ONLY serviceRadiusKm → ok', () => {
+    // Pins that the "at least one field" rule now accepts the
+    // radius alone (regression guard against forgetting to fold
+    // `hasRadius` into the gate).
+    const r = validateShopSettings({
+      auth: ownerAuth(),
+      serviceRadiusKm: 5,
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  test('none of the three fields present → reject with updated message', () => {
+    const r = validateShopSettings({ auth: ownerAuth() });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe('invalid-argument');
+      // Message now mentions all three; pin on the new word.
+      expect(r.message).toMatch(/serviceRadiusKm/i);
+    }
+  });
+
+  test('non-integer (2.5) → reject', () => {
+    const r = validateShopSettings({
+      auth: ownerAuth(),
+      serviceRadiusKm: 2.5,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('invalid-argument');
+  });
+
+  test('below 1 (0) → reject', () => {
+    const r = validateShopSettings({
+      auth: ownerAuth(),
+      serviceRadiusKm: 0,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe('invalid-argument');
+      expect(r.message).toMatch(/between 1 and 50/i);
+    }
+  });
+
+  test('negative (-5) → reject', () => {
+    const r = validateShopSettings({
+      auth: ownerAuth(),
+      serviceRadiusKm: -5,
+    });
+    expect(r.ok).toBe(false);
+  });
+
+  test('above 50 (51) → reject', () => {
+    const r = validateShopSettings({
+      auth: ownerAuth(),
+      serviceRadiusKm: 51,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe('invalid-argument');
+      expect(r.message).toMatch(/between 1 and 50/i);
+    }
+  });
+
+  test('non-numeric → reject', () => {
+    const r = validateShopSettings({
+      auth: ownerAuth(),
+      serviceRadiusKm: '3' as unknown as number,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('invalid-argument');
+  });
+
+  test('NaN → reject', () => {
+    const r = validateShopSettings({
+      auth: ownerAuth(),
+      serviceRadiusKm: Number.NaN,
+    });
+    expect(r.ok).toBe(false);
+  });
+
+  test('accepts boundary values (1 and 50)', () => {
+    const lo = validateShopSettings({
+      auth: ownerAuth(),
+      serviceRadiusKm: 1,
+    });
+    const hi = validateShopSettings({
+      auth: ownerAuth(),
+      serviceRadiusKm: 50,
+    });
+    expect(lo.ok).toBe(true);
+    expect(hi.ok).toBe(true);
+  });
+
+  test('combined update — deliveryFee + minOrder + serviceRadiusKm → all three in updates', () => {
+    const r = validateShopSettings({
+      auth: ownerAuth(),
+      deliveryFee: 20,
+      minOrder: 100,
+      serviceRadiusKm: 3,
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.updates).toEqual({
+        deliveryFee: 20,
+        minOrder: 100,
+        serviceRadiusKm: 3,
+      });
+    }
+  });
+});

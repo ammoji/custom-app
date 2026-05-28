@@ -17,6 +17,8 @@ import { Platform } from 'react-native';
 import type {
     Address,
     CartItem,
+    DeliveryChargeTier,
+    DeliveryLocation,
     DeliveryRequest,
     ExtractedMenuItem,
     MenuItem,
@@ -52,6 +54,32 @@ type PlaceOrderInput = {
   // 'call_me' on mount); legacy callers that omit it round-trip
   // unchanged because the server normalizes missing → 'call_me'.
   substitutionPreference?: SubstitutionPreference;
+  // PR 46 — optional locked delivery location. CheckoutScreen
+  // (post-PR-46) always sends this; the server validates the
+  // shape, re-derives the distance/duration estimate
+  // authoritatively (so a tampered client can't forge a short
+  // distance to dodge PR 47 charges), and stamps all three
+  // delivery fields onto the order doc. Pre-PR-46 clients (or
+  // clients that fail to capture coords) omit the field; the
+  // server skips the stamp and the order has no
+  // deliveryLocation/deliveryDistanceKm/deliveryDurationMin
+  // — the doc shape stays back-compat-clean.
+  deliveryLocation?: DeliveryLocation;
+};
+
+// PR 46 — input/output shape of the `getDeliveryEstimate` callable.
+// Used by CheckoutScreen to show the customer "Estimated delivery:
+// ~N min" before they place the order. The server's identical logic
+// runs again inside placeOrder for the authoritative stamp; this
+// callable is purely the display preview.
+export type DeliveryEstimateInput = {
+  shopId: string;
+  dest: { lat: number; lng: number };
+};
+export type DeliveryEstimateResult = {
+  distanceKm: number;
+  durationMin: number;
+  source: 'distance_matrix' | 'haversine_fallback';
 };
 
 type PlaceOrderResult = {
@@ -132,6 +160,16 @@ export const orderService = {
         ...(input.substitutionPreference
           ? { substitutionPreference: input.substitutionPreference }
           : {}),
+        // PR 46 — forward the locked delivery location. Server
+        // re-validates the shape (lat/lng numbers, valid type)
+        // and, more importantly, RE-DERIVES the distance + duration
+        // estimate authoritatively rather than trusting any
+        // client-supplied values. Omitting the field on legacy /
+        // tests / failed-GPS paths is safe; the server skips the
+        // delivery-location stamp entirely in that case.
+        ...(input.deliveryLocation
+          ? { deliveryLocation: input.deliveryLocation }
+          : {}),
       };
       let data: PlaceOrderResult;
       if (isNative) {
@@ -181,6 +219,35 @@ export const orderService = {
     } finally {
       t?.stop();
     }
+  },
+
+  // PR 46 — pre-checkout distance/duration preview. CheckoutScreen
+  // calls this once after the customer picks (or changes) the
+  // delivery target so the "Estimated delivery: ~N min" line
+  // updates before "Place Order" is tapped. The server runs the
+  // SAME `computeDeliveryEstimate` again inside placeOrder and
+  // stamps the authoritative result onto the order doc; the
+  // values returned here are display-only and may differ from the
+  // stamped values by ~seconds (independent calls; both go through
+  // the kill-switch + haversine fallback).
+  //
+  // Never throws on Google failure — the server's haversine
+  // fallback always returns a valid estimate so the UI doesn't
+  // need a try/catch around this in steady state.
+  async getDeliveryEstimate(
+    input: DeliveryEstimateInput,
+  ): Promise<DeliveryEstimateResult> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('getDeliveryEstimate');
+      const result = await fn(input);
+      return result.data as DeliveryEstimateResult;
+    }
+    const fn = httpsCallable<DeliveryEstimateInput, DeliveryEstimateResult>(
+      functions,
+      'getDeliveryEstimate',
+    );
+    const result = await fn(input);
+    return result.data;
   },
 
   // Creates a fresh Razorpay session for an order whose payment was
@@ -551,22 +618,67 @@ export const orderService = {
   //     client cannot target someone else's shop).
   //   - Admin callers: REQUIRED to pass `shopId` (their claim has no
   //     shopId — server can't infer the target shop).
+  // PR 47 — persist the shop owner's distance-based delivery charge
+  // tier table. Server-side `validateDeliveryChargeTiers` enforces
+  // catch-all presence + ascending bands + range checks; the client
+  // pre-validates with the same helper for inline friendly errors
+  // before incurring the round-trip. Shop owner only — server reads
+  // `claims.shopId` (request body shopId is NOT supported here on
+  // purpose; admins editing another shop's tiers should use the
+  // admin tooling, not this callable).
+  async updateShopDeliveryTiers(input: {
+    tiers: DeliveryChargeTier[];
+  }): Promise<{
+    ok: boolean;
+    shopId: string;
+    tiers: DeliveryChargeTier[];
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('updateShopDeliveryTiers');
+      const result = await fn(input);
+      return result.data as {
+        ok: boolean;
+        shopId: string;
+        tiers: DeliveryChargeTier[];
+      };
+    }
+    const fn = httpsCallable(functions, 'updateShopDeliveryTiers');
+    const result = await fn(input);
+    return result.data as {
+      ok: boolean;
+      shopId: string;
+      tiers: DeliveryChargeTier[];
+    };
+  },
+
   async updateShopSettings(input: {
     shopId?: string;
     deliveryFee?: number;
     minOrder?: number;
+    // PR 48 — service radius (km). Third whitelisted partial-update
+    // field. Server caps to 1–50 km / integer-only.
+    serviceRadiusKm?: number;
   }): Promise<{
     ok: boolean;
     shopId: string;
-    updates: { deliveryFee?: number; minOrder?: number };
+    updates: {
+      deliveryFee?: number;
+      minOrder?: number;
+      serviceRadiusKm?: number;
+    };
   }> {
+    type UpdateShape = {
+      deliveryFee?: number;
+      minOrder?: number;
+      serviceRadiusKm?: number;
+    };
     if (isNative) {
       const fn = getNativeFunctions().httpsCallable('updateShopSettings');
       const result = await fn(input);
       return result.data as {
         ok: boolean;
         shopId: string;
-        updates: { deliveryFee?: number; minOrder?: number };
+        updates: UpdateShape;
       };
     }
     const fn = httpsCallable(functions, 'updateShopSettings');
@@ -574,7 +686,7 @@ export const orderService = {
     return result.data as {
       ok: boolean;
       shopId: string;
-      updates: { deliveryFee?: number; minOrder?: number };
+      updates: UpdateShape;
     };
   },
 
@@ -1342,6 +1454,28 @@ export const orderService = {
       return;
     }
     const fn = httpsCallable(functions, 'setDeliveryStatus');
+    await fn(input);
+  },
+
+  // PR 49 — write the partner's foreground GPS pin to
+  // `users/{uid}.currentLocation`. Best-effort from the dashboard:
+  // callers should `.catch(() => {})` so a transient network /
+  // permission failure never blocks the screen. The dashboard's
+  // nearest-first sort uses the LIVE client GPS directly, not a
+  // round-trip through this callable; the persisted value exists
+  // for PR 50's push-fanout filter.
+  async reportDeliveryLocation(input: {
+    lat: number;
+    lng: number;
+  }): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'reportDeliveryLocation',
+      );
+      await fn(input);
+      return;
+    }
+    const fn = httpsCallable(functions, 'reportDeliveryLocation');
     await fn(input);
   },
 

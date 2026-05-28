@@ -191,7 +191,69 @@ file (currently PR 23 is the most recent), `docs/pr-N-<slug>-windsurf-prompt.md`
 6. Ask Sudhir what he wants to work on. Don't assume — even if context
    suggests an obvious next step, confirm before doing anything destructive.
 
-## Current state — 2026-05-27 (PRs 41–45.2 shipped via OTA; push notifications fixed + confirmed; pilot-ready dev side)
+## Current state — 2026-05-27 (later) — Geo system PRs 46–49 shipped (4 of 5); pausing for full re-test + Android validation
+
+**The geo/distance system is 4 of 5 PRs done** (see
+`docs/GEO_DISTANCE_SYSTEM_DESIGN.md`). All Sudhir-tested on iOS +
+deployed (server-first, IAM-verified) + OTA'd. Test suite 825 → 930.
+
+- **PR 46** — geo foundation: locked delivery location on the order
+  (`deliveryLocation`, `deliveryDistanceKm`, `deliveryDurationMin`),
+  `getDeliveryEstimate` callable, GPS capture in AddressEditScreen +
+  "deliver to current location" in CheckoutScreen. **The paid Google
+  Distance Matrix API is BUILT BUT DORMANT** — `aiFeatures/
+  distanceMatrix.enabled` defaults false; the disabled branch never
+  calls fetch (cost-guarantee test pins this). Haversine ×1.4 during
+  pilot. FUTURE TO-DO: flip the flag at ~50 shops scale.
+- **PR 47** — distance-based delivery charges: per-shop
+  `deliveryChargeTiers` (inclusive `maxKm` bands + null catch-all),
+  `chargeForDistance` / `validateDeliveryChargeTiers` pure helpers
+  (functions + `src/utils/` mirror), `updateShopDeliveryTiers`
+  callable, ShopSettings tier editor, CheckoutScreen preview.
+  placeOrder stamps `deliveryCharge` + `deliveryFee = deliveryCharge`
+  (back-compat shim); approveShop seeds the default table.
+- **PR 48** — shop service radius + customer distance visibility.
+  Replaced hardcoded `SHOW_ALL_SHOPS = true` with a per-shop
+  `serviceRadiusKm` gate applied **server-side** in `listShopsPublic`
+  (native can't read Firestore — Plan B). The "show all" override is
+  a **server-read Firestore flag** `appConfig/shopVisibility.
+  showAllShops` (NOT `__DEV__` — false in TestFlight). **It is
+  currently `true`** for the cross-city offshore-testing window —
+  **flip to `false` (or delete) at real 1-shop pilot** so the radius
+  gate goes live. Bundled the tier-save-persistence fix + removed the
+  redundant flat Delivery-fee input (field kept as legacy fallback).
+- **PR 49** — delivery-partner routing: `Order.shopLocation` stamped
+  in placeOrder; `reportDeliveryLocation` callable writes
+  `users/{uid}.currentLocation` (foreground-only, on dashboard
+  focus — feeds PR 50); nearest-shop-first pickup sort; ride-distance
+  breakdown; locked delivery-location label on cards.
+
+**Two bugs fixed this session, same shape (logged as a lesson):** the
+PR-47 tier-save revert and the PR-48 service-area-save failure were
+both a *pure helper* gaining a field while the *callable wrapper*
+feeding it didn't. Tier-save fix: normalized `updatedAt` to
+`serverTimestamp()` + made `getMyShop` read `shops/{claims.shopId}`
+directly when a claim exists (query fallback only for pending
+owners). Service-area fix: `updateShopSettings` wrapper now forwards
+`serviceRadiusKm`. **Rule of thumb: when a validator/helper gains a
+field, grep every caller/wrapper for that field before shipping.**
+
+**Windsurf weekly quota exhausted — resets 5/31 morning.** **PR 50
+(notification radius — the last geo PR) is designed but NOT yet
+drafted as a prompt.** Holding it until the quota resets AND the
+re-test/Android pass completes.
+
+**Next phase (Sudhir's plan):** full end-to-end re-test on iOS +
+set up and validate on **Android** (build 6 unblocked May 26).
+Collecting bugs / critical enhancements into a list as they surface.
+The next session likely starts from a testing-findings list, not PR 50.
+
+**Two diagnostic logs to strip later (harmless):** PR 45.1 push
+probes + PR 48 §I `[getMyShop] resolved via …` logs.
+
+---
+
+## Prior state — 2026-05-27 (PRs 41–45.2 shipped via OTA; push notifications fixed + confirmed; pilot-ready dev side)
 
 **Push notifications fixed + confirmed working (two-device test).**
 The multi-day push outage is resolved. Root cause (found via PR

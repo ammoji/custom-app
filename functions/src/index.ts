@@ -123,6 +123,31 @@ import { normalizeSubstitutionPreference } from './substitutionHelpers';
 // PR 22 — used by both placeOrder (per-order override stamping) and
 // indirectly by saveAddress (via profileHelpers.validateAddressInput).
 import { normalizeDeliveryInstructions } from './deliveryInstructionsHelpers';
+// PR 46 — pure helpers for the delivery-distance estimate. The
+// kill-switch + fallback decision logic lives in this file so the
+// cost-guarantee (zero Google calls during pilot) is unit-pinned
+// without touching firebase-admin or the emulator.
+import {
+    computeDeliveryEstimate,
+    type DistanceEstimate,
+} from './distanceMatrixHelpers';
+// PR 47 — distance-based delivery charge tiers. Pure helpers used
+// by placeOrder (server-authoritative charge computation),
+// approveShop (default-tier seed), and updateShopDeliveryTiers
+// (validation before persistence).
+import {
+    chargeForDistance,
+    DEFAULT_DELIVERY_CHARGE_TIERS,
+    validateDeliveryChargeTiers,
+    type DeliveryChargeTier,
+} from './deliveryChargeHelpers';
+// PR 48 — service-radius visibility gate. `listShopsPublic` applies
+// the filter; `approveShop` seeds the default. Same dual-purpose
+// import pattern as `deliveryChargeHelpers`.
+import {
+    DEFAULT_SERVICE_RADIUS_KM,
+    filterShopsByServiceRadius,
+} from './geoVisibilityHelpers';
 import {
     promoteDefaultAfterDelete,
     validateAddressInput,
@@ -223,6 +248,14 @@ const db = getFirestore();
 const RAZORPAY_KEY_ID = defineSecret('RAZORPAY_KEY_ID');
 const RAZORPAY_KEY_SECRET = defineSecret('RAZORPAY_KEY_SECRET');
 const RAZORPAY_WEBHOOK_SECRET = defineSecret('RAZORPAY_WEBHOOK_SECRET');
+// PR 46 — Distance Matrix API key. Read EXCLUSIVELY by
+// `getDeliveryEstimate`, and only on the branch where
+// `aiFeatures/distanceMatrix.enabled === true`. With the
+// kill-switch defaulting to false during pilot the secret
+// is never accessed, so an unset secret is safe at deploy
+// time. Set via `firebase functions:secrets:set GOOGLE_MAPS_API_KEY`
+// before the flag is flipped at scale.
+const GOOGLE_MAPS_API_KEY = defineSecret('GOOGLE_MAPS_API_KEY');
 
 type OrderStatus =
   | 'pending'
@@ -273,13 +306,31 @@ type PlaceOrderInput = {
   // to 'call_me' via normalizeSubstitutionPreference. New clients
   // send one of the three string values from the checkout picker.
   substitutionPreference?: 'call_me' | 'auto' | 'refund';
+  // PR 46 — optional locked delivery location. When present, the
+  // server validates the shape, re-derives the distance/duration
+  // estimate authoritatively (so a tampered client can't forge a
+  // short distance to dodge future tier-based delivery charges in
+  // PR 47), and stamps all three delivery fields onto the order
+  // doc. Pre-PR-46 clients omit it and the order doc is written
+  // without the new fields (back-compat).
+  deliveryLocation?: {
+    lat: number;
+    lng: number;
+    type: 'saved_address' | 'current_location';
+    addressId?: string;
+    label: string;
+  };
 };
 
 export const placeOrder = onCall<PlaceOrderInput>(
   {
     cors: true,
     enforceAppCheck: false,
-    secrets: [RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET],
+    // PR 46 — declare GOOGLE_MAPS_API_KEY too so the authoritative
+    // re-derivation has access when (eventually) the kill-switch
+    // flips. During pilot the disabled branch never reads it, so
+    // an unset secret is safe.
+    secrets: [RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, GOOGLE_MAPS_API_KEY],
   },
   async request => {
     const auth = request.auth;
@@ -295,6 +346,78 @@ export const placeOrder = onCall<PlaceOrderInput>(
     }
     if (paymentMethod !== 'cod' && paymentMethod !== 'online') {
       throw new HttpsError('invalid-argument', 'Invalid paymentMethod');
+    }
+
+    // PR 46 — validate the optional locked delivery location shape.
+    // Coords are re-derived authoritatively below (we never trust
+    // the client's distance/duration); but the {type, addressId,
+    // label} are taken from the client because they record WHICH
+    // source the customer picked. The lat/lng on the order doc
+    // ALSO come from the client — they're the customer's intent at
+    // checkout, not a server-side calculation. The server's job is
+    // only to (a) validate they're plausible numbers and (b) compute
+    // distance + duration from them. If a tampered client sends
+    // bogus coords, the resulting distance is what gets used for
+    // PR 47's tier-based charge — which is fine, because the
+    // customer is the one who's going to pay extra delivery for
+    // their own forged coords. The integrity-sensitive step is
+    // re-DERIVING the distance, not validating the destination.
+    const rawDeliveryLocation = (request.data as { deliveryLocation?: unknown })
+      ?.deliveryLocation;
+    let lockedDeliveryLocation: {
+      lat: number;
+      lng: number;
+      type: 'saved_address' | 'current_location';
+      addressId?: string;
+      label: string;
+    } | null = null;
+    if (rawDeliveryLocation !== undefined && rawDeliveryLocation !== null) {
+      if (typeof rawDeliveryLocation !== 'object') {
+        throw new HttpsError(
+          'invalid-argument',
+          'deliveryLocation must be an object',
+        );
+      }
+      const dl = rawDeliveryLocation as Record<string, unknown>;
+      const dlCoordsResult = validateDestLatLng({ lat: dl.lat, lng: dl.lng });
+      if (!dlCoordsResult.ok) {
+        throw new HttpsError(
+          'invalid-argument',
+          `deliveryLocation: ${dlCoordsResult.message}`,
+        );
+      }
+      if (dl.type !== 'saved_address' && dl.type !== 'current_location') {
+        throw new HttpsError(
+          'invalid-argument',
+          'deliveryLocation.type must be "saved_address" or "current_location"',
+        );
+      }
+      if (typeof dl.label !== 'string' || dl.label.trim().length === 0) {
+        throw new HttpsError(
+          'invalid-argument',
+          'deliveryLocation.label must be a non-empty string',
+        );
+      }
+      // Cap label length defensively — clients shouldn't be sending
+      // 10kb labels, but Firestore doc size limits are real and a
+      // future reverse-geocode integration could in theory return
+      // very long display strings.
+      const label = dl.label.trim().slice(0, 200);
+      // addressId is optional on current_location; required-ish on
+      // saved_address but we don't enforce — the client's analytics
+      // value isn't worth a hard reject if a saved-address path
+      // somehow reaches us without it.
+      const addressId =
+        typeof dl.addressId === 'string' && dl.addressId.length > 0
+          ? dl.addressId
+          : undefined;
+      lockedDeliveryLocation = {
+        lat: dlCoordsResult.value.lat,
+        lng: dlCoordsResult.value.lng,
+        type: dl.type,
+        ...(addressId ? { addressId } : {}),
+        label,
+      };
     }
 
     // PR 21 — normalize the substitution preference. Undefined /
@@ -333,6 +456,16 @@ export const placeOrder = onCall<PlaceOrderInput>(
       minOrder: number;
       deliveryFee: number;
       etaMinutes?: number;
+      // PR 46 — needed for the authoritative delivery-distance
+      // re-derivation. Optional because legacy seeded shops predate
+      // the geo system and may lack it; we tolerate the gap by
+      // skipping the locked-fields stamp on those orders rather
+      // than blocking checkout.
+      location?: { lat?: unknown; lng?: unknown };
+      // PR 47 — distance-based delivery charge tiers. OPTIONAL:
+      // legacy shops without the field fall back to the flat
+      // `deliveryFee` via `chargeForDistance`'s legacy branch.
+      deliveryChargeTiers?: DeliveryChargeTier[];
     };
     if (!shop.isOpen) throw new HttpsError('failed-precondition', 'Shop is closed');
 
@@ -497,8 +630,63 @@ export const placeOrder = onCall<PlaceOrderInput>(
     if (!gate.ok) {
       throw new HttpsError('failed-precondition', gate.message);
     }
-    const deliveryFee: number = shop.deliveryFee;
-    const total = subtotal + deliveryFee;
+    // PR 46 — authoritative delivery-distance re-derivation. The
+    // CheckoutScreen showed the customer a preview value via
+    // getDeliveryEstimate; we redo the calculation here so the
+    // stamped figure on the order doc cannot be tampered with by
+    // a modified client. Re-uses the shared helper so both
+    // surfaces produce identical estimates from identical inputs.
+    //
+    // Skipped when:
+    //   - the client didn't send a deliveryLocation (pre-PR-46
+    //     client, or a flow that couldn't capture coords) — we
+    //     just don't stamp the new fields and the order is
+    //     back-compat-clean.
+    //   - the shop has no `location` field (legacy seeded shops).
+    //     deriveShopDeliveryEstimate returns null in that case;
+    //     same back-compat-clean outcome.
+    //
+    // PR 47 — moved this block ABOVE the deliveryFee/total
+    // computation so the tier-based charge below can read
+    // `stampedDeliveryDistanceKm`. Pure reorder (no transaction
+    // here, so no read-before-write concern).
+    let stampedDeliveryDistanceKm: number | undefined;
+    let stampedDeliveryDurationMin: number | undefined;
+    if (lockedDeliveryLocation) {
+      const estimate = await deriveShopDeliveryEstimate(shopId, {
+        lat: lockedDeliveryLocation.lat,
+        lng: lockedDeliveryLocation.lng,
+      });
+      if (estimate) {
+        stampedDeliveryDistanceKm = estimate.distanceKm;
+        stampedDeliveryDurationMin = estimate.durationMin;
+      }
+    }
+
+    // PR 47 — distance-based delivery charge. The charge is
+    // computed SERVER-SIDE from the just-derived
+    // `stampedDeliveryDistanceKm` and the shop's stored
+    // `deliveryChargeTiers` — never trusted from the client. If
+    // distance is absent (pre-PR-46 client or shop without a
+    // location) we pass 0, which lands in the cheapest tier; the
+    // tier table fallback to the legacy flat `deliveryFee` is the
+    // safety net for shops without a tier table at all (legacy
+    // shops + the existing seeded shops until their owner
+    // configures tiers via Shop Settings).
+    //
+    // We also stamp `deliveryFee` = `deliveryCharge` on the order
+    // doc as a back-compat shim — every existing reader of
+    // `order.deliveryFee` (admin screens, receipts, refund logic,
+    // ShopOrderDetail, listMyOrders) keeps working unchanged. The
+    // `deliveryCharge` field is the source of truth going forward;
+    // `deliveryFee` will be deprecated once every reader migrates.
+    const deliveryCharge = chargeForDistance(
+      shop.deliveryChargeTiers,
+      stampedDeliveryDistanceKm ?? 0,
+      shop.deliveryFee ?? 0,
+    );
+    const deliveryFee: number = deliveryCharge;
+    const total = subtotal + deliveryCharge;
     const etaMinutes: number = shop.etaMinutes ?? 30;
 
     const orderId = `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
@@ -545,6 +733,13 @@ export const placeOrder = onCall<PlaceOrderInput>(
       items: serverItems,
       subtotal,
       deliveryFee,
+      // PR 47 — explicit `deliveryCharge` field (mirrors
+      // `deliveryFee` above for back-compat with every existing
+      // reader). New surfaces should read this; the duplicate
+      // `deliveryFee` write is the migration shim until every
+      // reader (admin screens, receipts, refund logic) moves
+      // over.
+      deliveryCharge,
       total,
       // PR 22 — stamp the normalized instructions onto the snapshot.
       // We first strip the raw field from the spread (so a client-
@@ -562,6 +757,35 @@ export const placeOrder = onCall<PlaceOrderInput>(
             : {}),
         };
       })(),
+      // PR 46 — locked delivery location + server-authoritative
+      // distance + duration. All three fields are omitted entirely
+      // when the client didn't send a deliveryLocation OR the shop
+      // had no usable `location` (legacy shops). Pre-PR-46 reads of
+      // the order doc round-trip unchanged when these are absent.
+      ...(lockedDeliveryLocation
+        ? { deliveryLocation: lockedDeliveryLocation }
+        : {}),
+      ...(stampedDeliveryDistanceKm !== undefined
+        ? { deliveryDistanceKm: stampedDeliveryDistanceKm }
+        : {}),
+      ...(stampedDeliveryDurationMin !== undefined
+        ? { deliveryDurationMin: stampedDeliveryDurationMin }
+        : {}),
+      // PR 49 — shop pickup coordinate snapshotted at order time so
+      // the delivery partner can sort pickups nearest-first +
+      // compute the partner→shop leg without a shop-doc read per
+      // order. `shop` is the doc we already read above (no extra
+      // Firestore call). Skipped entirely when `shop.location` is
+      // missing (legacy seeded shops); the order doc stays
+      // back-compat-clean for pre-PR-49 readers.
+      ...(shop.location?.lat != null && shop.location?.lng != null
+        ? {
+            shopLocation: {
+              lat: shop.location.lat,
+              lng: shop.location.lng,
+            },
+          }
+        : {}),
       paymentMethod,
       paymentStatus,
       ...(razorpayOrderId ? { razorpayOrderId } : {}),
@@ -3114,6 +3338,62 @@ export const markDelivered = onCall<{ orderId: string }>(
   },
 );
 
+// ────────────────────────────────────────────────────────────────────
+// PR 49 — Delivery partner foreground-only location report.
+//
+// Auth: delivery role only (mirrors `setDeliveryStatus`).
+//
+// Writes `users/{uid}.currentLocation` + `currentLocationUpdatedAt`
+// so PR 50's order-ready push trigger can filter pushes to nearby
+// partners. PR 49 itself does NOT round-trip the dashboard sort
+// through this callable — the sort uses the live client GPS
+// directly. We still write here on every focus capture so PR 50 has
+// fresh data the moment it ships.
+//
+// Strict lat/lng range checks (-90..90 / -180..180) catch a forged
+// or wildly wrong client payload before it pollutes Firestore.
+// Numbers must be FINITE — `Number.isFinite(NaN | Infinity) === false`
+// — to prevent NaN-poisoned haversine math downstream.
+//
+// `currentLocation` + `currentLocationUpdatedAt` are added to the
+// profile-projection strip-list (see `PROFILE_INTERNAL_FIELDS`
+// below) so `getMyProfile` and the other profile readers never
+// leak the partner's location to the customer-side surface area.
+// ────────────────────────────────────────────────────────────────────
+export const reportDeliveryLocation = onCall<{ lat: number; lng: number }>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const { uid } = requireDeliveryRole(request);
+    const lat = request.data?.lat;
+    const lng = request.data?.lng;
+    if (
+      typeof lat !== 'number' ||
+      !Number.isFinite(lat) ||
+      lat < -90 ||
+      lat > 90 ||
+      typeof lng !== 'number' ||
+      !Number.isFinite(lng) ||
+      lng < -180 ||
+      lng > 180
+    ) {
+      throw new HttpsError('invalid-argument', 'lat/lng out of range');
+    }
+    await db.doc(`users/${uid}`).set(
+      {
+        // Mirror `isDelivery` like `setDeliveryStatus` does so the
+        // PR 50 push-fanout query (`isDelivery==true`) keeps working
+        // even if the partner reports location before they toggle
+        // online. Cheap and idempotent.
+        isDelivery: true,
+        currentLocation: { lat, lng },
+        currentLocationUpdatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+    return { ok: true };
+  },
+);
+
 export const setDeliveryStatus = onCall<{ status: 'online' | 'offline' }>(
   { cors: true, enforceAppCheck: false },
   async request => {
@@ -3443,6 +3723,14 @@ export const approveShop = onCall<{ shopId: string }>(
           [k: string]: unknown;
         };
       };
+      // PR 47 — present on shops re-approved after a previous
+      // suspend cycle (the owner may have already configured tiers
+      // before suspension); we preserve them rather than re-seeding
+      // the default and silently overwriting their pricing.
+      deliveryChargeTiers?: DeliveryChargeTier[];
+      // PR 48 — preserve a previously-customized service radius
+      // across a re-approval (same posture as `deliveryChargeTiers`).
+      serviceRadiusKm?: number;
     };
     if (shop.status !== 'pending') {
       throw new HttpsError(
@@ -3527,6 +3815,27 @@ export const approveShop = onCall<{ shopId: string }>(
     }
 
     const now = Date.now();
+    // PR 47 — seed the default delivery-charge tier table on
+    // approve. Skipped when the doc already has tiers (re-approval
+    // after a suspend cycle, or a manually-edited shop) so we
+    // never silently overwrite an owner's pricing. New shops get
+    // working tiers immediately; the owner can customize via Shop
+    // Settings → Delivery charges.
+    const seedTiers =
+      Array.isArray(shop.deliveryChargeTiers) &&
+      shop.deliveryChargeTiers.length > 0
+        ? null
+        : DEFAULT_DELIVERY_CHARGE_TIERS;
+    // PR 48 — seed the default service radius alongside the tier
+    // table. Same "only seed when absent" posture so a re-approval
+    // after a suspend cycle never overwrites a previously-customized
+    // radius. The seed constant lives in `geoVisibilityHelpers` so
+    // it can never drift from the filter's fallback default.
+    const seedRadius =
+      typeof shop.serviceRadiusKm === 'number' && shop.serviceRadiusKm > 0
+        ? null
+        : DEFAULT_SERVICE_RADIUS_KM;
+
     await shopRef.update({
       status: 'active',
       approvedAt: now,
@@ -3536,6 +3845,8 @@ export const approveShop = onCall<{ shopId: string }>(
       // older URL on signing failure); skipping the field on failure
       // preserves whatever was there before.
       ...(storefrontImageUrl ? { imageUrl: storefrontImageUrl } : {}),
+      ...(seedTiers ? { deliveryChargeTiers: seedTiers } : {}),
+      ...(seedRadius != null ? { serviceRadiusKm: seedRadius } : {}),
       updatedAt: FieldValue.serverTimestamp(),
     });
 
@@ -3691,6 +4002,68 @@ export const getMyShop = onCall(
   async request => {
     const auth = request.auth;
     if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+
+    // PR 48 §I — claim-authoritative read path.
+    //
+    // Symptom this fixes: owner edits delivery-charge tiers → save
+    // succeeds → re-opens the screen → tier values revert to the
+    // admin-default seed.
+    //
+    // Root cause: the previous ownerUid-query + orderBy(updatedAt)
+    // path could resolve to a DIFFERENT doc than the writer used
+    // (`updateShopDeliveryTiers` and `updateShopSettings` both key
+    // by `shops/{claims.shopId}`). Combined with the now-fixed
+    // mixed-type `updatedAt` (Date.now number vs serverTimestamp
+    // Timestamp), the ordering returned a stale sibling for owners
+    // with more than one shop doc.
+    //
+    // Fix: when the caller has a `shopId` custom claim (the only way
+    // an OWNER reaches an approved-shop screen), read that exact doc
+    // directly. The ownerUid-query fallback is preserved ONLY for
+    // pending owners (pre-approval, no claim yet — the
+    // `WaitingForApproval` screen relies on it).
+    const claimShopId =
+      typeof auth.token?.shopId === 'string' && auth.token.shopId.length > 0
+        ? (auth.token.shopId as string)
+        : null;
+
+    if (claimShopId) {
+      const direct = await db.doc(`shops/${claimShopId}`).get();
+      if (!direct.exists) {
+        // Claim points at a missing doc — fall through to the query
+        // path rather than return null, so a freshly-suspended /
+        // re-pending shop still appears on WaitingForApproval.
+        console.warn('[getMyShop] claim.shopId points at missing doc', {
+          uid: auth.uid,
+          claimShopId,
+        });
+      } else {
+        const data = direct.data() as Record<string, any>;
+        // PR 48 §I diag — TEMPORARY. Remove in the same PR once
+        // Sudhir confirms the tier-save repro now sticks. The log
+        // lets us verify on live data which path resolved the read.
+        console.info('[getMyShop] resolved via claim.shopId', {
+          uid: auth.uid,
+          shopId: claimShopId,
+          hasTiers: Array.isArray(data.deliveryChargeTiers),
+          tierCount: Array.isArray(data.deliveryChargeTiers)
+            ? data.deliveryChargeTiers.length
+            : 0,
+          updatedAtType: typeof data.updatedAt,
+        });
+        return {
+          ...data,
+          createdAt:
+            data.createdAt?.toMillis?.() ?? data.createdAt ?? null,
+          updatedAt:
+            data.updatedAt?.toMillis?.() ?? data.updatedAt ?? null,
+        };
+      }
+    }
+
+    // Fallback: pending / no-claim owner. Same query as before but
+    // we log multiplicity so we can confirm post-fix that no claimed
+    // owner is hitting this path.
     const snap = await db
       .collection('shops')
       .where('ownerUid', '==', auth.uid)
@@ -3700,6 +4073,16 @@ export const getMyShop = onCall(
       .get();
     if (snap.empty) return null;
     const data = snap.docs[0].data() as Record<string, any>;
+    // PR 48 §I diag — TEMPORARY (remove with the block above once
+    // verified). Captures the multi-doc / mixed-updatedAt-type
+    // pattern that originally surfaced the bug.
+    console.info('[getMyShop] resolved via ownerUid fallback', {
+      uid: auth.uid,
+      hadClaimShopId: !!claimShopId,
+      docId: snap.docs[0].id,
+      hasTiers: Array.isArray(data.deliveryChargeTiers),
+      updatedAtType: typeof data.updatedAt,
+    });
     return {
       ...data,
       createdAt: data.createdAt?.toMillis?.() ?? data.createdAt ?? null,
@@ -5000,6 +5383,12 @@ export const updateShopSettings = onCall<{
   shopId?: string;
   deliveryFee?: number;
   minOrder?: number;
+  // PR 49 §F — bundled fix for a PR 48 regression. The validator
+  // (`shopSettingsHelpers`) was updated for `serviceRadiusKm` but
+  // this wrapper's request type wasn't, so a radius-only payload
+  // arrived at the validator with all three fields undefined and
+  // tripped the "at least one of …" guard. Adding it here + below.
+  serviceRadiusKm?: number;
 }>(
   { cors: true, enforceAppCheck: false },
   async request => {
@@ -5022,6 +5411,8 @@ export const updateShopSettings = onCall<{
       shopId: request.data?.shopId,
       deliveryFee: request.data?.deliveryFee,
       minOrder: request.data?.minOrder,
+      // PR 49 §F — see note on the onCall generic above.
+      serviceRadiusKm: request.data?.serviceRadiusKm,
     });
     if (!validated.ok) {
       throw new HttpsError(validated.code, validated.message);
@@ -5037,16 +5428,32 @@ export const updateShopSettings = onCall<{
     // the update via runTransaction.
     const beforeSnap = await db.doc(`shops/${shopId}`).get();
     const beforeData = beforeSnap.data() as
-      | { deliveryFee?: number; minOrder?: number; name?: string }
+      | {
+          deliveryFee?: number;
+          minOrder?: number;
+          // PR 49 §F — include in the snapshot so a radius change
+          // shows a clean before/after diff in the audit log.
+          serviceRadiusKm?: number;
+          name?: string;
+        }
       | undefined;
     const before = {
       deliveryFee: beforeData?.deliveryFee,
       minOrder: beforeData?.minOrder,
+      serviceRadiusKm: beforeData?.serviceRadiusKm,
     };
 
     await db.doc(`shops/${shopId}`).update({
       ...updates,
-      updatedAt: Date.now(),
+      // PR 48 — type-consistent timestamp. Previously `Date.now()`
+      // (a number); every other shop write uses
+      // `FieldValue.serverTimestamp()` (a Timestamp). Firestore
+      // orders mixed-type fields by type first, so a `Date.now()`
+      // value on `updatedAt` sorted BELOW any sibling Timestamp,
+      // which made `getMyShop`'s `.orderBy('updatedAt', 'desc')`
+      // return a stale tier-less doc after a save. See PR 48
+      // section I.
+      updatedAt: FieldValue.serverTimestamp(),
     });
 
     // PR 8 — audit log (non-fatal). Both admin and shopOwner
@@ -5066,6 +5473,81 @@ export const updateShopSettings = onCall<{
     });
 
     return { ok: true, shopId, updates };
+  },
+);
+
+// ────────────────────────────────────────────────────────────────────
+// PR 47 — Shop owner edits their distance-based delivery charge tiers.
+//
+// Separate callable from `updateShopSettings` (which already handles
+// flat `deliveryFee` + `minOrder`) because the validation surface
+// is meaningfully different — a tier table requires structural
+// checks (catch-all presence, ascending bands) rather than per-field
+// range clamps. Keeping the callables separate also keeps the
+// audit-log diff readable: a tier change shows the before/after
+// tier arrays cleanly rather than mingled with unrelated numeric
+// edits.
+//
+// Auth: shop owner only. Mirrors the `addCustomMenuItem` pattern —
+// the target shop is `claims.shopId` (a malicious owner cannot
+// target another shop by passing a different shopId because we
+// don't read shopId from the request body).
+// ────────────────────────────────────────────────────────────────────
+export const updateShopDeliveryTiers = onCall<{
+  tiers: DeliveryChargeTier[];
+}>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+    if (auth.token?.shopOwner !== true) {
+      throw new HttpsError('permission-denied', 'Shop owner role required');
+    }
+    const shopId = auth.token.shopId as string | undefined;
+    if (!shopId) {
+      throw new HttpsError(
+        'failed-precondition',
+        'Shop owner claim missing shopId',
+      );
+    }
+
+    // Pure validation — same helper the client uses for inline
+    // friendly errors. Server runs it again so a malicious or
+    // out-of-date client can't bypass.
+    const validated = validateDeliveryChargeTiers(request.data?.tiers);
+    if (!validated.ok) {
+      throw new HttpsError('invalid-argument', validated.message);
+    }
+
+    // Read BEFORE for the audit log diff (rare write — one extra
+    // read is fine; same pattern as updateShopSettings).
+    const beforeSnap = await db.doc(`shops/${shopId}`).get();
+    const beforeData = beforeSnap.data() as
+      | { deliveryChargeTiers?: DeliveryChargeTier[]; name?: string }
+      | undefined;
+
+    await db.doc(`shops/${shopId}`).update({
+      deliveryChargeTiers: validated.tiers,
+      // PR 48 — see note in `updateShopSettings`. Match every other
+      // shop write's `updatedAt` type so the `getMyShop` orderBy
+      // can't return a stale doc.
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    await writeAuditLog({
+      actorUid: auth.uid,
+      actorRole: 'shopOwner',
+      actionType: 'shop.update_delivery_tiers',
+      targetType: 'shop',
+      targetId: shopId,
+      targetSummary: beforeData?.name,
+      metadata: {
+        before: beforeData?.deliveryChargeTiers ?? null,
+        after: validated.tiers,
+      },
+    });
+
+    return { ok: true, shopId, tiers: validated.tiers };
   },
 );
 
@@ -5305,6 +5787,42 @@ export function rankShopsByDistance<T extends { location?: LatLng }>(
   return out;
 }
 
+/**
+ * PR 48 — shop-visibility override. When
+ * `appConfig/shopVisibility.showAllShops === true`, `listShopsPublic`
+ * returns every active shop regardless of `serviceRadiusKm` (the
+ * cross-city offshore-testing escape hatch documented in the old
+ * `SHOW_ALL_SHOPS = true` comment block in `shopService.ts`).
+ *
+ * Default FALSE — a missing doc means the radius gate is ACTIVE.
+ * This is the secure / production-correct default: a fresh project
+ * without the doc filters out distant shops rather than accidentally
+ * showing a Faridabad shop to a Delhi customer.
+ *
+ * The doc is at `appConfig/shopVisibility`, parallel to
+ * `aiFeatures/distanceMatrix` (PR 46) — both are server-readable
+ * config knobs, no rebuild required to toggle.
+ *
+ * Resilient: any read error (network, IAM, schema mismatch) falls
+ * back to FALSE so a flag-fetch hiccup can never inadvertently
+ * reveal distant shops; the worst outcome is the testing team
+ * temporarily sees a filtered list, which is recoverable by
+ * re-touching the doc.
+ */
+async function readShowAllShopsFlag(): Promise<boolean> {
+  try {
+    const snap = await db.doc('appConfig/shopVisibility').get();
+    if (!snap.exists) return false;
+    const data = snap.data() as { showAllShops?: unknown } | undefined;
+    return data?.showAllShops === true;
+  } catch (err) {
+    console.warn('[shopVisibility] flag read failed; defaulting to false', {
+      err: (err as Error)?.message,
+    });
+    return false;
+  }
+}
+
 export const listShopsPublic = onCall<{ userLocation?: LatLng }>(
   { cors: true, enforceAppCheck: false },
   async request => {
@@ -5319,7 +5837,171 @@ export const listShopsPublic = onCall<{ userLocation?: LatLng }>(
       d => ({ id: d.id, ...d.data() }) as Record<string, any>,
     );
     const shops = rankShopsByDistance(rows, userLocation);
-    return { shops };
+    // PR 48 — apply the per-shop service-radius visibility gate.
+    // `rankShopsByDistance` decorated `distanceKm`; each shop doc
+    // carries its own `serviceRadiusKm` (or falls back to the helper's
+    // default). The flag is the cross-city testing override.
+    const showAll = await readShowAllShopsFlag();
+    const visible = filterShopsByServiceRadius(shops, { showAll });
+    return { shops: visible };
+  },
+);
+
+// ────────────────────────────────────────────────────────────────────
+// PR 46 — getDeliveryEstimate.
+//
+// Computes the road distance + estimated drive time from a shop to
+// a delivery destination. Returns
+// `{ distanceKm, durationMin, source }`. Pure decision logic lives
+// in `distanceMatrixHelpers.ts` so the kill-switch + fallback
+// branches are unit-testable without firebase-admin.
+//
+// COST DECISION (Sudhir, May 27 2026): the paid Google Distance
+// Matrix API is BUILT BUT DORMANT during pilot. The kill-switch
+// `aiFeatures/distanceMatrix.enabled` defaults to `false` (missing
+// doc OR explicit false → disabled), and the disabled branch
+// NEVER calls fetch — pinned by
+// `tests/functions/distanceMatrixHelpers.test.ts`. The secret is
+// declared on the callable so the cost path is one Firestore
+// flag-flip away from being live, but no Google call fires until
+// then.
+//
+// Never throws on Google failure: `computeDeliveryEstimate` always
+// returns a valid haversine fallback if anything goes wrong, so
+// CheckoutScreen can render the result unconditionally.
+// ────────────────────────────────────────────────────────────────────
+
+type DeliveryEstimateInputServer = {
+  shopId: string;
+  dest: { lat: number; lng: number };
+};
+
+/**
+ * Read the Distance Matrix kill-switch.
+ *
+ * Default-FALSE posture (the inverse of `aiFeatures/menuExtraction`,
+ * which defaults to TRUE). The cost-decision rationale: a paid
+ * Google API needs an explicit, intentional opt-in to start
+ * billing; a missing flag doc must NEVER cause accidental spend.
+ */
+async function readDistanceMatrixFlag(): Promise<boolean> {
+  const snap = await db.doc('aiFeatures/distanceMatrix').get();
+  if (!snap.exists) return false;
+  const data = snap.data() as { enabled?: unknown } | undefined;
+  return data?.enabled === true;
+}
+
+/**
+ * Validate the destination passed to getDeliveryEstimate / placeOrder.
+ * Mirrors the SavedAddress lat/lng range checks from
+ * profileHelpers.validateAddressInput so server-side rejection is
+ * uniform regardless of which surface sent the coords.
+ */
+function validateDestLatLng(
+  dest: unknown,
+): { ok: true; value: { lat: number; lng: number } } | { ok: false; message: string } {
+  if (!dest || typeof dest !== 'object') {
+    return { ok: false, message: 'dest must be an object with lat and lng' };
+  }
+  const { lat, lng } = dest as { lat?: unknown; lng?: unknown };
+  if (typeof lat !== 'number' || !Number.isFinite(lat) || lat < -90 || lat > 90) {
+    return { ok: false, message: 'dest.lat must be a finite number in [-90, 90]' };
+  }
+  if (typeof lng !== 'number' || !Number.isFinite(lng) || lng < -180 || lng > 180) {
+    return { ok: false, message: 'dest.lng must be a finite number in [-180, 180]' };
+  }
+  return { ok: true, value: { lat, lng } };
+}
+
+/**
+ * Server-side helper that loads a shop, validates its `location`,
+ * reads the kill-switch, and runs `computeDeliveryEstimate`. Shared
+ * between the standalone `getDeliveryEstimate` callable AND
+ * placeOrder's authoritative re-derivation step so the two surfaces
+ * produce identical estimates from the same inputs.
+ *
+ * Returns null when the shop has no usable `location` (legacy
+ * pre-geo shops). Caller decides whether that's a hard error
+ * (getDeliveryEstimate → throws) or a graceful skip (placeOrder
+ * → omits the locked fields rather than blocking checkout).
+ */
+async function deriveShopDeliveryEstimate(
+  shopId: string,
+  dest: { lat: number; lng: number },
+): Promise<DistanceEstimate | null> {
+  const shopSnap = await db.doc(`shops/${shopId}`).get();
+  if (!shopSnap.exists) {
+    throw new HttpsError('not-found', 'Shop not found');
+  }
+  const shop = shopSnap.data() as { location?: { lat?: unknown; lng?: unknown } };
+  const loc = shop.location;
+  if (
+    !loc ||
+    typeof loc.lat !== 'number' ||
+    !Number.isFinite(loc.lat) ||
+    typeof loc.lng !== 'number' ||
+    !Number.isFinite(loc.lng)
+  ) {
+    return null;
+  }
+
+  const flagEnabled = await readDistanceMatrixFlag();
+  // The secret-read can throw when the secret hasn't been set;
+  // catch and treat as null so the disabled-branch fallback path
+  // is reached and pilot stays free regardless of secret state.
+  let apiKey: string | null = null;
+  if (flagEnabled) {
+    try {
+      apiKey = GOOGLE_MAPS_API_KEY.value() || null;
+    } catch {
+      apiKey = null;
+    }
+  }
+
+  return computeDeliveryEstimate({
+    shop: { lat: loc.lat, lng: loc.lng },
+    dest,
+    flagEnabled,
+    apiKey,
+  });
+}
+
+export const getDeliveryEstimate = onCall<DeliveryEstimateInputServer>(
+  {
+    cors: true,
+    enforceAppCheck: false,
+    region: 'asia-south1',
+    secrets: [GOOGLE_MAPS_API_KEY],
+  },
+  async request => {
+    if (!request.auth) {
+      throw new HttpsError('unauthenticated', 'Sign in required');
+    }
+    const { shopId, dest } = request.data ?? ({} as DeliveryEstimateInputServer);
+    if (typeof shopId !== 'string' || shopId.length === 0) {
+      throw new HttpsError('invalid-argument', 'shopId is required');
+    }
+    const destResult = validateDestLatLng(dest);
+    if (!destResult.ok) {
+      throw new HttpsError('invalid-argument', destResult.message);
+    }
+
+    const estimate = await deriveShopDeliveryEstimate(shopId, destResult.value);
+    if (!estimate) {
+      // Legacy shop without a `location` field. CheckoutScreen
+      // catches this and falls back to "delivery time unknown" UX
+      // rather than blocking the order — placeOrder also tolerates
+      // it (skips the stamp).
+      throw new HttpsError(
+        'failed-precondition',
+        'Shop has no geo location; cannot estimate delivery distance',
+      );
+    }
+    return {
+      distanceKm: estimate.distanceKm,
+      durationMin: estimate.durationMin,
+      source: estimate.source,
+    };
   },
 );
 
@@ -5410,9 +6092,10 @@ export const searchMenuPublic = onCall<{
 // unit-tested without booting firebase-functions; this file is just
 // the auth-gate + Firestore wiring.
 //
-// All five never return fcmTokens / isAdmin / deliveryStatus — those
-// stay server-internal. The Profile screen has no business reading
-// them; admin auditing reads through getUserDetail (admin-only).
+// All five never return fcmTokens / isAdmin / deliveryStatus /
+// currentLocation — those stay server-internal. The Profile screen
+// has no business reading them; admin auditing reads through
+// getUserDetail (admin-only).
 // (Validation helpers imported at the top of the file from
 // ./profileHelpers — kept testable in plain Node.)
 // ────────────────────────────────────────────────────────────────────
@@ -5427,6 +6110,13 @@ const PROFILE_INTERNAL_FIELDS = new Set([
   'isDelivery',
   'deliveryStatus',
   'deliveryStatusUpdatedAt',
+  // PR 49 — partner foreground location (set by reportDeliveryLocation;
+  // consumed by PR 50's push-fanout). Server-internal: customers
+  // shouldn't see partner coords on a profile read, and partners
+  // shouldn't see their own raw GPS round-tripped on every profile
+  // fetch (the dashboard already has the live coords).
+  'currentLocation',
+  'currentLocationUpdatedAt',
   'shopId',
 ]);
 
@@ -5445,6 +6135,13 @@ type StoredAddress = {
   // (we don't write the key at all if null) so old reads round-trip
   // unchanged. saveAddress strips null below before write.
   deliveryInstructions?: string;
+  // PR 46 — optional GPS pin captured by AddressEditScreen via
+  // expo-location. Same write semantics as deliveryInstructions:
+  // both fields omitted entirely when absent so legacy address
+  // doc shape stays clean. Either both keys present or neither —
+  // validateAddressInput rejects half-set pairs.
+  lat?: number;
+  lng?: number;
 };
 
 type StoredProfile = {
@@ -5645,6 +6342,12 @@ export const saveAddress = onCall<AddressInput>(
         // on Firestore (legacy doc shape compatibility).
         ...(result.value.deliveryInstructions !== null
           ? { deliveryInstructions: result.value.deliveryInstructions }
+          : {}),
+        // PR 46 — same write-when-present pattern. Validator pins
+        // both-or-neither so we don't need to handle the half-set
+        // case here.
+        ...(result.value.lat !== null && result.value.lng !== null
+          ? { lat: result.value.lat, lng: result.value.lng }
           : {}),
       };
       existing[targetIdx] = next;

@@ -48,6 +48,14 @@ export type SaveAddressInput = {
   // the field as absent in that case). Cap is 280 chars; server
   // re-validates via normalizeDeliveryInstructions.
   deliveryInstructions?: string;
+  // PR 46 — optional GPS pin captured by AddressEditScreen via
+  // expo-location. Server validates both are finite numbers in
+  // valid (-90..90, -180..180) ranges; either both are present
+  // or both must be absent (the validator rejects half-set
+  // pairs). Used by CheckoutScreen to compute the delivery
+  // distance estimate without re-prompting for location.
+  lat?: number;
+  lng?: number;
 };
 
 export type ProfilePatch = {
