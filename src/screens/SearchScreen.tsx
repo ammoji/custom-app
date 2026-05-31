@@ -10,7 +10,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import EmptyState from '../components/common/EmptyState';
 import Loader from '../components/common/Loader';
 import ShopRatingBadge from '../components/shop/ShopRatingBadge';
@@ -63,6 +63,10 @@ const MIN_QUERY_LEN = 2;
 export default function SearchScreen() {
   const nav = useNavigation<any>();
   const route = useRoute<any>();
+  // PR-NEXT-2 (finding #1) — Android safe-area inset for the
+  // floating cart bar. See HomeScreen for the full root-cause
+  // note.
+  const insets = useSafeAreaInsets();
   const inputRef = useRef<TextInput>(null);
 
   const [query, setQuery] = useState<string>(route.params?.query ?? '');
@@ -298,7 +302,10 @@ export default function SearchScreen() {
           keyExtractor={r => `${r.shop.id}_${r.menuItem.id}`}
           renderItem={renderRow}
           ItemSeparatorComponent={() => <View style={styles.separator} />}
-          contentContainerStyle={styles.listContent}
+          contentContainerStyle={[
+            styles.listContent,
+            { paddingBottom: 120 + insets.bottom },
+          ]}
           keyboardShouldPersistTaps="handled"
         />
       )}
@@ -306,7 +313,7 @@ export default function SearchScreen() {
       {/* Sticky cart bar */}
       {itemCount > 0 && (
         <Pressable
-          style={styles.cartBar}
+          style={[styles.cartBar, { bottom: insets.bottom + spacing.sm }]}
           onPress={() => nav.navigate('Cart')}
           accessibilityRole="button"
           accessibilityLabel={`View cart, ${itemCount} item${itemCount > 1 ? 's' : ''}, total ${formatRupees(total)}`}

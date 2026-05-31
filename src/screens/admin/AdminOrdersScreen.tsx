@@ -273,7 +273,12 @@ export default function AdminOrdersScreen() {
                   <Text style={styles.shopName} numberOfLines={1}>{item.shopName}</Text>
                   <Text style={styles.orderId} numberOfLines={1}>#{item.id}</Text>
                 </View>
-                <OrderStatusChip status={item.status} />
+                <OrderStatusChip
+                  status={item.status}
+                  pickedUpAt={item.pickedUpAt}
+                  deliveredAt={item.deliveredAt}
+                  audience="admin"
+                />
               </View>
               <Text style={styles.time}>{formatOrderTime(item.createdAt)}</Text>
               {/* PR 12 — surface the shopkeeper-provided ETA on

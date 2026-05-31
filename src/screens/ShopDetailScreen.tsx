@@ -9,7 +9,7 @@ import {
     Text,
     View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import Badge from '../components/common/Badge';
 import EmptyState from '../components/common/EmptyState';
 import FavoriteHeart from '../components/common/FavoriteHeart';
@@ -45,6 +45,10 @@ import { formatDistance, formatRupees } from '../utils/format';
 export default function ShopDetailScreen() {
   const route = useRoute<any>();
   const nav = useNavigation<any>();
+  // PR-NEXT-2 (finding #1) — Android safe-area inset for the
+  // floating cart bar. See HomeScreen for the full root-cause
+  // note.
+  const insets = useSafeAreaInsets();
   const shopId: string = route.params.shopId;
 
   const [shop, setShop] = useState<Shop | null>(null);
@@ -176,7 +180,7 @@ export default function ShopDetailScreen() {
         sections={sections}
         keyExtractor={m => m.id}
         stickySectionHeadersEnabled
-        contentContainerStyle={{ paddingBottom: 120, flexGrow: 1 }}
+        contentContainerStyle={{ paddingBottom: 120 + insets.bottom, flexGrow: 1 }}
         ListHeaderComponent={
           <View>
             <Image source={{ uri: shop.imageUrl }} style={styles.hero} />
@@ -243,7 +247,7 @@ export default function ShopDetailScreen() {
 
       {cartHasThisShop && items.length > 0 && (
         <Pressable
-          style={styles.cartBar}
+          style={[styles.cartBar, { bottom: insets.bottom + spacing.sm }]}
           onPress={() => nav.navigate('Cart')}
           accessibilityRole="button"
           accessibilityLabel={`View cart, ${itemCount} items, ${formatRupees(subtotal)}`}

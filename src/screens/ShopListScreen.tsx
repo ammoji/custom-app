@@ -1,7 +1,7 @@
 import { useNavigation } from '@react-navigation/native';
 import React, { useEffect, useRef, useState } from 'react';
 import { FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import EmptyState from '../components/common/EmptyState';
 import Input from '../components/common/Input';
 import Loader from '../components/common/Loader';
@@ -29,6 +29,10 @@ const EMPTY_FAVORITES: Record<string, string[]> = {};
 
 export default function ShopListScreen() {
   const nav = useNavigation<any>();
+  // PR-NEXT-2 (finding #1) — Android safe-area inset for the
+  // floating cart bar. See HomeScreen for the full root-cause
+  // note.
+  const insets = useSafeAreaInsets();
   const [query, setQuery] = useState('');
   // PR 36.1 — inline "Favorites only" filter. Local screen state,
   // not persisted: resets to All on each navigation here. PR 19
@@ -159,7 +163,10 @@ export default function ShopListScreen() {
         <FlatList
           data={filtered}
           keyExtractor={s => s.id}
-          contentContainerStyle={styles.list}
+          contentContainerStyle={[
+            styles.list,
+            { paddingBottom: 120 + insets.bottom },
+          ]}
           ItemSeparatorComponent={() => <View style={{ height: spacing.md }} />}
           renderItem={({ item }) => (
             <ShopCard
@@ -201,7 +208,7 @@ export default function ShopListScreen() {
 
       {itemCount > 0 && (
         <Pressable
-          style={styles.cartBar}
+          style={[styles.cartBar, { bottom: insets.bottom + spacing.sm }]}
           onPress={() => nav.navigate('Cart')}
           accessibilityRole="button"
           accessibilityLabel={`View cart, ${itemCount} item${itemCount > 1 ? 's' : ''}, total ${formatRupees(total)}`}

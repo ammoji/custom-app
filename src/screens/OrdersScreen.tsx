@@ -224,7 +224,12 @@ export default function OrdersScreen() {
                   </Text>
                   <Text style={styles.time}>{formatOrderTime(item.createdAt)}</Text>
                 </View>
-                <OrderStatusChip status={item.status} audience="customer" />
+                <OrderStatusChip
+                  status={item.status}
+                  pickedUpAt={item.pickedUpAt}
+                  deliveredAt={item.deliveredAt}
+                  audience="customer"
+                />
               </View>
               {isTerminal && (
                 <View

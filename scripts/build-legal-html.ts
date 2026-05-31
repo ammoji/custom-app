@@ -42,6 +42,16 @@ const PAGES: Page[] = [
     title: 'Terms of Service — HamaraSetu',
     url: 'https://grocery-mvp-dev.web.app/terms',
   },
+  {
+    // Required by Google Play Store (Data Safety form, account
+    // deletion URL field). The URL is shown publicly on the Play
+    // listing and must describe how users request account deletion
+    // and what data is deleted vs retained.
+    sourcePath: join(ROOT, 'docs', 'account-deletion.md'),
+    outPath: join(ROOT, 'dist', 'account-deletion.html'),
+    title: 'Account Deletion — HamaraSetu',
+    url: 'https://grocery-mvp-dev.web.app/account-deletion',
+  },
 ];
 
 function escapeHtml(s: string): string {

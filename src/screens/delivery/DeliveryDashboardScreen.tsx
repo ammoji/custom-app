@@ -7,6 +7,7 @@ import {
     StyleSheet,
     Switch,
     Text,
+    TextInput,
     View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -93,6 +94,20 @@ export default function DeliveryDashboardScreen() {
   // other useState declarations ABOVE the conditional early returns
   // (code-discipline Rule 2).
   const [partnerLoc, setPartnerLoc] = useState<GeoPoint | null>(null);
+
+  // PR 50 — per-partner notification radius. Two fields: the
+  // server-confirmed value (`notificationRadiusKm`, what the
+  // push-fanout filter will use right now) and the in-flight input
+  // (`radiusInput`, what the partner is currently typing). Save
+  // button is enabled only when the input is dirty AND parses to
+  // a valid integer. Hardcoded default `3` is kept in sync with
+  // `DEFAULT_PARTNER_NOTIFICATION_RADIUS_KM` in
+  // `functions/src/notificationRadiusHelpers.ts` — see the helper's
+  // header doc. If you bump one, grep for the constant name.
+  const [notificationRadiusKm, setNotificationRadiusKm] = useState<number>(3);
+  const [radiusInput, setRadiusInput] = useState<string>('3');
+  const [savingRadius, setSavingRadius] = useState(false);
+  const [radiusError, setRadiusError] = useState<string | null>(null);
 
   // Subscribe to the two pollers. Both fire immediately on mount and
   // then every 10/15s respectively. The "loading" flag flips once
@@ -200,9 +215,36 @@ export default function DeliveryDashboardScreen() {
           // swallow — location is an enhancement, not a requirement.
         }
       })();
+      // PR 50 — pull authoritative server state for the Online
+      // toggle + notification radius. Also incidentally fixes
+      // finding #8 (Online toggle persistence across screen
+      // navigations) by re-hydrating `online` on every focus.
+      // Best-effort: a failed read leaves the local defaults in
+      // place — the partner can still operate the dashboard.
+      void (async () => {
+        try {
+          const settings = await orderService.getMyDeliverySettings();
+          if (cancelled) return;
+          setOnline(settings.deliveryStatus === 'online');
+          setNotificationRadiusKm(settings.notificationRadiusKm);
+          // Sync the input field too, but only when the partner
+          // isn't mid-edit. `savingRadius` is the cheapest signal
+          // we have for "user is actively interacting"; if they're
+          // typing we leave their draft alone.
+          setRadiusInput(prev =>
+            prev === String(notificationRadiusKm)
+              ? String(settings.notificationRadiusKm)
+              : prev,
+          );
+        } catch {
+          // swallow — settings read is an enhancement, not a
+          // requirement.
+        }
+      })();
       return () => {
         cancelled = true;
       };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []),
   );
 
@@ -289,6 +331,41 @@ export default function DeliveryDashboardScreen() {
       );
     } finally {
       setTogglingOnline(false);
+    }
+  };
+
+  // PR 50 — save the partner's chosen notification radius. Client
+  // validation mirrors the server's strict 1–50 integer guard so
+  // the most common typo (e.g. "5.5", "abc", "0", "100") fails fast
+  // without a round-trip. Server still re-validates.
+  const handleSaveRadius = async () => {
+    const trimmed = radiusInput.trim();
+    const parsed = Number(trimmed);
+    if (
+      trimmed === '' ||
+      !Number.isFinite(parsed) ||
+      !Number.isInteger(parsed) ||
+      parsed < 1 ||
+      parsed > 50
+    ) {
+      setRadiusError('Enter a whole number from 1 to 50 km.');
+      return;
+    }
+    setRadiusError(null);
+    setSavingRadius(true);
+    try {
+      const res = await orderService.updateMyDeliverySettings({
+        notificationRadiusKm: parsed,
+      });
+      // Pin to the server-returned value (currently identical to
+      // `parsed`, but defensive — leaves room for the server to
+      // normalize later without a client change).
+      setNotificationRadiusKm(res.notificationRadiusKm);
+      setRadiusInput(String(res.notificationRadiusKm));
+    } catch (e: any) {
+      setRadiusError(e?.message || 'Could not save. Please try again.');
+    } finally {
+      setSavingRadius(false);
     }
   };
 
@@ -397,6 +474,72 @@ export default function DeliveryDashboardScreen() {
     }
   };
 
+  // PR-NEXT-3 §H (finding #12 Part B) — delivery-partner COD
+  // confirmation. The "Delivered" CTA is replaced with two pills
+  // (Cash / UPI) when the order is COD-unpaid; tapping a pill
+  // calls `confirmCodPayment` which stamps paid + paidMethod +
+  // paidAt. The watcher then refreshes the order; the next render
+  // falls through to the existing Delivered button branch.
+  //
+  // Optimistic update mirrors the `handleDelivered` pattern:
+  // flip local state to `paymentStatus: 'paid'` + `paidMethod`
+  // immediately, roll back on server failure, suppress rollback
+  // if a watcher tick already moved the order on. The server
+  // returns `{ alreadyPaid: true }` when the customer's mid-flow
+  // Part A conversion landed first — we treat that as success
+  // (toast the friendly message and let the watcher update the
+  // card to "Delivered" eligibility on the next tick).
+  //
+  // Hooks discipline: this handler lives at the parent screen
+  // level (NOT inside `ActiveDeliveryCard`), consistent with the
+  // existing `pendingAction` hoist + `handlePickedUp` /
+  // `handleDelivered` pattern.
+  const handleConfirmCodPayment = async (
+    order: Order,
+    paidMethod: 'cash' | 'online',
+  ) => {
+    setPendingAction(order.id);
+    setMine(prev =>
+      prev.map(o =>
+        o.id === order.id
+          ? {
+              ...o,
+              paymentStatus: 'paid',
+              paidMethod,
+            }
+          : o,
+      ),
+    );
+    try {
+      const result = await orderService.confirmCodPayment({
+        orderId: order.id,
+        paidMethod,
+      });
+      if (result.alreadyPaid) {
+        Alert.alert(
+          'Customer paid online',
+          'No cash to collect — the customer paid online while you were on the way.',
+        );
+      }
+    } catch (e: any) {
+      // Suppress rollback if a watcher tick already paid the
+      // order (e.g. customer's Part A conversion landed between
+      // our optimistic flip and the server response).
+      setMine(prev => {
+        const current = prev.find(o => o.id === order.id);
+        if (!current || current.paymentStatus !== 'paid') {
+          return prev;
+        }
+        return prev.map(o =>
+          o.id === order.id ? { ...o, paymentStatus: 'not_required', paidMethod: undefined } : o,
+        );
+      });
+      Alert.alert('Could not confirm payment', e?.message || 'Please try again.');
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
   if (!isDelivery) {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
@@ -474,6 +617,59 @@ export default function DeliveryDashboardScreen() {
               />
             </View>
 
+            {/* PR 50 — per-partner notification-radius setting. Server
+                filters the new-pickup push by haversine(partner,
+                shop) <= radius. 1–50 km integer; server re-validates.
+                Sits directly under the Online card because it's a
+                presence/notification-related preference, not an
+                action-list section. */}
+            <View style={styles.settingsCard}>
+              <Text style={styles.settingsLabel}>
+                Notify me about pickups within
+              </Text>
+              <View style={styles.radiusRow}>
+                <TextInput
+                  value={radiusInput}
+                  onChangeText={text => {
+                    setRadiusInput(text);
+                    if (radiusError) setRadiusError(null);
+                  }}
+                  keyboardType="number-pad"
+                  maxLength={2}
+                  editable={!savingRadius}
+                  style={styles.radiusInput}
+                  accessibilityLabel="Notification radius in kilometres"
+                />
+                <Text style={styles.radiusUnit}>km</Text>
+                <Pressable
+                  onPress={handleSaveRadius}
+                  disabled={
+                    savingRadius ||
+                    radiusInput.trim() === String(notificationRadiusKm)
+                  }
+                  accessibilityRole="button"
+                  accessibilityLabel="Save notification radius"
+                  style={({ pressed }) => [
+                    styles.radiusSaveBtn,
+                    radiusInput.trim() !== String(notificationRadiusKm) &&
+                      styles.radiusSaveBtnActive,
+                    pressed && styles.radiusSaveBtnPressed,
+                  ]}
+                >
+                  <Text style={styles.radiusSaveText}>
+                    {savingRadius ? 'Saving…' : 'Save'}
+                  </Text>
+                </Pressable>
+              </View>
+              {radiusError ? (
+                <Text style={styles.radiusError}>{radiusError}</Text>
+              ) : (
+                <Text style={styles.settingsHelp}>
+                  Pickups farther than this won't push you. Range 1–50 km.
+                </Text>
+              )}
+            </View>
+
             <View style={styles.statsCard}>
               <Text style={styles.statsTitle}>Today</Text>
               <View style={styles.statsRow}>
@@ -513,6 +709,9 @@ export default function DeliveryDashboardScreen() {
                     pending={pendingAction === o.id}
                     onPickedUp={() => handlePickedUp(o)}
                     onDelivered={() => handleDelivered(o)}
+                    onConfirmCodPayment={paidMethod =>
+                      handleConfirmCodPayment(o, paidMethod)
+                    }
                     onPress={() =>
                       nav.navigate('DeliveryOrderDetail', { orderId: o.id })
                     }
@@ -872,6 +1071,7 @@ function ActiveDeliveryCard({
   pending,
   onPickedUp,
   onDelivered,
+  onConfirmCodPayment,
   onPress,
 }: {
   order: Order;
@@ -879,10 +1079,25 @@ function ActiveDeliveryCard({
   pending: boolean;
   onPickedUp: () => void;
   onDelivered: () => void;
+  // PR-NEXT-3 §H — emitted when the partner taps a Cash/UPI pill
+  // on a COD-unpaid order. Parent handles the optimistic flip +
+  // `confirmCodPayment` callable.
+  onConfirmCodPayment: (paidMethod: 'cash' | 'online') => void;
   onPress: () => void;
 }) {
   const itemCount = order.items.reduce((n, i) => n + i.quantity, 0);
   const pickedUp = !!order.pickedUpAt;
+  // PR-NEXT-3 §H — gate the COD confirmation selector on:
+  //   - pickedUp (the partner is at / on the way to the customer)
+  //   - paymentMethod === 'cod' AND paymentStatus !== 'paid'
+  // Once `paymentStatus` flips to 'paid' (via Part A or Part B) the
+  // card falls through to the standard Delivered button. Online
+  // orders + COD-converted-via-payCodOrder orders never reach the
+  // selector.
+  const needsCodConfirmation =
+    pickedUp &&
+    order.paymentMethod === 'cod' &&
+    order.paymentStatus !== 'paid';
   // PR 49 — surface the same ride-distance + locked-location label
   // on active-delivery cards so the partner sees the legs whether
   // they're staring at an unclaimed pickup or one in their queue.
@@ -919,7 +1134,47 @@ function ActiveDeliveryCard({
         {formatRupees(order.total)}
       </Text>
       <View style={{ marginTop: spacing.md }}>
-        {pickedUp ? (
+        {needsCodConfirmation ? (
+          // PR-NEXT-3 §H — COD payment selector. Cash and UPI both
+          // result in `paymentStatus: 'paid'`; the difference is
+          // recorded in `paidMethod` for accounting / dispute
+          // resolution. UPI here means "partner accepted UPI
+          // directly outside the app" (not a Razorpay flow).
+          <View>
+            <Text style={styles.codConfirmLabel}>
+              Payment: Cash on Delivery — {formatRupees(order.total)}
+            </Text>
+            <Text style={styles.codConfirmSub}>
+              Confirm payment received:
+            </Text>
+            <View style={styles.codPillRow}>
+              <Pressable
+                style={[
+                  styles.codPill,
+                  pending && styles.codPillDisabled,
+                ]}
+                onPress={() => onConfirmCodPayment('cash')}
+                disabled={pending}
+                accessibilityRole="button"
+                accessibilityLabel="Mark cash received"
+              >
+                <Text style={styles.codPillText}>💵 Cash received</Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.codPill,
+                  pending && styles.codPillDisabled,
+                ]}
+                onPress={() => onConfirmCodPayment('online')}
+                disabled={pending}
+                accessibilityRole="button"
+                accessibilityLabel="Mark UPI received"
+              >
+                <Text style={styles.codPillText}>📱 UPI received</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : pickedUp ? (
           <Button
             title="Delivered"
             onPress={onDelivered}
@@ -966,6 +1221,69 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.textSecondary,
     marginTop: 2,
+  },
+  // PR 50 — notification-radius settings card. Visual parity with
+  // `statsCard` (same surface + border) so it reads as a related
+  // preference, not a primary action card.
+  settingsCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.lg,
+    padding: spacing.lg,
+    marginBottom: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  settingsLabel: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: spacing.sm,
+  },
+  settingsHelp: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    marginTop: spacing.xs,
+  },
+  radiusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  radiusInput: {
+    ...typography.h3,
+    color: colors.textPrimary,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    minWidth: 64,
+    textAlign: 'center',
+    backgroundColor: colors.bg,
+  },
+  radiusUnit: {
+    ...typography.body,
+    color: colors.textSecondary,
+  },
+  radiusSaveBtn: {
+    marginLeft: 'auto',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radii.md,
+    backgroundColor: colors.border,
+  },
+  radiusSaveBtnActive: { backgroundColor: colors.primary },
+  radiusSaveBtnPressed: { opacity: 0.7 },
+  radiusSaveText: {
+    ...typography.bodyBold,
+    color: colors.surface,
+  },
+  radiusError: {
+    ...typography.caption,
+    color: colors.danger,
+    marginTop: spacing.xs,
   },
   statsCard: {
     backgroundColor: colors.surface,
@@ -1100,4 +1418,36 @@ const styles = StyleSheet.create({
     borderRadius: radii.sm,
   },
   retryText: { ...typography.bodyBold, color: '#fff' },
+  // PR-NEXT-3 §H — COD payment selector on ActiveDeliveryCard.
+  codConfirmLabel: {
+    ...typography.bodyBold,
+    color: colors.textPrimary,
+    marginBottom: spacing.xs,
+  },
+  codConfirmSub: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginBottom: spacing.sm,
+  },
+  codPillRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  codPill: {
+    flex: 1,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    backgroundColor: colors.primaryLight,
+    alignItems: 'center',
+  },
+  codPillDisabled: {
+    opacity: 0.5,
+  },
+  codPillText: {
+    ...typography.bodyBold,
+    color: colors.primary,
+  },
 });

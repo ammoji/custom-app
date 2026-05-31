@@ -398,7 +398,12 @@ export default function ShopOwnerDashboardScreen() {
                     {formatOrderTime(item.createdAt)}
                   </Text>
                 </View>
-                <OrderStatusChip status={item.status} />
+                <OrderStatusChip
+                  status={item.status}
+                  pickedUpAt={item.pickedUpAt}
+                  deliveredAt={item.deliveredAt}
+                  audience="shopkeeper"
+                />
                 <Text style={styles.cardChevron}>›</Text>
               </View>
               <Text style={styles.meta}>

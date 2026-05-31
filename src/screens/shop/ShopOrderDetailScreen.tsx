@@ -250,7 +250,12 @@ export default function ShopOrderDetailScreen() {
         {/* Status header */}
         <View style={styles.statusCard}>
           <View style={styles.statusRow}>
-            <OrderStatusChip status={order.status} />
+            <OrderStatusChip
+              status={order.status}
+              pickedUpAt={order.pickedUpAt}
+              deliveredAt={order.deliveredAt}
+              audience="shopkeeper"
+            />
             <Text style={styles.orderId}>#{order.id}</Text>
           </View>
           <Text style={styles.placedAt}>

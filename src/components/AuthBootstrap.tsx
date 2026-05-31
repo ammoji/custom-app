@@ -244,13 +244,120 @@ export default function AuthBootstrap() {
           return;
         }
 
+        // PR-NEXT-1 §E (finding #3) — order-related deep-links.
+        // Pre-PR every order push tap landed on Home — fine with
+        // 2 orders, painful with 20. Now we route to the audience-
+        // appropriate detail screen.
+        //
+        // Audience is derived from current claims at the moment
+        // of the tap (NOT from a field on the push data — admins
+        // can have multiple claims and a hardcoded audience would
+        // mis-route their personal customer orders). Source-of-
+        // truth: `useAuthStore`. The role flags are set by the
+        // claim refresh higher up in this same effect, so by the
+        // time a tap arrives they reflect server truth.
+        //
+        // Push-type → screen table (kept in sync with the
+        // server-side payload type names in `markPickedUp`,
+        // `markDelivered`, `sendOrderStatusPush`,
+        // `sendNewOrderPushToShop`, `sendNewPickupPushToDelivery`):
+        //
+        //   new_order_for_shop      → ShopOrderDetail (shopkeeper)
+        //   new_pickup_for_delivery → DeliveryOrderDetail (delivery)
+        //   order_cancelled         → audience-aware
+        //   order_delivered         → audience-aware
+        //   order_picked_up         → OrderDetail (customer; this
+        //                             push is only sent to customer)
+        //   order_status (legacy)   → OrderDetail (customer; the
+        //                             generic trigger push)
         const orderId =
           typeof data?.orderId === 'string'
             ? (data.orderId as string)
             : undefined;
-        if (orderId) {
-          console.log('[push] tapped notification for order', orderId);
+        if (!orderId) {
+          // Push has no `data.orderId` and didn't match any of the
+          // admin-routed types above — nothing to deep-link to.
+          return;
         }
+
+        const auth = useAuthStore.getState();
+        // Role precedence for ambiguous types (cancelled /
+        // delivered / generic): shopOwner > delivery > admin >
+        // customer. A shop-owner-AND-customer who taps a
+        // cancellation push for an order from THEIR OWN shop
+        // wants the shop view. Their personal customer orders
+        // get the same `order_status`-typed push and would route
+        // through the customer branch via the same precedence
+        // — `data.shopId` would be missing or different. We
+        // approximate "this push is about my shop" by presence
+        // of `data.shopId === auth.shopId`.
+        const pushShopId =
+          typeof data?.shopId === 'string'
+            ? (data.shopId as string)
+            : undefined;
+
+        if (type === 'new_order_for_shop') {
+          // Always shopkeeper-targeted — emitted only to the
+          // shop owner.
+          safeNavigate('ShopOrderDetail', { orderId });
+          return;
+        }
+        if (type === 'new_pickup_for_delivery') {
+          safeNavigate('DeliveryOrderDetail', { orderId });
+          return;
+        }
+        if (type === 'order_picked_up') {
+          // Only ever sent to the customer (markPickedUp emits
+          // pushToUser(customerUid)).
+          safeNavigate('OrderDetail', { orderId });
+          return;
+        }
+        // PR-NEXT-3 §I — COD-conversion fan-out push from
+        // `confirmPayment`. Audience-aware routing mirrors
+        // `order_cancelled` / `order_delivered`. The customer
+        // never gets this push (they initiated the conversion);
+        // for delivery partner we route to `DeliveryOrderDetail`
+        // rather than the customer order detail so the partner
+        // lands on the screen that has the "Delivered" CTA.
+        if (type === 'order_cod_converted') {
+          if (auth.isShopOwner && pushShopId && pushShopId === auth.shopId) {
+            safeNavigate('ShopOrderDetail', { orderId });
+            return;
+          }
+          if (auth.isAdmin) {
+            safeNavigate('AdminOrders');
+            return;
+          }
+          if (auth.isDelivery) {
+            safeNavigate('DeliveryOrderDetail', { orderId });
+            return;
+          }
+          // Fallback (shouldn't be reached — server doesn't push
+          // cod_converted to the customer who triggered it).
+          safeNavigate('OrderDetail', { orderId });
+          return;
+        }
+        if (type === 'order_cancelled' || type === 'order_delivered') {
+          if (auth.isShopOwner && pushShopId && pushShopId === auth.shopId) {
+            safeNavigate('ShopOrderDetail', { orderId });
+            return;
+          }
+          if (auth.isAdmin) {
+            safeNavigate('AdminOrders');
+            return;
+          }
+          safeNavigate('OrderDetail', { orderId });
+          return;
+        }
+        // Generic / legacy `order_status` push from
+        // `sendOrderStatusPush` — customer-only payload shape.
+        // Same audience precedence in case a shop owner ever
+        // receives it (they shouldn't, but defensive).
+        if (auth.isShopOwner && pushShopId && pushShopId === auth.shopId) {
+          safeNavigate('ShopOrderDetail', { orderId });
+          return;
+        }
+        safeNavigate('OrderDetail', { orderId });
       },
     );
 

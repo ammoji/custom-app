@@ -61,15 +61,30 @@ export type EtaInput = {
   // undefined identically (both → "missing").
   readyByEstimate?: number | null;
   estimatedDeliveryAt?: number | null;
+  // PR-NEXT-1 (finding #10) — once the partner has picked the
+  // order up, the customer-facing ETA copy must stop rendering
+  // the "Pickup ready 5 min ago" line. Pre-fix that line was
+  // still computed off `readyByEstimate` and contradicted the
+  // chip's "Out for delivery" label. The chip uses
+  // `displayOrderStatus` to read the synthetic `picked_up`
+  // state; this helper mirrors the same pickedUpAt-aware
+  // collapse to `hidden`.
+  pickedUpAt?: number | null;
 };
 
 export function orderEtaDisplay(
   order: EtaInput,
   nowMs: number,
 ): OrderEtaDisplay {
-  // Terminal states first — no ETA copy regardless of what
-  // estimates are still hanging on the order doc.
+  // Terminal + in-transit states first — no ETA copy regardless
+  // of what estimates are still hanging on the order doc.
   if (order.status === 'delivered' || order.status === 'cancelled') {
+    return { kind: 'hidden' };
+  }
+  if (order.pickedUpAt != null) {
+    // PR-NEXT-1 — order is in transit. The chip handles the
+    // "Out for delivery" label; the ETA slot stays empty rather
+    // than continuing to count down to a moment in the past.
     return { kind: 'hidden' };
   }
 

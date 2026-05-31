@@ -1445,6 +1445,50 @@ export const orderService = {
     await fn(input);
   },
 
+  // PR-NEXT-3 §F — Part A client wrapper. Mints a fresh Razorpay
+  // session for an existing COD order so the customer can convert
+  // to online mid-flow. Mirrors `retryPayment`'s return shape —
+  // OrderDetailScreen drops the result straight into the same
+  // `openRazorpayCheckout` flow. On Razorpay success the screen
+  // calls `confirmPayment` (which now stamps `paidMethod: 'online'`
+  // and fans out the COD-conversion push). Server-side race-guard
+  // refuses if the partner already confirmed cash (Part B).
+  async payCodOrder(orderId: string): Promise<{
+    orderId: string;
+    total: number;
+    razorpayOrderId: string;
+    razorpayKeyId: string;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('payCodOrder');
+      const result = await fn({ orderId });
+      return result.data as any;
+    }
+    const fn = httpsCallable(functions, 'payCodOrder');
+    const result = await fn({ orderId });
+    return result.data as any;
+  },
+
+  // PR-NEXT-3 §F — Part B client wrapper. Delivery partner stamps
+  // cash settlement so `markDelivered` can proceed. Server returns
+  // `{ alreadyPaid: true }` if the customer concurrently paid
+  // online via Part A — the dashboard should treat that as success
+  // (show a friendly toast, fall through to the Delivered button
+  // on the next watcher tick).
+  async confirmCodPayment(input: {
+    orderId: string;
+    paidMethod: 'cash' | 'online';
+  }): Promise<{ ok: true; alreadyPaid: boolean }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('confirmCodPayment');
+      const result = await fn(input);
+      return result.data as { ok: true; alreadyPaid: boolean };
+    }
+    const fn = httpsCallable(functions, 'confirmCodPayment');
+    const result = await fn(input);
+    return result.data as { ok: true; alreadyPaid: boolean };
+  },
+
   async setDeliveryStatus(input: {
     status: 'online' | 'offline';
   }): Promise<void> {
@@ -1477,6 +1521,53 @@ export const orderService = {
     }
     const fn = httpsCallable(functions, 'reportDeliveryLocation');
     await fn(input);
+  },
+
+  // PR 50 — partner notification-radius write. Server validates
+  // 1–50 integer; callers should `try/catch` and surface inline
+  // errors. Returns the persisted value so the dashboard can pin
+  // its local state to the server's normalized result (currently
+  // identical, but defensive).
+  async updateMyDeliverySettings(input: {
+    notificationRadiusKm: number;
+  }): Promise<{ ok: true; notificationRadiusKm: number }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'updateMyDeliverySettings',
+      );
+      const res = await fn(input);
+      return res.data as { ok: true; notificationRadiusKm: number };
+    }
+    const fn = httpsCallable(functions, 'updateMyDeliverySettings');
+    const res = await fn(input);
+    return res.data as { ok: true; notificationRadiusKm: number };
+  },
+
+  // PR 50 — partner settings read. Dashboard calls this in its
+  // `useFocusEffect` to populate the Online switch + radius input
+  // from authoritative server state on every focus (also
+  // incidentally fixes finding #8 — Online toggle persistence
+  // across screen navigations).
+  async getMyDeliverySettings(): Promise<{
+    deliveryStatus: 'online' | 'offline';
+    notificationRadiusKm: number;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'getMyDeliverySettings',
+      );
+      const res = await fn({});
+      return res.data as {
+        deliveryStatus: 'online' | 'offline';
+        notificationRadiusKm: number;
+      };
+    }
+    const fn = httpsCallable(functions, 'getMyDeliverySettings');
+    const res = await fn({});
+    return res.data as {
+      deliveryStatus: 'online' | 'offline';
+      notificationRadiusKm: number;
+    };
   },
 
   // Polling helpers — same shape as watchShopOrders / watchAllOrders.

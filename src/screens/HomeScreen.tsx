@@ -1,7 +1,7 @@
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import Button from '../components/common/Button';
 import QuickSwitchModal from '../components/dev/QuickSwitchModal';
 import ActiveOrdersRail from '../components/order/ActiveOrdersRail';
@@ -26,6 +26,11 @@ import { pickActiveOrders } from '../utils/pickActiveOrders';
 
 export default function HomeScreen() {
   const nav = useNavigation<any>();
+  // PR-NEXT-2 (finding #1) — Android gesture-nav bar overlaps the
+  // floating cart bar at the bottom. `spacing.lg` happens to clear
+  // iOS's home indicator (~34dp) but not Android's 48dp gesture
+  // pills. Hook must sit with the other hooks (Rule 2).
+  const insets = useSafeAreaInsets();
   const itemCount = useCartStore(s => s.itemCount());
   const total = useCartStore(s => s.total());
   const uid = useAuthStore(s => s.uid);
@@ -288,7 +293,16 @@ export default function HomeScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView
+        contentContainerStyle={[
+          styles.content,
+          // Add the safe-area inset so the last list item is
+          // reachable above both the cart bar and the system nav
+          // pills. Always added (a few harmless extra pixels when
+          // the cart bar is hidden).
+          { paddingBottom: 120 + insets.bottom },
+        ]}
+      >
         <Text style={[styles.greeting, { paddingHorizontal: spacing.lg }]}>Hello 👋</Text>
         <Text style={[styles.location, { paddingHorizontal: spacing.lg }]}>{locationLabel}</Text>
         {source === 'fallback' && (
@@ -711,7 +725,7 @@ export default function HomeScreen() {
 
       {itemCount > 0 && (
         <Pressable
-          style={styles.cartBar}
+          style={[styles.cartBar, { bottom: insets.bottom + spacing.sm }]}
           onPress={() => nav.navigate('Cart')}
           accessibilityRole="button"
           accessibilityLabel={`View cart, ${itemCount} item${itemCount > 1 ? 's' : ''}, total ${formatRupees(total)}`}

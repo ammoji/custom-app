@@ -148,6 +148,15 @@ import {
     DEFAULT_SERVICE_RADIUS_KM,
     filterShopsByServiceRadius,
 } from './geoVisibilityHelpers';
+// PR 50 — partner notification-radius filter + default seed.
+// Pure helper (server-only — no client mirror). Re-add this block
+// if tsc complains about Cannot find name 'filterPartnersByNotificationRadius'
+// or 'DEFAULT_PARTNER_NOTIFICATION_RADIUS_KM'.
+import {
+    DEFAULT_PARTNER_NOTIFICATION_RADIUS_KM,
+    filterPartnersByNotificationRadius,
+    type PartnerRow,
+} from './notificationRadiusHelpers';
 import {
     promoteDefaultAfterDelete,
     validateAddressInput,
@@ -155,6 +164,17 @@ import {
     type AddressInput,
 } from './profileHelpers';
 import { checkRetryPaymentGuard } from './retryPaymentHelpers';
+// PR-NEXT-3 — DO NOT REMOVE. Used by payCodOrder + confirmCodPayment +
+// markDelivered (COD gate) + confirmPayment (COD-conversion fan-out
+// decision). Auto-formatter risk per code-discipline; if tsc
+// complains about any of these names, re-add this block.
+import {
+  shouldFireCodConversionFanout,
+  validateConfirmCodPaymentInput,
+  validateConfirmCodPaymentPreconditions,
+  validateMarkDeliveredCodGate,
+  validatePayCodOrderPreconditions,
+} from './codPaymentHelpers';
 // PR 6 — DO NOT REMOVE. Auto-formatter has stripped this import twice
 // already during PR 6 development. Used by addCustomMenuItem +
 // updateMenuItem to validate that imageUrl points to our Storage
@@ -1093,6 +1113,106 @@ export const retryPayment = onCall<{ orderId: string }>(
   },
 );
 
+// ────────────────────────────────────────────────────────────────────
+// PR-NEXT-3 — Part A: customer-initiated COD → online conversion.
+//
+// Mirror of `retryPayment` (above) but for the COD case. The customer
+// originally chose Cash on Delivery, later wants to pay online before
+// the partner arrives (mirrors Swiggy/Zomato). We mint a fresh
+// Razorpay session for the existing order and let the client drop
+// into the same `openRazorpayCheckout` flow.
+//
+// Locked design (finding #12, Sudhir May 31):
+//   - `paymentMethod` stays `'cod'` (preserved as analytics signal).
+//   - On payment success, `confirmPayment` stamps `paidMethod: 'online'`
+//     and fans out a push to shop / admin / delivery (see Section C
+//     below).
+//   - Strict race-guard against partner Part B: refuses if
+//     `paymentStatus === 'paid'` already.
+// ────────────────────────────────────────────────────────────────────
+
+export const payCodOrder = onCall<{ orderId: string }>(
+  {
+    cors: true,
+    enforceAppCheck: false,
+    secrets: [RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET],
+  },
+  async request => {
+    const auth = request.auth;
+    const { orderId } = request.data ?? ({} as { orderId?: string });
+    if (!orderId) {
+      throw new HttpsError('invalid-argument', 'orderId required');
+    }
+
+    const ref = db.doc(`orders/${orderId}`);
+    const snap = await ref.get();
+    const order = snap.exists ? (snap.data() as any) : null;
+
+    // Pure-helper precondition matrix. The wrapper just maps the
+    // helper's code/message to HttpsError 1:1 — every meaningful
+    // decision (COD-only, not-paid-yet race-guard, not-delivered,
+    // not-cancelled, not-someone-else's-order) is in
+    // `codPaymentHelpers.validatePayCodOrderPreconditions` and
+    // pinned by `tests/functions/codPaymentHelpers.test.ts`.
+    const check = validatePayCodOrderPreconditions({
+      authUid: auth?.uid,
+      order,
+    });
+    if (!check.ok) {
+      // Discriminate `not found` from generic failed-precondition so
+      // the client can render a more useful empty state if the order
+      // was deleted between list-load and tap.
+      if (check.code === 'failed-precondition' && /not found/i.test(check.message)) {
+        throw new HttpsError('not-found', `Order ${orderId} not found`);
+      }
+      throw new HttpsError(check.code, check.message);
+    }
+
+    const keyId = RAZORPAY_KEY_ID.value();
+    const keySecret = RAZORPAY_KEY_SECRET.value();
+    const razorpay = new Razorpay({ key_id: keyId, key_secret: keySecret });
+
+    let rzpOrder;
+    try {
+      rzpOrder = await razorpay.orders.create({
+        amount: Math.round(order.total * 100),
+        currency: 'INR',
+        receipt: orderId,
+        notes: {
+          orderId,
+          customerUid: auth!.uid,
+          shopId: order.shopId,
+          codConversion: 'true',
+        },
+      });
+    } catch (err: any) {
+      console.error('[payCodOrder] razorpay.orders.create failed', err);
+      throw new HttpsError(
+        'internal',
+        `Could not create payment session: ${err?.error?.description ?? err?.message ?? 'unknown'}`,
+      );
+    }
+
+    // Set `paymentStatus: 'pending'` so confirmPayment / the webhook
+    // can identify this order as "an online payment is in flight."
+    // Do NOT touch `paymentMethod` — locked design says it stays
+    // 'cod' as an analytics signal of the customer's original
+    // choice.
+    await ref.update({
+      razorpayOrderId: rzpOrder.id,
+      paymentStatus: 'pending',
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    return {
+      orderId,
+      total: order.total,
+      razorpayOrderId: rzpOrder.id,
+      razorpayKeyId: keyId,
+    };
+  },
+);
+
 export const cancelMyPendingOrder = onCall<{ orderId: string }>(
   { cors: true, enforceAppCheck: false },
   async request => {
@@ -1225,8 +1345,19 @@ export const confirmPayment = onCall<{
     // Idempotent paid write. Webhook may arrive later and find
     // already-paid → skip (per the payment.captured idempotency
     // branch above).
+    //
+    // PR-NEXT-3 — stamp `paidMethod: 'online'` in the SAME update
+    // call (atomic with paymentStatus) so any reader sees a
+    // consistent (paymentStatus, paidMethod) tuple. Locked design:
+    // `paymentMethod` is the customer's ORIGINAL choice
+    // (preserved as an analytics signal); `paidMethod` is the
+    // actual settlement. For a regular online order both happen
+    // to be 'online'; for a COD-converted-via-payCodOrder order
+    // paymentMethod stays 'cod' here while paidMethod flips to
+    // 'online'.
     await ref.update({
       paymentStatus: 'paid',
+      paidMethod: 'online',
       razorpayPaymentId,
       paidAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
@@ -1237,6 +1368,69 @@ export const confirmPayment = onCall<{
         reason: 'Confirmed via confirmPayment callable',
       }),
     });
+
+    // PR-NEXT-3 — COD-conversion fan-out push. Locked design
+    // (finding #12): when a customer pays online for an order
+    // they originally placed as COD, notify shop owner + admin +
+    // delivery partner (if assigned). Fired directly here rather
+    // than from `sendOrderStatusPush` because that trigger
+    // watches `status` diffs, not `paymentStatus` diffs — it
+    // would either miss this transition or double-fire for
+    // regular online orders.
+    //
+    // The pure helper `shouldFireCodConversionFanout` keeps this
+    // decision testable in isolation; the alreadyPaid branch
+    // above returns early before reaching this code, so the
+    // `alreadyPaid: false` here is structurally correct.
+    if (shouldFireCodConversionFanout({ order, alreadyPaid: false })) {
+      try {
+        if (typeof order.shopId === 'string' && order.shopId) {
+          const shopSnap = await db.doc(`shops/${order.shopId}`).get();
+          const ownerUid = shopSnap.data()?.ownerUid as string | undefined;
+          if (ownerUid) {
+            pushToOwner(
+              ownerUid,
+              '💳 Customer paid online',
+              `Order #${orderId.slice(0, 6)} — ${order.shopName ?? 'order'} (was COD, now paid)`,
+              {
+                orderId,
+                shopId: order.shopId,
+                type: 'order_cod_converted',
+              },
+            ).catch(e =>
+              console.warn('[confirmPayment] pushToOwner cod-converted failed:', e),
+            );
+          }
+        }
+        pushToAdmins(
+          '💳 COD order paid online',
+          `Order #${orderId.slice(0, 6)} converted COD → online`,
+          {
+            orderId,
+            shopId: typeof order.shopId === 'string' ? order.shopId : '',
+            type: 'order_cod_converted',
+          },
+        ).catch(e =>
+          console.warn('[confirmPayment] pushToAdmins cod-converted failed:', e),
+        );
+        if (typeof order.deliveryPersonId === 'string' && order.deliveryPersonId) {
+          pushToUser(
+            order.deliveryPersonId,
+            '💳 Payment received — no cash to collect',
+            `Order #${orderId.slice(0, 6)} customer paid online`,
+            { orderId, type: 'order_cod_converted' },
+          ).catch(e =>
+            console.warn('[confirmPayment] pushToUser(delivery) cod-converted failed:', e),
+          );
+        }
+      } catch (e) {
+        // Defensive outer net — the individual .catch's above
+        // should swallow per-push errors, but a defensive net
+        // prevents a single misshapen field from blocking the
+        // happy-path return.
+        console.warn('[confirmPayment] COD-conversion fan-out wrapper:', e);
+      }
+    }
     return { ok: true, alreadyPaid: false };
   },
 );
@@ -2828,6 +3022,49 @@ export const sendOrderStatusPush = onDocumentUpdated(
     } catch (e) {
       console.error('[sendOrderStatusPush] error:', e);
     }
+
+    // PR-NEXT-1 §D (finding #2) — extend the trigger fan-out for
+    // cancellation. Pre-PR a customer-cancelled order pushed
+    // ONLY to the customer (the helper above); the shopkeeper
+    // kept preparing food while inventory walked out the door.
+    // Now: any → cancelled also pushes shopkeeper + admin. The
+    // existing customer cancel push above is unchanged.
+    //
+    // `markDelivered` already pushes shop + admin explicitly
+    // (see comment there) so we deliberately do NOT re-fan-out
+    // the delivered transition here — would double-push the
+    // shop owner. The trigger keeps responsibility for
+    // cancellation fan-out only.
+    if (after.status === 'cancelled' && before.status !== 'cancelled') {
+      const orderIdShort = String(event.params.orderId).slice(0, 6);
+      const shopId =
+        typeof after.shopId === 'string' ? after.shopId : undefined;
+      if (shopId) {
+        const shopSnap = await db.doc(`shops/${shopId}`).get();
+        const ownerUid = shopSnap.data()?.ownerUid as string | undefined;
+        if (ownerUid) {
+          pushToOwner(
+            ownerUid,
+            '⚠️ Order cancelled',
+            `Order #${orderIdShort} was cancelled. Stop preparation if started.`,
+            { orderId: event.params.orderId, shopId, type: 'order_cancelled' },
+          ).catch(e =>
+            console.warn('[sendOrderStatusPush] pushToOwner cancelled failed:', e),
+          );
+        }
+      }
+      pushToAdmins(
+        '⚠️ Order cancelled',
+        `Order #${orderIdShort} cancelled (${before.status} → cancelled)`,
+        {
+          orderId: event.params.orderId,
+          shopId: shopId ?? '',
+          type: 'order_cancelled',
+        },
+      ).catch(e =>
+        console.warn('[sendOrderStatusPush] pushToAdmins cancelled failed:', e),
+      );
+    }
   },
 );
 
@@ -3277,13 +3514,57 @@ export const markPickedUp = onCall<{ orderId: string }>(
     await ref.update({
       pickedUpAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
+      // PR-NEXT-1 §B (finding #10) — statusHistory entry was
+      // mislabelled `'ready_for_pickup'` (the existing status,
+      // not the transition that just happened). The audit log
+      // and any future code reading `statusHistory` to derive a
+      // timeline saw the same status appear twice with no record
+      // of the actual pickup event. Synthetic 'picked_up' here
+      // matches the displayed-state vocabulary in
+      // `src/utils/orderStatusDisplay.ts` so audit ↔ UI stays
+      // legible. The top-level `order.status` field deliberately
+      // stays `'ready_for_pickup'` (pickup is signalled by
+      // `pickedUpAt`); promoting `picked_up` to a real
+      // `OrderStatus` enum value is a server-state-machine
+      // refactor deferred to a future PR.
       statusHistory: FieldValue.arrayUnion({
-        status: 'ready_for_pickup',
+        status: 'picked_up',
         at: now,
         by: `delivery:${uid}`,
         reason: 'Picked up from shop',
       }),
     });
+
+    // PR-NEXT-1 §D (finding #10) — customer push on pickup. The
+    // existing `sendOrderStatusPush` trigger fires on `status`
+    // diffs only; `markPickedUp` deliberately doesn't change the
+    // top-level status, so without this explicit push the
+    // customer would learn about pickup only by polling. Emitted
+    // directly here (not via the trigger) for the same reason
+    // `sendNewPickupPushToDelivery` is its own trigger — keeps
+    // the generic status-change trigger focused on a single
+    // concern. Best-effort: a failed push must NOT fail the
+    // pickup write the partner just made.
+    const customerUid =
+      typeof (snap.data() as { customerUid?: unknown }).customerUid === 'string'
+        ? ((snap.data() as { customerUid: string }).customerUid)
+        : null;
+    if (customerUid) {
+      pushToUser(
+        customerUid,
+        '🛵 Your order is on the way',
+        `${(snap.data() as { shopName?: string }).shopName ?? 'Your shop'} — out for delivery`,
+        {
+          orderId,
+          // Type name pinned in `tests/utils/orderStatusDisplay`
+          // adjacent + the AuthBootstrap deep-link table. Keep
+          // these three references in sync.
+          type: 'order_picked_up',
+        },
+      ).catch(e =>
+        console.warn('[markPickedUp] pushToUser failed:', e),
+      );
+    }
     return { ok: true };
   },
 );
@@ -3304,6 +3585,10 @@ export const markDelivered = onCall<{ orderId: string }>(
     const order = snap.data() as {
       deliveryPersonId: string | null;
       status: OrderStatus;
+      shopId?: string;
+      customerUid?: string;
+      paymentMethod?: string;
+      paymentStatus?: string;
     };
     if (order.deliveryPersonId !== uid) {
       throw new HttpsError(
@@ -3320,6 +3605,21 @@ export const markDelivered = onCall<{ orderId: string }>(
         `Cannot deliver from status ${order.status}`,
       );
     }
+    // PR-NEXT-3 §E (finding #12 Part B) — refuse to deliver an
+    // unpaid COD order. The partner must call `confirmCodPayment`
+    // first to stamp paidMethod + paidAt. Online orders +
+    // COD-converted-via-payCodOrder orders pass the gate because
+    // their paymentStatus is already 'paid'. The gate sits AFTER
+    // the idempotent delivered-check (so re-taps of "Delivered"
+    // still short-circuit) and AFTER the status precondition
+    // (so a delivered-from-wrong-state diagnostic isn't shadowed).
+    const codGate = validateMarkDeliveredCodGate({
+      paymentMethod: order.paymentMethod,
+      paymentStatus: order.paymentStatus,
+    });
+    if (!codGate.ok) {
+      throw new HttpsError(codGate.code, codGate.message);
+    }
     const now = Date.now();
     await ref.update({
       status: 'delivered',
@@ -3331,10 +3631,114 @@ export const markDelivered = onCall<{ orderId: string }>(
         by: `delivery:${uid}`,
       }),
     });
-    // The existing sendOrderStatusPush trigger fires on this update
-    // and pushes to the customer ("Order delivered. Enjoy!"). No
-    // explicit push here.
+    // PR-NEXT-1 §D (findings #11 + #16) — fan out the
+    // delivered notification to shopkeeper + admin in addition
+    // to the customer. Pre-PR the customer push was emitted by
+    // the `sendOrderStatusPush` trigger (status changed from
+    // ready_for_pickup → delivered) but the shopkeeper saw no
+    // signal until they manually refreshed, and admin had no
+    // signal at all. The customer push is now ALSO emitted by
+    // the trigger's expanded fan-out (see `sendOrderStatusPush`
+    // below) — keeping the existing trigger as the customer
+    // path means a manual `updateOrderStatus(delivered)` (e.g.
+    // admin override) also notifies the customer without
+    // duplicating logic here. Shopkeeper + admin are emitted
+    // explicitly because they're the *new* surfaces this PR
+    // adds. Best-effort: failed pushes must NOT fail the
+    // delivered write the partner just made.
+    if (order.shopId) {
+      const shopSnap = await db.doc(`shops/${order.shopId}`).get();
+      const ownerUid = shopSnap.data()?.ownerUid as string | undefined;
+      if (ownerUid) {
+        pushToOwner(
+          ownerUid,
+          '✅ Order delivered',
+          `Order #${orderId.slice(0, 6)} delivered to customer`,
+          { orderId, shopId: order.shopId, type: 'order_delivered' },
+        ).catch(e =>
+          console.warn('[markDelivered] pushToOwner failed:', e),
+        );
+      }
+    }
+    pushToAdmins(
+      '✅ Order delivered',
+      `Order #${orderId.slice(0, 6)} delivered`,
+      { orderId, shopId: order.shopId ?? '', type: 'order_delivered' },
+    ).catch(e =>
+      console.warn('[markDelivered] pushToAdmins failed:', e),
+    );
     return { ok: true };
+  },
+);
+
+// ────────────────────────────────────────────────────────────────────
+// PR-NEXT-3 §D — Part B: delivery-partner COD confirmation.
+//
+// When the partner arrives at a customer with a still-COD order
+// (no mid-flow customer conversion via `payCodOrder`), the
+// "Delivered" CTA is gated behind this callable. Partner picks
+// `paidMethod: 'cash' | 'online'` (the latter covers UPI accepted
+// outside the app), the server stamps paid + paidMethod + paidAt,
+// and `markDelivered` becomes callable.
+//
+// Locked design (finding #12):
+//   - paidMethod is constrained to 'cash' | 'online' — input
+//     validator rejects everything else including 'upi'.
+//   - Idempotent on already-paid (returns alreadyPaid: true)
+//     so the customer's mid-flow Part A win is detected cleanly.
+//   - paymentMethod stays the customer's ORIGINAL choice ('cod').
+// ────────────────────────────────────────────────────────────────────
+
+export const confirmCodPayment = onCall<{
+  orderId: string;
+  paidMethod: 'cash' | 'online';
+}>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const { uid } = requireDeliveryRole(request);
+    const input = validateConfirmCodPaymentInput(request.data);
+    if (!input.ok) {
+      throw new HttpsError(input.code, input.message);
+    }
+    const { orderId, paidMethod } = input;
+    const ref = db.doc(`orders/${orderId}`);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      throw new HttpsError('not-found', `Order ${orderId} not found`);
+    }
+    const order = snap.data() as {
+      deliveryPersonId?: string | null;
+      paymentMethod?: string;
+      paymentStatus?: string;
+      status?: string;
+    };
+    const check = validateConfirmCodPaymentPreconditions({
+      partnerUid: uid,
+      order,
+    });
+    if (!check.ok) {
+      throw new HttpsError(check.code, check.message);
+    }
+    if (check.alreadyPaid) {
+      // Race-guard win for Part A — customer paid online
+      // concurrently. Return cleanly so the partner UI shows the
+      // "Customer paid online — no cash needed" toast and falls
+      // through to the Delivered button on the next watcher tick.
+      return { ok: true as const, alreadyPaid: true as const };
+    }
+    await ref.update({
+      paymentStatus: 'paid',
+      paidMethod,
+      paidAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+      statusHistory: FieldValue.arrayUnion({
+        status: 'paid',
+        at: Date.now(),
+        by: `delivery:${uid}`,
+        reason: `Cash payment confirmed by delivery partner (${paidMethod})`,
+      }),
+    });
+    return { ok: true as const, alreadyPaid: false as const };
   },
 );
 
@@ -3418,6 +3822,104 @@ export const setDeliveryStatus = onCall<{ status: 'online' | 'offline' }>(
   },
 );
 
+// ────────────────────────────────────────────────────────────────────
+// PR 50 — Per-partner delivery settings (notification radius, etc.)
+//
+// Two callables, both delivery-role-gated via `requireDeliveryRole`:
+//
+//   - `updateMyDeliverySettings({ notificationRadiusKm })` — write.
+//     Strict 1–50 integer range (matches the dashboard's input
+//     guard); server re-validates so a tampered client can't bypass.
+//
+//   - `getMyDeliverySettings()` — read. Returns the partner's
+//     `deliveryStatus` + `notificationRadiusKm` so the dashboard
+//     can populate both controls authoritatively on mount. This
+//     also incidentally fixes finding #8 from
+//     TESTING-FINDINGS-2026-05-30.md ("online toggle doesn't
+//     persist across screen navigations") because the dashboard
+//     now reads its own server state on focus rather than
+//     defaulting to offline.
+//
+// `notificationRadiusKm` deliberately stays OUT of `UserProfile`
+// (the customer-side projection returned by `getMyProfile`) —
+// delivery-internal fields like `deliveryStatus` follow the same
+// posture. See PR 50 prompt §A "decision note."
+// ────────────────────────────────────────────────────────────────────
+export const updateMyDeliverySettings = onCall<{
+  notificationRadiusKm?: number;
+}>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const { uid } = requireDeliveryRole(request);
+    const radius = request.data?.notificationRadiusKm;
+    if (radius === undefined) {
+      throw new HttpsError(
+        'invalid-argument',
+        'notificationRadiusKm is required',
+      );
+    }
+    // Strict integer 1–50 km. Same posture as `serviceRadiusKm`
+    // from PR 48. Reject NaN / Infinity / non-integer / out-of-range
+    // BEFORE the Firestore write so we never persist garbage that
+    // the helper's "treated as missing" fallback would silently
+    // mask.
+    if (
+      typeof radius !== 'number' ||
+      !Number.isFinite(radius) ||
+      !Number.isInteger(radius) ||
+      radius < 1 ||
+      radius > 50
+    ) {
+      throw new HttpsError(
+        'invalid-argument',
+        'notificationRadiusKm must be an integer in [1, 50]',
+      );
+    }
+    await db.doc(`users/${uid}`).set(
+      {
+        // Mirror `isDelivery: true` for the same reason as
+        // `setDeliveryStatus` + `reportDeliveryLocation` do — keeps
+        // the trigger's composite query
+        // (`isDelivery==true && deliveryStatus==online`) honest
+        // even if a partner hits this callable before the role
+        // mirror was first written.
+        isDelivery: true,
+        notificationRadiusKm: radius,
+      },
+      { merge: true },
+    );
+    return { ok: true as const, notificationRadiusKm: radius };
+  },
+);
+
+export const getMyDeliverySettings = onCall(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const { uid } = requireDeliveryRole(request);
+    const snap = await db.doc(`users/${uid}`).get();
+    const data = snap.data() ?? {};
+    const storedRadius = data.notificationRadiusKm;
+    const storedStatus = data.deliveryStatus;
+    return {
+      // Default to 'offline' so a first-time partner (no mirror
+      // row yet — should be impossible post-approveDeliveryRole,
+      // but cheap to be defensive) sees the toggle off rather
+      // than undefined.
+      deliveryStatus:
+        storedStatus === 'online' ? ('online' as const) : ('offline' as const),
+      // Mirror the filter's fallback so the dashboard shows the
+      // same value the trigger would have used had the partner
+      // never customized.
+      notificationRadiusKm:
+        typeof storedRadius === 'number' &&
+        Number.isFinite(storedRadius) &&
+        storedRadius > 0
+          ? storedRadius
+          : DEFAULT_PARTNER_NOTIFICATION_RADIUS_KM,
+    };
+  },
+);
+
 export const sendNewPickupPushToDelivery = onDocumentUpdated(
   { document: 'orders/{orderId}', region: 'asia-south1' },
   async event => {
@@ -3451,14 +3953,47 @@ export const sendNewPickupPushToDelivery = onDocumentUpdated(
       return;
     }
 
+    // PR 50 — per-partner notification-radius filter. The pure
+    // helper applies fail-OPEN rules (missing shopLocation /
+    // missing partner.currentLocation / invalid radius → keep)
+    // so a partner who hasn't reported a location yet still gets
+    // pickups — same posture as the pre-PR-50 "all online get
+    // pushed" behavior.
+    //
+    // Scale note: pilot-scale (handful of partners) → read-all-
+    // then-filter in memory is fine. At hundreds of partners we'd
+    // want geohash prefixes on `shopLocation` + a range query on
+    // `users.locationGeohash`. Migration path documented in
+    // docs/GEO_DISTANCE_SYSTEM_DESIGN.md → "Goal #6 — server-side
+    // push filtering".
+    const allOnline: PartnerRow[] = usersSnap.docs.map(d => {
+      const data = d.data() ?? {};
+      return {
+        uid: d.id,
+        currentLocation: data.currentLocation ?? null,
+        notificationRadiusKm: data.notificationRadiusKm,
+        fcmTokens: data.fcmTokens ?? [],
+      };
+    });
+    const inRange = filterPartnersByNotificationRadius(
+      allOnline,
+      after.shopLocation ?? null,
+    );
+    if (inRange.length === 0) {
+      console.log(
+        `[sendNewPickupPushToDelivery] no in-range delivery people for order ${event.params.orderId} (online=${allOnline.length})`,
+      );
+      return;
+    }
+
     const tokens: string[] = [];
-    usersSnap.forEach(u => {
-      const userTokens: string[] = u.data()?.fcmTokens ?? [];
+    inRange.forEach(p => {
+      const userTokens: string[] = p.fcmTokens ?? [];
       tokens.push(...userTokens);
     });
     if (!tokens.length) {
       console.log(
-        `[sendNewPickupPushToDelivery] online delivery people have no push tokens for order ${event.params.orderId}`,
+        `[sendNewPickupPushToDelivery] in-range delivery people have no push tokens for order ${event.params.orderId} (inRange=${inRange.length})`,
       );
       return;
     }
@@ -4232,8 +4767,28 @@ export const approveDeliveryRole = onCall<{ uid: string }>(
     // queries (online-count, push fan-out) can find delivery
     // partners without scanning Auth.
     await mergeCustomClaims(result.targetUid, { delivery: true });
+    // PR 50 — seed `notificationRadiusKm` on first approve so the
+    // push-fanout filter has a value to read immediately. Idempotent
+    // on re-approval: if the partner already customized their
+    // radius we leave it alone (`existingRadius != null` branch
+    // returns `null` from the helper, which the spread below
+    // simply omits). Same posture as `approveShop`'s seed of
+    // `deliveryChargeTiers` / `serviceRadiusKm` (PR 47/48).
+    const existing = await db.doc(`users/${result.targetUid}`).get();
+    const existingRadius = existing.data()?.notificationRadiusKm;
+    const seedRadius =
+      typeof existingRadius === 'number' &&
+      Number.isFinite(existingRadius) &&
+      existingRadius > 0
+        ? null
+        : DEFAULT_PARTNER_NOTIFICATION_RADIUS_KM;
     await db.doc(`users/${result.targetUid}`).set(
-      { isDelivery: true },
+      {
+        isDelivery: true,
+        ...(seedRadius != null
+          ? { notificationRadiusKm: seedRadius }
+          : {}),
+      },
       { merge: true },
     );
 

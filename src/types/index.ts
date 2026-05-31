@@ -461,6 +461,17 @@ export type Order = {
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
   paidAt?: number;
+  // PR-NEXT-3 — actual settlement method, set when paymentStatus
+  // flips to 'paid'. For COD orders the customer converts to online
+  // mid-flow via `payCodOrder` → `'online'`. For COD orders the
+  // delivery partner confirms cash for via `confirmCodPayment` →
+  // `'cash'` (or `'online'` if partner accepts UPI directly outside
+  // the app). For regular online-from-checkout orders → `'online'`
+  // (stamped by `confirmPayment` post-write). MISSING for legacy
+  // orders predating this PR. `paymentMethod` stays the customer's
+  // ORIGINAL choice (preserved as an analytics signal per finding
+  // #12 locked design); `paidMethod` is the actual settlement.
+  paidMethod?: 'cash' | 'online';
   // PR 2 — payment hardening. Set by the webhook when a captured
   // payment's amount disagrees with order.total (in rupees). Admin
   // uses both fields to reconcile manually.

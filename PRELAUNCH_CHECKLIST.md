@@ -8524,6 +8524,238 @@ immediately. The checklist is the only thing that survives memory.
       against the address proof or for PAN-specific tax
       flows), the schema split is purely additive. `[Post-launch]`
 
+## PR-NEXT-3 — COD payment conversion + delivery-partner confirmation `[Phase NEXT-3]`
+
+- [x] **Why this PR exists.** Pilot-blocker cluster for COD orders (finding **#12**, two parts). Most pilot orders will be COD; pre-PR (a) a customer who later wanted to pay online had to cancel + re-place, losing the partner's in-flight work, and (b) a partner could tap "Delivered" with zero recorded evidence of whether cash was actually exchanged. Also closes sub-(b) of finding **#16**.
+
+- [x] **Locked design (finding #12, Sudhir May 31).**
+      - `paymentMethod` stays `'cod'` on conversion (preserved as an analytics signal). New optional `paidMethod: 'cash' | 'online'` field captures the actual settlement.
+      - No reverse path (online → COD).
+      - Fan-out push on COD → online conversion to shop owner + admin + delivery partner (if assigned). Fired DIRECTLY from inside `confirmPayment` (not from the `sendOrderStatusPush` trigger, which watches `status` diffs and would double-fire for regular online orders).
+      - Strict race-guard: both `payCodOrder` and `confirmCodPayment` refuse if `paymentStatus === 'paid'` already.
+
+- [x] **What shipped.**
+      - **Type:** `paidMethod?: 'cash' | 'online'` added to `Order` in `@c:\Users\dahiy\grocery-mvp\src\types\index.ts` (optional → back-compat with legacy orders).
+      - **Pure helpers** in `@c:\Users\dahiy\grocery-mvp\functions\src\codPaymentHelpers.ts`:
+        - `validatePayCodOrderPreconditions` — auth, ownership, COD-only, race-guard against Part B, not delivered/cancelled.
+        - `validateConfirmCodPaymentInput` — orderId + `paidMethod ∈ {cash, online}` (rejects `'upi'`, empty, null, non-string).
+        - `validateConfirmCodPaymentPreconditions` — partner ownership, COD-only, returns `alreadyPaid: true` on the race-guard (NOT an error), refuses delivered/cancelled.
+        - `validateMarkDeliveredCodGate` — refuses if COD + not paid; passes online + COD-converted-to-online + COD-confirmed-cash.
+        - `shouldFireCodConversionFanout` — decides the COD-conversion push fan-out (NEVER fires on alreadyPaid or non-COD orders).
+      - **New callables** in `@c:\Users\dahiy\grocery-mvp\functions\src\index.ts`:
+        - `payCodOrder({orderId})` — mints Razorpay session for an existing COD order; sets `paymentStatus: 'pending'` + `razorpayOrderId`; `paymentMethod` stays `'cod'`.
+        - `confirmCodPayment({orderId, paidMethod})` — partner-only; stamps `paymentStatus: 'paid'` + `paidMethod` + `paidAt` + `statusHistory` entry; idempotent on already-paid (returns `{alreadyPaid: true}`).
+      - **Extended callables:**
+        - `confirmPayment` — stamps `paidMethod: 'online'` atomically with the paid write + fires `pushToOwner` / `pushToAdmins` / `pushToUser(deliveryPersonId)` with `type: 'order_cod_converted'` when the order was originally COD.
+        - `markDelivered` — new precondition via `validateMarkDeliveredCodGate` refuses unpaid COD; sits after the idempotent delivered-check + the status-precondition so neither diagnostic is shadowed.
+      - **Client wrappers** in `@c:\Users\dahiy\grocery-mvp\src\services\orderService.ts`: `payCodOrder(orderId)` + `confirmCodPayment({orderId, paidMethod})`. Both follow the existing native/web `httpsCallable` split.
+      - **Customer UI** — new "💳 Pay {total} online now" card on `@c:\Users\dahiy\grocery-mvp\src\screens\OrderDetailScreen.tsx`, gated on `paymentMethod === 'cod' && paymentStatus !== 'paid' && status not in {delivered, cancelled}`. Mirrors `handleRetryPayment` (Razorpay overlay flow) but calls `confirmPayment` in the success handler so the COD-conversion fan-out fires immediately (rather than waiting ~30s for the webhook). Press-guarded by its own `usePressGuard` ref.
+      - **Delivery UI** — `ActiveDeliveryCard` in `@c:\Users\dahiy\grocery-mvp\src\screens\delivery\DeliveryDashboardScreen.tsx` now renders two Cash/UPI pills (instead of the Delivered button) when `pickedUp && paymentMethod === 'cod' && paymentStatus !== 'paid'`. New `handleConfirmCodPayment` lifted to the screen level (Rule 2 hook discipline) with the same optimistic-rollback pattern as `handleDelivered` and a friendly "Customer paid online" toast on the Part A race-guard win.
+      - **Deep-link** — `@c:\Users\dahiy\grocery-mvp\src\components\AuthBootstrap.tsx` routes the new `order_cod_converted` push type with the same audience precedence as `order_delivered` (shopOwner-with-matching-shopId > admin > delivery > customer).
+
+- [x] **Tests.** 37 new cases in `@c:\Users\dahiy\grocery-mvp\tests\functions\codPaymentHelpers.test.ts`. Suite green at **1016 / 1016**, up from 979.
+      - Exhaustive matrix for every precondition (10 cases for `payCodOrder`, 10 for `confirmCodPayment` input + 7 for its preconditions, 5 for `markDelivered` COD gate, 5 for fan-out decision).
+      - Explicit race-guard pin (`paymentStatus === 'paid'` → either rejection on Part A OR `alreadyPaid: true` on Part B; never a double-stamp).
+      - Explicit pin that fan-out does NOT fire on regular online orders or webhook-replayed `alreadyPaid` paths.
+
+- [ ] **Cloud Run IAM verification (post-deploy).** Two NEW public callables. The recurring gotcha — fresh callables sometimes deploy without the `allUsers` binding:
+
+      ```powershell
+      gcloud run services get-iam-policy paycodorder `
+        --region=asia-south1 --project=grocery-mvp-dev
+      gcloud run services get-iam-policy confirmcodpayment `
+        --region=asia-south1 --project=grocery-mvp-dev
+      ```
+
+      Add `allUsers / run.invoker` to either if missing. `confirmPayment` and `markDelivered` already have bindings — no re-verification needed.
+
+- [ ] **Deploy plan.**
+      1. `npm run test:unit` — green (1016/1016 currently).
+      2. ```powershell
+         firebase deploy --only `
+           functions:payCodOrder,functions:confirmCodPayment,functions:confirmPayment,functions:markDelivered
+         ```
+      3. Cloud Run IAM verify (above).
+      4. ```powershell
+         eas update --branch production --message "PR-NEXT-3 COD payment conversion + partner confirmation"
+         ```
+         OTA-safe — `react-native-razorpay` already in the dev client; no native module / permission / `app.json` change.
+
+- [ ] **Smoke acceptance (6 steps, two-device pair).**
+      1. **Part A happy path.** Customer places COD; shop accepts. Customer opens `OrderDetail` → taps "💳 Pay {₹} online now" → Razorpay overlay → completes → order doc flips to `paymentMethod: 'cod'`, `paymentStatus: 'paid'`, `paidMethod: 'online'`, `razorpayPaymentId: ...` within ~2 seconds.
+      2. **Part A fan-out.** Same flow. Within ~5s, shop device gets push "💳 Customer paid online", admin device gets it too, assigned-delivery-partner gets "💳 Payment received — no cash to collect". Tapping any deep-links to the appropriate detail screen.
+      3. **Part A race-guard.** Razorpay overlay open mid-payment; delivery partner ALSO taps "Cash received". Whichever lands second gets a clean rejection; no double-write; final state consistent with the winner.
+      4. **Part B happy path.** COD order → ready_for_pickup → partner taps "I've picked it up" → ActiveDeliveryCard shows two pills INSTEAD of the Delivered button → partner taps "Cash received" → order stamps `paid` + `paidMethod: 'cash'` → Delivered button appears on next render → partner taps it → existing PR-NEXT-1 delivered fan-out fires.
+      5. **Part B refusal.** Simulated direct call to `markDelivered` on a COD-unpaid order rejects with the new `validateMarkDeliveredCodGate` precondition message.
+      6. **Online order regression.** Regular online-paid order → partner's flow shows the Delivered button directly (no COD selector). `markDelivered` accepts immediately.
+
+- [x] **Doc trail.** Finding `#12` marked **SHIPPED** in `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md`; sub-(b) of finding `#16` also marked **SHIPPED** there.
+
+- [ ] **Out of scope (deferred).** COD-fee surcharge / differential pricing (order total identical whether paid by cash or online). Receipt PDF generation. Push to customer on Part B confirmation (customer either tapped Pay-online-now themselves OR is handing cash in person — no notification needed). Promoting `'pending_cod_conversion'` to a new `PaymentStatus` enum value (decision: reuse `'pending'`; the COD-vs-original-online distinction is read from `paymentMethod === 'cod'`). Online → COD reverse path (locked design says no). Partner-side audit log of which payments they collected (available via existing audit log queries; no dedicated screen).
+
+## PR-NEXT-2 — Android cart-bar safe-area inset `[Phase NEXT-2]`
+
+- [x] **Why this PR exists.** Finding **#1** from the May 30 Android validation. Customer-facing floating "View Cart" bar uses `position: 'absolute'; bottom: spacing.lg` on four screens; that flat offset coincidentally clears iOS's home indicator but is fully **behind** the Android gesture-nav pills on Sudhir's test device — the OS intercepts the tap and customers can't proceed to checkout. **Pilot-blocker for Android.**
+
+- [x] **What shipped.**
+      - Added `useSafeAreaInsets()` to all four screens with the same per-file pattern:
+        - `@c:\Users\dahiy\grocery-mvp\src\screens\HomeScreen.tsx`
+        - `@c:\Users\dahiy\grocery-mvp\src\screens\ShopListScreen.tsx`
+        - `@c:\Users\dahiy\grocery-mvp\src\screens\ShopDetailScreen.tsx`
+        - `@c:\Users\dahiy\grocery-mvp\src\screens\SearchScreen.tsx`
+      - Cart bar: `style={[styles.cartBar, { bottom: insets.bottom + spacing.sm }]}` so the bar floats above the nav pills with a small visible gap.
+      - Scroll / list container: `contentContainerStyle` extended with `paddingBottom: 120 + insets.bottom` so the last list item is reachable without being clipped by the floated cart bar OR the nav pills.
+      - Hook placement follows code-discipline Rule 2 (with the other hooks at the top of the component, above any conditional early returns). Imports added cleanly per Rule 1.
+
+- [x] **Tests.** Pure visual / layout fix — no new unit-test surface. **979 / 979** stays green (no regression in the existing suite which imports several of the touched screens).
+
+- [ ] **Deploy.** OTA-safe — pure JS, no native module change, no permission change, no `app.json` change.
+
+      ```powershell
+      eas update --branch production --message "PR-NEXT-2 Android cart-bar safe-area fix"
+      ```
+
+      No `firebase deploy` needed; no Cloud Run IAM verify needed; this PR doesn't touch the server.
+
+- [ ] **Manual verification.**
+      - **Android phone with gesture navigation** (Sudhir's test device): cart bar sits clearly above the system nav pills with a small visible gap; "View Cart ›" is tappable; the last item in the menu / shop list / search results is reachable by scrolling without being clipped.
+      - **Android phone with button navigation** (if any tester has one): same — `insets.bottom` reports the button-bar height correctly.
+      - **iOS** (regression): cart bar still positions correctly above the home indicator (it always did; confirm the inset value didn't push it visibly higher than before; if it does and looks off, swap `+ spacing.sm` for `+ 0`).
+
+- [ ] **Doc trail.** Finding `#1` marked **SHIPPED** in `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md`.
+
+## PR-NEXT-1 — Order status propagation + push fan-out + deep-links `[Phase NEXT-1]`
+
+- [x] **Why this PR exists.** Pilot-blocker cluster from the May 30 Android validation. Five findings (`#2`, `#3`, `#10`, `#11`, `#16`) all touched the same plumbing — order-status writes → push trigger fan-out → client display + deep-link — so they ship as one PR.
+
+- [x] **What shipped.**
+      - **Pure helper** `@c:\Users\dahiy\grocery-mvp\src\utils\orderStatusDisplay.ts` — single source of truth for "what status label does this order show right now" across all four audiences (customer / shopkeeper / delivery / admin). Synthetic `picked_up` state for `status==='ready_for_pickup' && pickedUpAt!=null` is the actual root-cause fix for **#10**'s contradictory labels.
+      - **`markPickedUp` (`@c:\Users\dahiy\grocery-mvp\functions\src\index.ts`)** — fixed the mislabeled `statusHistory` entry (`'ready_for_pickup'` → `'picked_up'`) and added an explicit customer push (`type: 'order_picked_up'`) since `markPickedUp` doesn't change the top-level `status` and the `sendOrderStatusPush` trigger watches `status` diffs only.
+      - **`markDelivered`** — explicit `pushToOwner(shopOwnerUid)` + `pushToAdmins` calls on the delivered transition. Customer push remains via the existing trigger. Findings **#11** + **#16(a)**.
+      - **`sendOrderStatusPush` trigger** — extended fan-out for the `any → cancelled` transition to push shopkeeper (`pushToOwner`) + admin (`pushToAdmins`). Finding **#2**.
+      - **`OrderStatusChip` (`@c:\Users\dahiy\grocery-mvp\src\components\order\OrderStatusChip.tsx`)** — rewritten to consume `displayOrderStatus`. Back-compat: existing callers passing only `status` still work; customer-facing screens now pass `pickedUpAt` + `deliveredAt` so the chip resolves the synthetic `picked_up` state. Audience-aware: customer / shopkeeper / delivery / admin tables.
+      - **`orderEtaDisplay`** — accepts `pickedUpAt`; returns `'hidden'` post-pickup so the "Pickup ready 5 min ago" line stops rendering once the chip switches to "Out for delivery". Symmetric collapse to the same display state.
+      - **Customer-facing screens updated** to pass the new props: `OrderDetailScreen`, `OrdersScreen`, `ActiveOrdersRail`. **Shop / admin screens** (`ShopOrderDetailScreen`, `ShopOwnerDashboardScreen`, `AdminOrdersScreen`) also pass them so their own audience-keyed labels resolve correctly.
+      - **`AuthBootstrap` (`@c:\Users\dahiy\grocery-mvp\src\components\AuthBootstrap.tsx`)** — extended the PR 45.2 push-tap handler with order-related deep-link routing for `new_order_for_shop`, `new_pickup_for_delivery`, `order_picked_up`, `order_cancelled`, `order_delivered`, and the legacy `order_status` push types. Audience derived from `useAuthStore` claims at tap time. Finding **#3**.
+
+- [x] **Tests.** 36 new cases in `@c:\Users\dahiy\grocery-mvp\tests\utils\orderStatusDisplay.test.ts`. Suite green at **979 / 979**, up from 943.
+      - Decision matrix: pending / accepted / preparing pass through; `ready_for_pickup` + `pickedUpAt=null` → `ready_for_pickup`; `ready_for_pickup` + `pickedUpAt` set → `picked_up` (synthetic); `cancelled` wins over stale `deliveredAt` / `pickedUpAt`.
+      - 7 displayed states × 4 audiences = 28 label-pin cases.
+      - Pinned customer copy block (regression net so a careless rename doesn't silently change customer-visible text).
+      - Explicit "finding #10 contradictory-label scenario" test asserting customer + shopkeeper views both resolve to the SAME `'picked_up'` state.
+
+- [ ] **Cloud Run IAM verification (post-deploy).** Two redeployed public callables to verify (`markPickedUp`, `markDelivered`); the trigger `sendOrderStatusPush` is background-only:
+
+      ```powershell
+      gcloud run services get-iam-policy markpickedup `
+        --region=asia-south1 --project=grocery-mvp-dev
+      gcloud run services get-iam-policy markdelivered `
+        --region=asia-south1 --project=grocery-mvp-dev
+      ```
+
+      Add `allUsers / run.invoker` to either if missing.
+
+- [ ] **Deploy plan.**
+      1. `npm run test:unit` — green (979/979 currently).
+      2. ```powershell
+         firebase deploy --only `
+           functions:markPickedUp,functions:markDelivered,functions:sendOrderStatusPush
+         ```
+      3. Cloud Run IAM verify (above).
+      4. `eas update --branch production --message "PR-NEXT-1 order status propagation + push fan-out"`. **OTA-safe** — pure JS, no native module / permission / `app.json` change.
+
+- [ ] **Smoke acceptance (5 steps, 2-device pair).**
+      1. **Cancel push to shopkeeper (#2 + #3)** → Customer places order on device A; shopkeeper sees it. Customer cancels within the 2-min window. Shopkeeper device receives a push within ~5s. Tapping it opens **ShopOrderDetail** for that exact order.
+      2. **Picked-up consistency (#10)** → Customer places → shop accepts + marks ready → partner taps "I've picked up." Customer's `OrderDetail` shows EXACTLY ONE label: "Out for delivery." No "Pickup ready 5 min ago" anywhere. Repeat 3× to confirm propagation isn't intermittent.
+      3. **Delivered fan-out (#11, #16)** → Partner taps "Delivered." Customer push (existing) ✅. Shopkeeper push ✅ (new — opens `ShopOrderDetail`). Admin push ✅ (new — opens `AdminOrders`).
+      4. **Status text consistency across surfaces** → Open the same order on customer / shopkeeper / delivery / admin screens. Each label is appropriately worded for its audience but they all describe the same underlying state.
+      5. **Mid-cycle race resilience** → 3 orders back-to-back through the full lifecycle in parallel. No status display ghosting on any.
+
+- [ ] **Doc trail.** Findings `#2`, `#3`, `#10`, `#11` marked **SHIPPED** in `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md`; finding `#16` marked **partially shipped** (sub-a — push fan-out — done; sub-b/c/d defer to PR-NEXT-3 / PR-NEXT-6).
+
+- [ ] **Out of scope (deferred).** Promoting `'picked_up'` to a real `OrderStatus` enum value (server-side state-machine refactor — synthetic state in `displayOrderStatus` is the cheap defensive fix for now). Shop-dashboard "Delivered today" section enhancement (#16(d)). COD confirmation flow (#12 → PR-NEXT-3). Delivery proof photo (#13 → PR-NEXT-6).
+
+## PR 50 — Delivery partner notification radius `[Phase 50]` — **GEO SYSTEM 5/5 COMPLETE**
+
+- [x] **Why this PR exists.** Fifth and final PR of the geo system.
+      Today's `sendNewPickupPushToDelivery` trigger pushes a new-
+      pickup notification to **every** online delivery partner
+      regardless of location — a partner in north Faridabad pinged
+      about an order in south Faridabad they'd never accept. PR 50
+      finally **uses** the data the previous geo PRs wired up
+      (`Order.shopLocation` from PR 49, `users/{uid}.currentLocation`
+      from PR 49) to filter the push fan-out by per-partner radius.
+      **Goal #6** ("server-gated true push filtering") of the geo
+      system — done. Sudhir's "only within 2 km" requirement is
+      satisfied by a configurable 1–50 km per-partner radius with a
+      3 km default. **Side effect:** fixes **finding #8** (Online
+      toggle persistence across screen navigations) via the new
+      `getMyDeliverySettings` read on focus.
+
+- [x] **What shipped.**
+      - **Pure helper** `@c:\Users\dahiy\grocery-mvp\functions\src\notificationRadiusHelpers.ts` — `filterPartnersByNotificationRadius` + `DEFAULT_PARTNER_NOTIFICATION_RADIUS_KM = 3`. **Server-only** (no client mirror — the filter runs inside the push trigger; partners never see the decision logic). Fail-OPEN rules: missing `shopLocation` → keep all; missing partner `currentLocation` → keep partner; invalid `notificationRadiusKm` (0 / NaN / Infinity / negative) → 3 km default. Boundary INCLUSIVE.
+      - **Trigger filter** in `@c:\Users\dahiy\grocery-mvp\functions\src\index.ts` `sendNewPickupPushToDelivery` — after the `users where isDelivery && deliveryStatus==online` query, apply `filterPartnersByNotificationRadius(allOnline, after.shopLocation)`; collect tokens from the filtered set only. New "no in-range partners" early-return branch with structured log.
+      - **`approveDeliveryRole` seed** — first approve writes `notificationRadiusKm: 3` onto `users/{uid}`. Idempotent on re-approval (customized values preserved).
+      - **`updateMyDeliverySettings({ notificationRadiusKm })`** — new callable, delivery-role-gated, strict 1–50 integer guard (rejects NaN / Infinity / non-integer / out-of-range BEFORE the Firestore write).
+      - **`getMyDeliverySettings()`** — new callable, returns `{ deliveryStatus, notificationRadiusKm }` so the dashboard can re-hydrate its own state on focus.
+      - **`orderService.updateMyDeliverySettings` + `getMyDeliverySettings`** in `@c:\Users\dahiy\grocery-mvp\src\services\orderService.ts` (native + web branches, mirroring `setDeliveryStatus`).
+      - **Dashboard wiring** in `@c:\Users\dahiy\grocery-mvp\src\screens\delivery\DeliveryDashboardScreen.tsx`:
+        - Four new `useState`s (`notificationRadiusKm`, `radiusInput`, `savingRadius`, `radiusError`) above conditional early returns.
+        - `getMyDeliverySettings` read in the existing `useFocusEffect` (alongside the PR 49 location capture) — also re-hydrates the Online switch, **fixing finding #8**.
+        - New settings card directly below the Online card: numeric input + "km" label + Save button + inline help/error. Client mirrors server's 1–50 integer guard.
+        - Save button is dirty-aware (disabled when the input matches the persisted value).
+      - **Hardcoded `3` mirror in the dashboard** with a comment pointing at `DEFAULT_PARTNER_NOTIFICATION_RADIUS_KM` in `functions/`. Same posture as the other server constants — no `functions/` import from `src/`.
+
+- [x] **Tests.** 13 new cases in `@c:\Users\dahiy\grocery-mvp\tests\functions\notificationRadiusHelpers.test.ts`. Suite green at **943 / 943**, up from 930.
+      - Within-radius kept / beyond dropped; **boundary inclusive**.
+      - Partner missing `currentLocation` → kept (fail-open); also `null` and non-finite-coord variants.
+      - Shop `shopLocation` missing or non-finite → ALL partners kept.
+      - `notificationRadiusKm` absent / 0 / negative / NaN / Infinity → falls back to 3 km default.
+      - Per-partner override honored independently of default.
+      - Empty input → empty output; no mutation of input / rows.
+      - Pin: `DEFAULT_PARTNER_NOTIFICATION_RADIUS_KM === 3`.
+
+- [ ] **Cloud Run IAM verification (post-deploy).** Two new + one redeployed public callables:
+
+      ```powershell
+      gcloud run services get-iam-policy updatemydeliverysettings `
+        --region=asia-south1 --project=grocery-mvp-dev
+      gcloud run services get-iam-policy getmydeliverysettings `
+        --region=asia-south1 --project=grocery-mvp-dev
+      ```
+
+      Add `allUsers / run.invoker` to either if missing:
+
+      ```powershell
+      gcloud run services add-iam-policy-binding <svc> `
+        --region=asia-south1 --project=grocery-mvp-dev `
+        --member=allUsers --role=roles/run.invoker
+      ```
+
+      `sendNewPickupPushToDelivery` is a background trigger — no `allUsers` needed. `approveDeliveryRole` is admin-only — no `allUsers` needed.
+
+- [ ] **Deploy plan.**
+      1. `npm run test:unit` — green (943/943 currently).
+      2. ```powershell
+         firebase deploy --only `
+           functions:sendNewPickupPushToDelivery,functions:approveDeliveryRole,functions:updateMyDeliverySettings,functions:getMyDeliverySettings
+         ```
+      3. Cloud Run IAM verify (above) on `updateMyDeliverySettings` + `getMyDeliverySettings`.
+      4. `eas update --branch production --message "PR 50 partner notification radius"`. OTA-safe — pure JS, no new native module / permission, no `app.json` change.
+
+- [ ] **Smoke acceptance (7 steps, two phones).**
+      1. **Default seeded on new approve** → Admin approves a new delivery partner. `users/{uid}.notificationRadiusKm === 3` in Firestore console immediately after approval.
+      2. **Finding #8 fix — Online toggle persistence** → Existing partner toggles Online → navigates away → returns to dashboard. The Online switch stays ON. (Pre-PR-50 it reset to Offline.)
+      3. **Radius save persists** → Partner changes radius to 5, taps Save → "Save" feedback → navigates away and back → field shows 5. Repeat with an out-of-range value (60) → inline error, no save round-trip.
+      4. **In-range partner gets push** → Partner A in Ballabgarh with radius 5 km. Place an order from a Ballabgarh shop (~2 km from A's reported location). Partner A receives push within ~5s.
+      5. **Out-of-range partner does NOT get push** → Partner B in Faridabad (~12 km from same shop) with the default 3 km radius. Place the same order. Partner B does NOT receive push. Confirm via Cloud Run logs that the trigger ran and "no in-range delivery people" (or that Partner B was filtered) appears.
+      6. **Fail-open: partner without `currentLocation`** → Partner C online but never opened dashboard with location granted (no `currentLocation` field on their user doc). Place an order. Partner C receives the push (we don't silently exclude work).
+      7. **Fail-open: legacy order without `shopLocation`** → Skip if no legacy orders exist in pilot data. If a pre-PR-49 order is force-flipped to `ready_for_pickup`, all online partners receive the push regardless of distance.
+
+- [ ] **Doc trail.** Mark PR 50 SHIPPED in `@c:\Users\dahiy\grocery-mvp\docs\GEO_DISTANCE_SYSTEM_DESIGN.md` (done — see "PR 50" section); update finding #8 status in `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md`; bump the test-suite count in `CLAUDE.md` if it's referenced there.
+
+- [ ] **Out of scope (deferred).** Geohash-based partner queries (read-all-then-filter is fine until hundreds of partners); customer-facing partner-availability indicator (finding #9 → later PR); per-shop notification preferences; background location tracking (design decision #5 still holds).
+
 ## PR 49 — Delivery partner routing + service-area save fix `[Phase 49]`
 
 - [x] **Why this PR exists.** Fourth PR of the geo system. The

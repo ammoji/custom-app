@@ -111,6 +111,8 @@ export default function ActiveOrdersRail({ orders, onTap, nowMs }: Props) {
               <View style={styles.chipRow}>
                 <OrderStatusChip
                   status={order.status}
+                  pickedUpAt={order.pickedUpAt}
+                  deliveredAt={order.deliveredAt}
                   audience="customer"
                 />
               </View>

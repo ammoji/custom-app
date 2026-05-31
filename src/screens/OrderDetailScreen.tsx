@@ -248,6 +248,12 @@ export default function OrderDetailScreen() {
   // Cancel then Pay-Now in quick succession remains possible (the
   // server-side handler rejects the impossible second one).
   const guardedRetryPayment = usePressGuard(handleRetryPayment);
+  // PR-NEXT-3 — Pay-online-now button on COD orders. Separate guard
+  // from `guardedRetryPayment` because the underlying callable
+  // (`payCodOrder` vs `retryPayment`) and preconditions differ, but
+  // both flip `paying` so the in-flight Razorpay overlay can't be
+  // re-triggered from either button.
+  const guardedPayCodOrder = usePressGuard(handlePayCodOrder);
   const guardedCancel = usePressGuard(handleCancel);
   const guardedWindowCancel = usePressGuard(handleWindowCancel);
 
@@ -335,7 +341,12 @@ export default function OrderDetailScreen() {
                 delivery" when the internal status is
                 ready_for_pickup. Familiar phrasing; matches what
                 every other delivery app shows. */}
-            <OrderStatusChip status={order.status} audience="customer" />
+            <OrderStatusChip
+              status={order.status}
+              pickedUpAt={order.pickedUpAt}
+              deliveredAt={order.deliveredAt}
+              audience="customer"
+            />
             <Text style={styles.orderId}>{order.id}</Text>
           </View>
           <Text style={styles.placedAt}>Placed {formatOrderTime(order.createdAt)}</Text>
@@ -634,6 +645,47 @@ export default function OrderDetailScreen() {
             </View>
           )}
 
+        {/* PR-NEXT-3 §G (finding #12 Part A) — customer-initiated
+            COD → online conversion. Gated on:
+              - paymentMethod === 'cod' (original choice was cash)
+              - paymentStatus !== 'paid' (race-guard with Part B —
+                the partner may have just confirmed cash)
+              - status not in delivered/cancelled (terminal states)
+            Server enforces every gate too; this client check just
+            keeps the affordance invisible when it's pointless. The
+            button reuses the `paying` state hoist + the existing
+            `guardedPayCodOrder` press guard so a re-entrant tap
+            while Razorpay is opening is a no-op.
+
+            On Razorpay success the screen calls `confirmPayment`
+            with the signature triple, which on the server stamps
+            `paidMethod: 'online'` and fans out the COD-conversion
+            push to shop / admin / delivery. */}
+        {order.paymentMethod === 'cod' &&
+          order.paymentStatus !== 'paid' &&
+          order.status !== 'delivered' &&
+          order.status !== 'cancelled' && (
+            <View style={styles.recoveryCard}>
+              <Text style={styles.recoveryTitle}>Prefer to pay online?</Text>
+              <Text style={styles.recoverySubtitle}>
+                Switch this order to online payment — UPI, card, or
+                wallet. No need to find cash when the partner arrives.
+              </Text>
+              <View style={{ height: spacing.md }} />
+              <Button
+                title={
+                  paying
+                    ? 'Opening payment…'
+                    : `💳 Pay ${formatRupees(order.total)} online now`
+                }
+                onPress={guardedPayCodOrder}
+                loading={paying}
+                disabled={paying || cancelling}
+                fullWidth
+              />
+            </View>
+          )}
+
         {/* PR 19 fix — COD cancel. COD orders had NO cancel UI until
             this fix. The 2-min window above is online-paid-only
             (because there's a refund to handle). For COD there's no
@@ -829,6 +881,109 @@ export default function OrderDetailScreen() {
       setPaying(false);
       showAlert(
         'Could not retry payment',
+        err?.message ?? 'Try again in a moment.',
+      );
+    }
+  }
+
+  // PR-NEXT-3 §G (finding #12 Part A) — customer-initiated COD →
+  // online conversion. Mirrors `handleRetryPayment` above, with
+  // two key differences:
+  //   1. Calls `payCodOrder` (not `retryPayment`) — different
+  //      server-side preconditions (COD-only, race-guard against
+  //      partner Part B).
+  //   2. On Razorpay success calls `confirmPayment` explicitly
+  //      (the same pattern `CheckoutScreen` uses on first-time
+  //      online checkout). `retryPayment` above relies on the
+  //      webhook backstop; for COD conversion we want immediate
+  //      confirmation because the COD-conversion fan-out push
+  //      fires from inside `confirmPayment`, not from the
+  //      webhook. Without this explicit call the shop owner /
+  //      admin / delivery partner wouldn't see the "paid online"
+  //      push for ~30 seconds, which is enough time for the
+  //      partner to call the customer asking for cash. Failure
+  //      of `confirmPayment` falls back to the webhook so the
+  //      order eventually flips to paid regardless.
+  async function handlePayCodOrder(): Promise<void> {
+    if (!order) return;
+    setPaying(true);
+    try {
+      const session = await orderService.payCodOrder(order.id);
+      await new Promise<void>(resolve => {
+        openRazorpayCheckout({
+          key: session.razorpayKeyId,
+          order_id: session.razorpayOrderId,
+          amount: Math.round(session.total * 100),
+          currency: 'INR',
+          name: 'grocery-mvp',
+          description: `Order ${order.id} (COD → online)`,
+          prefill: {
+            name: order.deliveryAddress.name,
+            contact: order.deliveryAddress.phone,
+          },
+          theme: { color: colors.primary },
+          handler: async response => {
+            Analytics.payment_success({
+              order_id: order.id,
+              value: session.total,
+            });
+            // PR-NEXT-3 — explicit confirmPayment so the server's
+            // COD-conversion fan-out fires immediately (see
+            // `confirmPayment` post-write block in
+            // `functions/src/index.ts`). Webhook backstop is the
+            // safety net if this call fails (network blip /
+            // signature edge case) — the order still flips to
+            // paid via `razorpayWebhook → payment.captured`.
+            try {
+              await orderService.confirmPayment({
+                orderId: order.id,
+                razorpayPaymentId: response.razorpay_payment_id,
+                razorpaySignature: response.razorpay_signature,
+              });
+            } catch (e: any) {
+              console.warn(
+                '[OrderDetail] confirmPayment after payCodOrder failed; relying on webhook:',
+                e?.message ?? e,
+              );
+              Sentry.captureMessage(
+                `confirmPayment-after-payCodOrder failed for order ${order.id}: ${e?.message ?? 'unknown'}`,
+                'warning',
+              );
+            }
+            setPaying(false);
+            resolve();
+          },
+          modal: {
+            ondismiss: () => {
+              setPaying(false);
+              showAlert(
+                'Payment cancelled',
+                'Your order is still set to Cash on Delivery. You can try paying online again any time.',
+              );
+              resolve();
+            },
+          },
+          onError: (err: any) => {
+            setPaying(false);
+            const reason: string =
+              err?.error?.description ?? err?.description ?? 'unknown';
+            Analytics.payment_failed({ order_id: order.id, reason });
+            Sentry.captureMessage(
+              `payCodOrder Razorpay failed for order ${order.id}: ${reason}`,
+              'warning',
+            );
+            showAlert(
+              'Payment failed',
+              reason === 'unknown' ? 'Please try again.' : reason,
+            );
+            resolve();
+          },
+        });
+      });
+    } catch (err: any) {
+      setPaying(false);
+      showAlert(
+        'Could not start online payment',
         err?.message ?? 'Try again in a moment.',
       );
     }

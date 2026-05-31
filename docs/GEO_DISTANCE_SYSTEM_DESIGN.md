@@ -307,16 +307,26 @@ The keystone. Everything else depends on it.
 - Partner sees the locked delivery location type ("Home" vs
   "Current location").
 
-### PR 50 — Delivery partner notification radius
+### PR 50 — Delivery partner notification radius ✅ SHIPPED (May 31 2026) — **GEO SYSTEM 5/5 COMPLETE**
 
-- `notificationRadiusKm` on `User` + a setting in the delivery
-  partner's profile.
-- The order-ready notify trigger reads online delivery partners,
-  computes `haversine(partner.currentLocation, shop.location)`,
-  and pushes ONLY to partners within their own radius.
-- For pilot scale (handful of partners) a read-all-then-filter in
-  the trigger is fine — no geohashing needed until hundreds of
-  partners. (Note in code: geohash migration path for scale.)
+**Status:** Code-complete. 943/943 tests passing (13 new helper cases), tsc clean both client + functions. Awaiting deploy + smoke acceptance (see PRELAUNCH_CHECKLIST.md → "PR 50" section).
+
+**Sub-scope decisions actually shipped:**
+- **Server-only pure helper.** `functions/src/notificationRadiusHelpers.ts` — `filterPartnersByNotificationRadius` + `DEFAULT_PARTNER_NOTIFICATION_RADIUS_KM = 3`. **No client mirror** (the filter runs inside the push trigger; partners never see the decision logic). Mirrors the architectural decision in PR 49 where `deliveryRoutingHelpers` is client-only for the inverse reason.
+- **Fail-OPEN filter rules.** Missing `shopLocation` (legacy order) → keep all partners. Missing partner `currentLocation` (partner never opened the dashboard with location grant) → keep partner. Invalid `notificationRadiusKm` (0 / NaN / Infinity / negative) → fall back to the 3 km default. **Boundary inclusive** (distance === radius → kept), matching PR 47 + PR 48 boundary convention.
+- **Default seeded on `approveDeliveryRole`.** Idempotent on re-approval (already-customized values are preserved). Same posture as PR 47/48's seeding in `approveShop` for `deliveryChargeTiers` + `serviceRadiusKm`.
+- **Strict 1–50 integer write guard.** Server validates in `updateMyDeliverySettings` before the Firestore write; client mirrors the same range for fast feedback.
+- **`notificationRadiusKm` stays OUT of `UserProfile`.** Delivery-internal — same posture as `deliveryStatus`. Dashboard reads its own state via a dedicated `getMyDeliverySettings` callable rather than through `getMyProfile`.
+- **Bonus fix: finding #8 (Online toggle persistence).** `getMyDeliverySettings` returns `deliveryStatus` too, so the dashboard re-hydrates the Online switch from the server on every focus — the toggle no longer resets to Offline across screen navigations.
+- **Pilot-scale read-all-then-filter.** Geohash-based partner queries deferred until hundreds of partners; migration path noted inline in `sendNewPickupPushToDelivery` and here.
+
+**Goal #6 — server-side push filtering: ✅ done.** Sudhir's "only within 2 km" requirement is now satisfied by a configurable per-partner radius with a 3 km default. The geo system (PRs 46→50) is complete.
+
+**Deferred / out of scope:**
+- Geohash-based partner queries (read-all-then-filter is fine until ~100s of partners).
+- Customer-facing partner-availability indicator (finding #9 — later PR).
+- Per-shop notification preferences (partner opts into specific shops).
+- Background location tracking (design decision #5 still holds — foreground only).
 
 ## Key design decisions baked in
 
