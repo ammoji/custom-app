@@ -209,16 +209,20 @@ export default function ShopMenuItemEditScreen() {
 
   const handleDelete = () => {
     if (!item) return;
-    const isCustom = item.isCustom;
+    // PR-NEXT-4 §F (finding #5) — uniform copy. Pre-PR this branched
+    // on `isCustom`: custom items got "Delete custom item?
+    // permanently removed" and global items got "Disable this item?
+    // marked unavailable, can re-enable later." Post-PR both kinds
+    // are soft-deleted identically; the dual phrasing was the
+    // user-facing manifestation of the same asymmetric-behavior bug
+    // the server fix in §C closes.
     Alert.alert(
-      isCustom ? 'Delete custom item?' : 'Disable this item?',
-      isCustom
-        ? `${item.name} will be removed from your menu permanently.`
-        : `${item.name} will be marked unavailable. You can re-enable it later from the menu list.`,
+      'Remove this item from your menu?',
+      `${item.name} will be hidden from your shop's menu. Past orders containing this item will still show it correctly. You can re-add it later by creating a new custom item with the same details.`,
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: 'Keep it', style: 'cancel' },
         {
-          text: isCustom ? 'Delete' : 'Disable',
+          text: 'Remove from menu',
           style: 'destructive',
           onPress: async () => {
             setRemoving(true);

@@ -200,6 +200,20 @@ export type MenuItem = {
   isCustom: boolean;
   createdAt: number;
   updatedAt: number;
+  // PR-NEXT-4 (finding #5) — soft-delete timestamp. Written by
+  // `removeMenuItem` (both custom + global items use the unified
+  // soft-delete now). All menu listings (`listMyShopMenu`,
+  // `listShopMenuPublic`, `searchMenuPublic`,
+  // `bulkUpdateMenuAvailability`'s candidate query) filter
+  // `deletedAt == null` server-side via the pure helper
+  // `excludeDeleted` from `src/utils/menuListingHelpers.ts`, so a
+  // deleted item effectively disappears from every read surface.
+  // Order history is unaffected because `CartItem` snapshots
+  // name/price/imageUrl at order-time — orders never read back from
+  // the live menu doc. Optional / back-compat: legacy menu items
+  // without the field are treated as not-deleted (no migration
+  // needed). Same posture as `paidMethod` (PR-NEXT-3).
+  deletedAt?: number | null;
 };
 
 // Input for addCustomMenuItem callable. imageUrl + stock are optional;

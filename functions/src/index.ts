@@ -1,6 +1,11 @@
 import { initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-import { FieldValue, getFirestore } from 'firebase-admin/firestore';
+// PR-NEXT-4 — DO NOT REMOVE. `FieldPath` is used by
+// `bulkUpdateMenuAvailability` for the documentId() chunk query
+// against the shop's menu subcollection. Auto-formatter risk per
+// code-discipline; if tsc complains "Cannot find name 'FieldPath'",
+// re-add this import.
+import { FieldPath, FieldValue, getFirestore } from 'firebase-admin/firestore';
 // PR 6.1 — DO NOT REMOVE. Used by `getMenuImageUploadUrl` callable.
 // Auto-formatter stripped this once during PR 6.1 development.
 import { getStorage } from 'firebase-admin/storage';
@@ -2235,34 +2240,51 @@ export const bulkUpdateMenuAvailability = onCall<{
     }
     const { shopId, validIds, available } = check;
 
-    // Read all candidate docs first; filter by shopId + existence;
-    // batch-write only those that match. Firestore `in` query is
-    // limited to 30 ids per batch in v9+, so we chunk if needed —
-    // BULK_MENU_MAX_IDS = 100 ⇒ at most 4 chunks.
+    // PR-NEXT-4 §A (finding #4) — read all candidate docs from THIS
+    // SHOP'S menu subcollection. Pre-PR this queried
+    // `db.collection('menuItems')` — a top-level collection that
+    // doesn't exist; per-shop menu items live at
+    // `shops/{shopId}/menu/{menuItemId}` (Phase 12a-v2-ii). Every
+    // query returned empty, every ID got bucketed as `skippedCount`,
+    // and the user-facing error "item may no longer exist"
+    // misdirected diagnosis. Once the query is scoped to the shop's
+    // own subcollection, every returned doc belongs to that shop by
+    // construction — the old `data.shopId === shopId` filter is
+    // dead code and is dropped here.
+    //
+    // Also skip soft-deleted items (`deletedAt != null`, PR-NEXT-4
+    // §C) — toggling `available` on a deleted item would be a
+    // wasted write and confusing if a future admin tool ever
+    // surfaces deleted items back.
+    //
+    // Firestore `in` query is limited to 30 ids per batch in v9+, so
+    // we chunk — BULK_MENU_MAX_IDS = 100 ⇒ at most 4 chunks.
     const CHUNK = 30;
+    const menuRef = db.collection(`shops/${shopId}/menu`);
     const matchedIds: string[] = [];
     for (let i = 0; i < validIds.length; i += CHUNK) {
       const chunk = validIds.slice(i, i + CHUNK);
-      const snap = await db
-        .collection('menuItems')
-        .where('__name__', 'in', chunk)
+      // eslint-disable-next-line no-await-in-loop
+      const snap = await menuRef
+        .where(FieldPath.documentId(), 'in', chunk)
         .get();
       for (const doc of snap.docs) {
-        const data = doc.data() as { shopId?: unknown };
-        if (data.shopId === shopId) {
-          matchedIds.push(doc.id);
-        }
+        const data = doc.data() as { deletedAt?: unknown };
+        if (data.deletedAt != null) continue; // skip soft-deleted
+        matchedIds.push(doc.id);
       }
     }
 
     // Batch write. Firestore batches are capped at 500 ops; 100 ids
-    // fits comfortably in a single batch.
+    // fits comfortably in a single batch. PR-NEXT-4 also flips
+    // `updatedAt` to `serverTimestamp()` (was `Date.now()`) — the
+    // PR 48 §I getMyShop orderBy mixed-type bug applies here too.
     if (matchedIds.length > 0) {
       const batch = db.batch();
       for (const id of matchedIds) {
-        batch.update(db.collection('menuItems').doc(id), {
+        batch.update(menuRef.doc(id), {
           available,
-          updatedAt: Date.now(),
+          updatedAt: FieldValue.serverTimestamp(),
         });
       }
       await batch.commit();
@@ -5784,7 +5806,16 @@ export const listMyShopMenu = onCall(
       );
     }
     const snap = await db.collection(`shops/${shopId}/menu`).get();
-    const items = snap.docs.map(d => d.data() as Record<string, any>);
+    // PR-NEXT-4 §D (finding #5) — drop soft-deleted items in-memory
+    // (Firestore `where('deletedAt', '==', null)` doesn't match
+    // docs where the field is absent, which would silently exclude
+    // every legacy pre-PR-NEXT-4 menu item — a regression worse
+    // than the bug we're fixing). Menu sizes are tiny, so the cost
+    // of the in-memory filter is negligible. Same posture in
+    // `listShopMenuPublic` and `searchMenuPublic` below.
+    const items = snap.docs
+      .map(d => d.data() as Record<string, any>)
+      .filter(i => i.deletedAt == null);
     // Sort client-of-Function-side to avoid a composite index just
     // for this list. The catalog is small.
     items.sort((a, b) => {
@@ -6201,11 +6232,29 @@ export const addCustomMenuItem = onCall<{
   },
 );
 
-// Removes a menu item. Semantics differ by item type:
-//   - CUSTOM: hard delete (no upstream reference, safe to drop).
-//   - GLOBAL: soft-disable via available=false; we keep the row so
-//             the owner's price/stock customizations aren't lost the
-//             next time they re-enable it.
+// PR-NEXT-4 §C (finding #5) — UNIFIED soft-delete. Pre-PR behavior
+// was asymmetric:
+//   - CUSTOM: hard-deleted (the doc was physically removed).
+//   - GLOBAL: soft-disabled via `available: false` (the doc stayed
+//             in the menu, just marked unavailable).
+// The shopkeeper saw "Delete" do different things in different
+// cases and reported it as "delete doesn't work" (finding #5):
+// they hit Delete on a global item and it remained in the menu
+// list, just struck through. Customers also kept seeing "removed"
+// items on the unavailable list.
+//
+// Post-PR: every delete writes `deletedAt: serverTimestamp()` +
+// `available: false` (defense-in-depth) and every listing surface
+// (`listMyShopMenu`, `listShopMenuPublic`, `searchMenuPublic`,
+// `bulkUpdateMenuAvailability`) drops `deletedAt != null` rows via
+// the pure helper `excludeDeleted` from
+// `src/utils/menuListingHelpers.ts`. The doc stays in Firestore so
+// an admin can forensically recover via the Firestore console; no
+// undelete UI in this PR.
+//
+// Order history is unaffected because `CartItem` snapshots
+// name/price/imageUrl at order-time; orders never read back from
+// the live menu doc.
 export const removeMenuItem = onCall<{ menuItemId: string }>(
   { cors: true, enforceAppCheck: false },
   async request => {
@@ -6229,14 +6278,18 @@ export const removeMenuItem = onCall<{ menuItemId: string }>(
     if (!snap.exists) {
       throw new HttpsError('not-found', 'Menu item not found');
     }
-    const data = snap.data() as { isCustom?: boolean };
-
-    if (data.isCustom) {
-      await ref.delete();
-      return { ok: true, deleted: true };
-    }
-    await ref.update({ available: false, updatedAt: Date.now() });
-    return { ok: true, deleted: false, softDisabled: true };
+    // PR-NEXT-4 §C — single uniform soft-delete write. The pre-PR
+    // `if (data.isCustom) ref.delete() else ref.update({available:
+    // false})` branch is gone — both kinds of items get the same
+    // treatment. Idempotent: re-deleting an already-deleted item
+    // just refreshes `deletedAt` to the new timestamp — harmless,
+    // and avoids a precondition error on a stale tap.
+    await ref.update({
+      deletedAt: FieldValue.serverTimestamp(),
+      available: false,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    return { ok: true as const };
   },
 );
 
@@ -6278,6 +6331,12 @@ export const listShopMenuPublic = onCall<{ shopId: string }>(
       .get();
     const items = menuSnap.docs
       .map(d => ({ id: d.id, ...d.data() }) as Record<string, any>)
+      // PR-NEXT-4 §D — also drop soft-deleted. The `available == true`
+      // server-side filter above is defense-in-depth (removeMenuItem
+      // sets BOTH `available: false` and `deletedAt`), but a future
+      // editor that updates `available` without touching `deletedAt`
+      // shouldn't be able to "un-delete" by re-enabling availability.
+      .filter(i => i.deletedAt == null)
       .filter(i => i.stock === null || (typeof i.stock === 'number' && i.stock > 0));
 
     return {
@@ -6619,9 +6678,15 @@ export const searchMenuPublic = onCall<{
       .where('available', '==', true)
       .get();
 
-    const rawItems = menuSnap.docs.map(
-      d => ({ id: d.id, ...d.data() }) as RawMenuItem,
-    );
+    // PR-NEXT-4 §D — drop soft-deleted before the pure
+    // filterAndJoinSearchResults helper, so the helper itself stays
+    // unaware of the new field (its existing test matrix in
+    // `searchMenuPublicHelpers.test.ts` continues to pass without
+    // a `deletedAt` axis). Same in-memory rationale as the other
+    // listings above.
+    const rawItems = menuSnap.docs
+      .map(d => ({ id: d.id, ...d.data() }) as RawMenuItem & { deletedAt?: unknown })
+      .filter(i => i.deletedAt == null);
 
     // 3. Pure filter + join. Keeps the substring/category/stock/cap
     //    rules testable without firebase-admin.

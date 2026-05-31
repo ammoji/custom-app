@@ -853,17 +853,25 @@ export const orderService = {
     };
   },
 
+  // PR-NEXT-4 §E (finding #5) — return shape simplified from
+  // `{ deleted: boolean; softDisabled?: boolean }` to `{ ok: true }`.
+  // Every delete now removes the item from listings uniformly
+  // (custom + global); the discriminator is gone because there's
+  // nothing to discriminate. The only known caller —
+  // `ShopMenuItemEditScreen.handleDelete` — never read the old
+  // `.deleted` / `.softDisabled` flags, so this is a safe shape
+  // narrowing rather than a breaking change.
   async removeMenuItem(input: {
     menuItemId: string;
-  }): Promise<{ deleted: boolean; softDisabled?: boolean }> {
+  }): Promise<{ ok: true }> {
     if (isNative) {
       const fn = getNativeFunctions().httpsCallable('removeMenuItem');
       const result = await fn(input);
-      return result.data as { deleted: boolean; softDisabled?: boolean };
+      return result.data as { ok: true };
     }
     const fn = httpsCallable(functions, 'removeMenuItem');
     const result = await fn(input);
-    return result.data as { deleted: boolean; softDisabled?: boolean };
+    return result.data as { ok: true };
   },
 
   // Phase 12a-v2-iii: public read of a shop's available menu for the

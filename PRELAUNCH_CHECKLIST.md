@@ -8524,6 +8524,65 @@ immediately. The checklist is the only thing that survives memory.
       against the address proof or for PAN-specific tax
       flows), the schema split is purely additive. `[Post-launch]`
 
+## PR-NEXT-4 — Menu management: bulk-unavailable fix + unified soft-delete `[Phase NEXT-4]`
+
+- [x] **Why this PR exists.** Two shopkeeper menu-management bugs that together blocked any practical menu maintenance at pilot scale (findings **#4** + **#5** from `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md`).
+      - **#4** — bulk "Mark N unavailable" silently failed: shopkeeper selects 3 items, server reports "0 updated, 3 skipped (item may no longer exist)" even though the items clearly exist. Root cause: `bulkUpdateMenuAvailability` queried `db.collection('menuItems')` — a top-level collection that doesn't exist; per-shop menu items live in the **subcollection** `shops/{shopId}/menu/{menuItemId}` (Phase 12a-v2-ii). Every chunk-query returned empty.
+      - **#5** — Delete didn't behave like delete. The `removeMenuItem` callable hard-deleted custom items (gone from menu) but soft-disabled global items via `available: false` (stayed in menu, just marked unavailable). Shopkeepers reported it as "delete doesn't work" because the global-item case looked identical to "mark unavailable."
+
+- [x] **What shipped.**
+      - **Type:** `deletedAt?: number | null` added to `MenuItem` in `@c:\Users\dahiy\grocery-mvp\src\types\index.ts` (optional → back-compat with legacy items; matches the `paidMethod` posture from PR-NEXT-3).
+      - **Pure helper** `@c:\Users\dahiy\grocery-mvp\src\utils\menuListingHelpers.ts` — `isMenuItemDeleted` + `excludeDeleted`. Defensive for absent / null / 0 / Timestamp / string `deletedAt` shapes; pinned by 15 tests.
+      - **`bulkUpdateMenuAvailability`** (`@c:\Users\dahiy\grocery-mvp\functions\src\index.ts`): now queries `shops/{shopId}/menu` via `FieldPath.documentId() in chunk`; the pre-PR `data.shopId === shopId` filter became dead code (subcollection scope guarantees it) and was dropped. Skips `deletedAt != null` rows. Bumped `updatedAt` write to `FieldValue.serverTimestamp()` (was `Date.now()`) — same PR 48 §I mixed-type orderBy bug class.
+      - **`removeMenuItem`** (same file): unified soft-delete — every delete writes `deletedAt: serverTimestamp() + available: false + updatedAt: serverTimestamp()`. The pre-PR `if (data.isCustom) ref.delete() else ref.update({available: false})` branch is gone. Idempotent on re-deletion (just refreshes `deletedAt`).
+      - **Listings** — three sites filter `deletedAt == null` in-memory before returning items:
+        - `listMyShopMenu` — shopkeeper menu management.
+        - `listShopMenuPublic` — customer ShopDetailScreen.
+        - `searchMenuPublic` — cross-shop customer search (collection-group query).
+      - **Why in-memory not server-side:** Firestore `where('deletedAt', '==', null)` does NOT match docs where the field is **absent** (only docs where it's explicitly stored as `null`). Legacy pre-PR menu items have no `deletedAt` field at all; a server-side filter would silently exclude every one of them — a regression worse than the bug we're fixing. Menu sizes are tiny (~30 in the global catalog, ≤ a few hundred per shop) so the in-memory filter cost is negligible.
+      - **Client wrapper** in `@c:\Users\dahiy\grocery-mvp\src\services\orderService.ts`: `removeMenuItem` return shape narrowed from `{ deleted: boolean; softDisabled?: boolean }` → `{ ok: true }`. Only known caller (`ShopMenuItemEditScreen.handleDelete`) never read the discriminator — safe shape narrowing.
+      - **UI copy** — `@c:\Users\dahiy\grocery-mvp\src\screens\shop\ShopMenuItemEditScreen.tsx` Delete confirmation no longer branches on `isCustom`; both cases show "Remove this item from your menu?" / "Remove from menu" / "Keep it" so the user-facing language matches the now-uniform server behavior.
+
+- [x] **Tests.** 15 new cases in `@c:\Users\dahiy\grocery-mvp\tests\utils\menuListingHelpers.test.ts`. Suite green at **1031 / 1031**, up from 1016.
+      - 7 cases for `isMenuItemDeleted` covering the absent / null / undefined / 0 / positive-epoch-ms / Date / string axes.
+      - 8 cases for `excludeDeleted` covering null / undefined / non-array / order-preservation / mixed live-and-deleted / empty / all-deleted / generic-shape.
+      - Order-history preservation is verified by smoke step 5 (live read of past orders renders correctly because `CartItem` snapshots `name + price + imageUrl` at order-time and never reads back from the live menu doc).
+
+- [ ] **Cloud Run IAM verification (post-deploy).** No new public callables; the redeployed ones (`bulkUpdateMenuAvailability`, `removeMenuItem`, `listMyShopMenu`, `listShopMenuPublic`, `searchMenuPublic`) all already have the `allUsers` binding from prior deploys. Recurring gotcha — Firebase has occasionally stripped the binding on redeploy; verify after `firebase deploy`:
+
+      ```powershell
+      gcloud run services get-iam-policy bulkupdatemenuavailability --region=asia-south1 --project=grocery-mvp-dev
+      gcloud run services get-iam-policy removemenuitem --region=asia-south1 --project=grocery-mvp-dev
+      gcloud run services get-iam-policy listmyshopmenu --region=asia-south1 --project=grocery-mvp-dev
+      gcloud run services get-iam-policy listshopmenupublic --region=asia-south1 --project=grocery-mvp-dev
+      gcloud run services get-iam-policy searchmenupublic --region=asia-south1 --project=grocery-mvp-dev
+      ```
+
+      Re-add `allUsers / roles/run.invoker` to any that lost it.
+
+- [ ] **Deploy plan.**
+      1. `npm test` — green (1031/1031 currently).
+      2. ```powershell
+         firebase deploy --only "functions:bulkUpdateMenuAvailability,functions:removeMenuItem,functions:listMyShopMenu,functions:listShopMenuPublic,functions:searchMenuPublic"
+         ```
+      3. Cloud Run IAM verify (above).
+      4. ```powershell
+         eas update --branch production --message "PR-NEXT-4 menu bulk-unavailable fix + unified soft-delete"
+         ```
+         OTA-safe — no native module / no permission / no `app.json` change.
+
+- [ ] **Smoke acceptance (6 steps).**
+      1. **Finding #4 — bulk on real items.** ShopMenuScreen → select 3 items → tap "Mark 3 unavailable" → confirm. **Expected:** "Updated 3, skipped 0." Pre-fix: "Updated 0, skipped 3 (item may no longer exist)."
+      2. **Finding #4 — audit log.** After step 1, check the new audit-log entry for the bulk op. **Expected:** `metadata.skippedCount: 0`. (Cross-shop safety is automatic now — subcollection scope guarantees only this shop's items are touched.)
+      3. **Finding #5 — delete a CUSTOM item.** Custom item edit screen → Remove from menu → confirm. **Expected:** item disappears from shopkeeper's menu list immediately. Customer (other device) refreshes ShopDetailScreen → item is gone there too.
+      4. **Finding #5 — delete a GLOBAL item.** Same flow on a global (non-custom) item. **Expected:** identical behavior — gone from BOTH shopkeeper menu list AND customer-facing list. Pre-fix the global item would have stayed in both lists, just marked unavailable.
+      5. **Order history preservation.** After deleting an item, open a past order that contained it. **Expected:** item name + image + price still render correctly (snapshot embedded in `order.items[]`, not a live menu read).
+      6. **Bulk + soft-delete interaction.** Delete an item, then run a bulk "Mark unavailable" that includes the deleted item's ID among other live IDs. **Expected:** deleted item is silently skipped (filtered by `deletedAt != null` in the chunked query); other items in the bulk update process normally.
+
+- [x] **Doc trail.** Findings `#4` and `#5` marked **SHIPPED in PR-NEXT-4** in `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md`.
+
+- [ ] **Out of scope (deferred).** Undelete UI / "Archived items" view for shopkeepers or admins (forensic recovery via Firestore console only for now). Composite Firestore index for `deletedAt` (in-memory filter is sufficient at pilot scale and avoids index management). Hard-delete cleanup job for soft-deleted docs older than N days (storage is cheap; doc count is low). Renaming `removeMenuItem` → `deleteMenuItem` (the asymmetry was in the *behavior*, not the name; reusing the name keeps the diff small and matches the existing client wrapper). Customer-facing "this item was recently removed" hints (just gone from the menu).
+
 ## PR-NEXT-3 — COD payment conversion + delivery-partner confirmation `[Phase NEXT-3]`
 
 - [x] **Why this PR exists.** Pilot-blocker cluster for COD orders (finding **#12**, two parts). Most pilot orders will be COD; pre-PR (a) a customer who later wanted to pay online had to cancel + re-place, losing the partner's in-flight work, and (b) a partner could tap "Delivered" with zero recorded evidence of whether cash was actually exchanged. Also closes sub-(b) of finding **#16**.
