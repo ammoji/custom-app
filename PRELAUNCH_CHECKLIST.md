@@ -8524,6 +8524,73 @@ immediately. The checklist is the only thing that survives memory.
       against the address proof or for PAN-specific tax
       flows), the schema split is purely additive. `[Post-launch]`
 
+## PR-NEXT-8 — Reorder UX cluster: dismissable ✕ + accurate "Order again" rail copy `[Phase NEXT-8]`
+
+- [x] **Why this PR exists.** Two reorder-flow UX bugs from May 30 Android testing (findings **#14** + **#15** in `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md`). Both small, both broke the user's mental model on first encounter.
+      - **#14** — the ✕ glyph next to each Unavailable row in the Reorder modal was a static `<Text>` with no `onPress` (`@c:\Users\dahiy\grocery-mvp\src\components\order\ReorderModal.tsx:255` pre-PR). Every UI convention reads a red ✕ as "tap to dismiss"; customers tapped, nothing happened, the modal felt broken. The underlying filtering was already correct (`planToCartItems` only adds `available_*` lines to the cart) — the bug was purely about giving the ✕ the meaning users expected.
+      - **#15** — the "Order again" rail card subtext read `{N} orders` (lifetime delivered-count for that shop). Customers misread it as "tap to see a list of past orders," but the modal actually shows the items of a SINGLE order (the most recent one). The "3 orders → Add 4 items to cart" mismatch broke confidence on every first encounter.
+
+- [x] **What shipped.**
+      - **Pure helper** `@c:\Users\dahiy\grocery-mvp\src\utils\reorderModalDismissals.ts` — `addDismissedId(set, id)` (immutable update, idempotent on re-dismissal so React's setState reference-comparison can skip a re-render, no-op on null/undefined/empty) + `buildPlanKey(plan)` (stable string identity for plan contents — `${shopId}:${lineIds.join(',')}`). The screen owns the `useState<Set<string>>`; this module owns the contract so it's testable without `@testing-library/react-native` (which the suite doesn't host yet).
+      - **Modal wire-up** in `@c:\Users\dahiy\grocery-mvp\src\components\order\ReorderModal.tsx`: new `useState` + `useEffect` (above all conditional renders, Rule 2). Effect keys on `buildPlanKey(plan)` so the parent screen re-creating the same plan object across renders doesn't wipe the customer's dismissals mid-interaction. `visibleUnavailableLines` / `visibleUnavailableCount` derived from `plan.lines` minus `dismissedIds`. Section title now `Unavailable (${visibleUnavailableCount})` and the whole section disappears when the count hits 0. `UnavailableRow` gains an `onDismiss: () => void` prop wiring the ✕ to a real `Pressable` with `hitSlop={12}` + `accessibilityRole="button"` + `accessibilityLabel={`Dismiss ${name}`}`. New `dismissBtn` + `dismissIcon` styles preserve the pre-PR visual rhythm.
+      - **CTA + cart preserved** — `availableCount`, `subtotal`, and `planToCartItems` are unchanged. The CTA still says "Add N items to cart" with N = available items, and dismissing unavailable rows does NOT change N or what gets added to the cart.
+      - **`FrequentShopEntry.lastOrderItemCount`** added to `@c:\Users\dahiy\grocery-mvp\src\utils\pickFrequentlyOrderedShops.ts:35-48`. Populated from `mostRecent.items.length` inside the existing helper loop with an `Array.isArray` guard so malformed docs render "Last order · 0 items" rather than crashing the rail. Schema-additive only — no callable / Firestore changes.
+      - **Rail subtext copy** in `@c:\Users\dahiy\grocery-mvp\src\components\order\OrderAgainRail.tsx:91-95` flipped from `{N} orders` → `Last order · {N} items` with `numberOfLines={1}` so a fixed-card-width truncation is graceful on small phones. Lifetime frequency signal moved from copy to position (most-frequent shop comes first; PR 14's sort unchanged).
+
+- [x] **Tests.** 18 new cases. Suite green at **1066 / 1066**, up from 1048.
+      - 14 cases in `@c:\Users\dahiy\grocery-mvp\tests\utils\reorderModalDismissals.test.ts` covering `addDismissedId` (immutable update, idempotent re-dismissal preserves reference, prior-dismissal preservation, null / undefined / empty-string no-ops, sequential chaining) and `buildPlanKey` (null/undefined → null, identical-content stability, shopId/lines difference, line-order sensitivity, missing-lines / missing-shopId edge cases).
+      - 3 cases extended in `@c:\Users\dahiy\grocery-mvp\tests\utils\pickFrequentlyOrderedShops.test.ts`: most-recent-not-lifetime semantics for `lastOrderItemCount` (older 3-item order vs newer 5-item order at same shop), malformed `items: undefined` → 0, empty-array baseline → 0.
+
+- [ ] **Deploy plan.** Pure client OTA — no `firebase deploy`, no IAM verify, no Razorpay secret, no `app.json` change, no native module:
+
+      ```powershell
+      eas update --branch production --message "PR-NEXT-8 reorder UX cluster (dismissable X + rail copy)"
+      ```
+
+- [ ] **Smoke acceptance (14-step checklist from the PR prompt; abbreviated here, full version in `@c:\Users\dahiy\grocery-mvp\docs\pr-next-8-reorder-ux-cluster-windsurf-prompt.md`).**
+      - Part A (✕ dismissal, iOS first then Android): unavailable section shows N items with ✕ glyphs; tap one ✕ → row disappears + section title decrements; tap last ✕ → section header disappears; CTA copy stays "Add N items to cart" throughout (N = available); close + reopen modal → all unavailable rows back; verify cart contents on confirm = available items only.
+      - Part B (rail subtext): rail cards now read "Last order · M items" matching the reorder modal's row count on tap; rail still sorts by lifetime frequency.
+      - Regression: empty-menu / all-unavailable / price-drift cases still render; rail still hides itself entirely when no frequent shops; tsc clean; tests green.
+
+- [x] **Doc trail.** Findings `#14` and `#15` marked **SHIPPED in PR-NEXT-8** in `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md:205,213`.
+
+- [ ] **Out of scope (deferred).** Showing an actual list of past orders to pick from on tap (option (b) of finding #15 — bigger UX change; once option (a) is shipped, the copy honestly describes what happens). Undo affordance for dismissed rows (close-and-reopen restores; v1 doesn't need an explicit undo). Animating row removal on dismissal (`LayoutAnimation` is finicky on Android, instant is fine for a quick-fix PR). In-shop search (finding #6 / PR-NEXT-9 — separate, larger PR).
+
+## PR-NEXT-5 — Delivery dashboard error-banner dampening `[Phase NEXT-5]`
+
+- [x] **Why this PR exists.** Finding **#7** in `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md`. The delivery partner's dashboard repeatedly flashed "The network connection was lost. Retry." for a few seconds, then the banner disappeared, then it reappeared — with no actual outage on the partner's network. The two watchers (`watchAvailableDeliveries`, `watchMyDeliveries`) poll every 10–15s; a single shared blip (Cloud Run cold start, iOS TCP idle reap, brief Wi-Fi to cellular hand-off) put both into error on the same tick, and the existing reconciler showed the banner instantly. Partners lost confidence in the system long before they had any actual problem to act on.
+
+- [x] **What shipped.**
+      - **Pure helper** `@c:\Users\dahiy\grocery-mvp\src\utils\pollFailureGate.ts` — `applyPollOutcome({currentCount, outcome, threshold?}) → {nextCount, tripped, justTripped}`. Per-watcher consecutive-failure counter. `success` outcome resets to 0; `failure` increments. `tripped` flips at `nextCount >= threshold`; `justTripped` is true exactly once at the threshold-crossing transition (used to gate the Sentry `captureMessage` so it fires once per outage, not per failed poll). Default `POLL_FAILURE_THRESHOLD = 3` → ~45s at the slower 15s cadence. Defensive clamps for negative / NaN / Infinity / fractional `currentCount` so a future caller bug can't leave us stuck below threshold forever.
+      - **Wire-up** in `@c:\Users\dahiy\grocery-mvp\src\screens\delivery\DeliveryDashboardScreen.tsx:130-263`: replaced the simple `Error | null` flags with two closure counters + `outageCaptured` + `latestErrorMessage`. Both `watchAvailableDeliveries` and `watchMyDeliveries` callbacks call `applyPollOutcome`, then a shared `reconcileError` checks both counters against the threshold (banner only shows when BOTH are tripped, preserving the existing "both must error" gate at a temporal level), then `maybeCaptureOutage` fires the once-per-outage Sentry message. `breadcrumbForFailure` adds a Sentry breadcrumb on every failed poll with the `consecutiveFailures` count, the truncated `errorMessage`, and the firebase-functions `code` when present. `outageCaptured` resets to false whenever the banner clears so the next distinct outage fires its own captureMessage cleanly.
+      - **No watcher contract change** — `orderService.watchAvailableDeliveries` and `watchMyDeliveries` keep their existing `cb(data, undefined) on success, cb([], err) on failure` shape. Other consumers (`watchMyDeliveries` from `OrderDetailScreen`, `watchShopOrders`, `watchAllOrders`, `watchOrder`) are untouched. The dampening is purely screen-local.
+      - **Retry button still works** — the existing "Retry" pill bumps `retryNonce` which re-fires the watcher effect, which resets the closure counters by virtue of the closure restart. Manual recovery path is still instant for the partner; they don't have to wait for the next 10/15s tick.
+
+- [x] **Tests.** 17 new cases in `@c:\Users\dahiy\grocery-mvp\tests\utils\pollFailureGate.test.ts`. Suite green at **1048 / 1048**, up from 1031.
+      - 4 cases for the success branch (count=0, mid-stream, post-tripped, with threshold-override).
+      - 5 cases for the failure branch (1st / 2nd / 3rd consecutive, mid-outage, deep into outage — the `tripped && !justTripped` contract).
+      - 2 cases for custom threshold override (1 → trips immediately, 5 → trips on the 5th).
+      - 4 defensive-clamp cases (negative, NaN, Infinity, fractional `currentCount`).
+      - 1 end-to-end recovery sequence (3 fails → tripped → mid-outage suppression → success → 3 more fails → second distinct outage with `justTripped` firing again).
+      - 1 constant-pin test (`POLL_FAILURE_THRESHOLD === 3`).
+
+- [ ] **Deploy plan.** Client-only, OTA-safe — no `firebase deploy`, no IAM verify, no Razorpay secret, no `app.json` change, no native module:
+
+      ```powershell
+      eas update --branch production --message "PR-NEXT-5 delivery dashboard error-banner dampening"
+      ```
+
+- [ ] **Smoke acceptance (5 steps, ~5 min on the delivery role).**
+      1. **Steady-state silence.** Sign in as delivery partner, leave dashboard open ~2 min on stable network. **Expected:** banner NEVER appears. Pre-fix: it would appear and disappear at least once during that window for most testers.
+      2. **Single-tick blip absorbed.** With Wi-Fi on, briefly toggle Airplane Mode on and off (<10s). One or both watchers will hit a transient failure but recover on the next tick. **Expected:** banner does NOT appear. Pre-fix: would appear for ~10–15s.
+      3. **Real outage shows correctly.** Turn Airplane Mode ON and leave it. After ~30–45s (three consecutive failures on both watchers), banner appears with "Network connection lost. Tap Retry." Tap Retry → instantly tries again (then fails) — fine. Turn Wi-Fi back on; next successful poll on either watcher clears the banner.
+      4. **Sentry captureMessage fires once per outage.** Check Sentry dashboard after step 3 — exactly **one** "Delivery dashboard outage" warning event, not three or seven. Click in and confirm the breadcrumb trail shows the lead-up failed polls with their `consecutiveFailures` counts.
+      5. **Recovery captures a new outage cleanly.** Repeat step 3 (second airplane-mode outage). A second distinct "Delivery dashboard outage" event should appear in Sentry — separate event, not appended to the first.
+
+- [x] **Doc trail.** Finding `#7` marked **SHIPPED in PR-NEXT-5** in `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md:118`.
+
+- [ ] **Out of scope (deferred).** Applying the same dampening to other polling watchers (`AdminOrdersScreen`, `ShopOwnerDashboardScreen`, `OrderDetailScreen`) — `pollFailureGate` is general-purpose and ready to reuse, but only one screen has the reported issue. Increasing Cloud Functions `minInstances` to eliminate cold starts (recurring cost, deferred per Sudhir's cost-conservative call). Adaptive backoff polling (state-machine over-engineering for the actual UX symptom). Bumping the poll intervals (snappy for the working case; dampening covers the failure case). In-banner countdown timer ("retrying in Xs" — not needed, Retry button is right there).
+
 ## PR-NEXT-4 — Menu management: bulk-unavailable fix + unified soft-delete `[Phase NEXT-4]`
 
 - [x] **Why this PR exists.** Two shopkeeper menu-management bugs that together blocked any practical menu maintenance at pilot scale (findings **#4** + **#5** from `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md`).

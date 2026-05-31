@@ -32,6 +32,14 @@ import Button from '../common/Button';
 import { colors, radii, spacing, typography } from '../../constants/theme';
 import { formatRupees } from '../../utils/format';
 import type { ReorderLine, ReorderPlan } from '../../utils/buildReorderPlan';
+// PR-NEXT-8 §A (finding #14) — pure helpers for the
+// dismissable-✕ behavior on Unavailable rows. Pulled into
+// `reorderModalDismissals.ts` so the logic is unit-testable
+// without bringing @testing-library/react-native into the suite.
+import {
+  addDismissedId,
+  buildPlanKey,
+} from '../../utils/reorderModalDismissals';
 
 type Props = {
   visible: boolean;
@@ -48,6 +56,26 @@ export default function ReorderModal({
   onConfirm,
   onCancel,
 }: Props) {
+  // PR-NEXT-8 §A (finding #14) — modal-local dismissal set for
+  // unavailable rows. Hooks discipline (Rule 2): both `useState`
+  // and `useEffect` sit ABOVE every conditional render. The
+  // existing component had no `if`-returns inside its body, but
+  // we follow the rule defensively in case future edits add one.
+  const [dismissedIds, setDismissedIds] = React.useState<Set<string>>(
+    () => new Set(),
+  );
+
+  // Reset the dismissal set whenever the modal opens with a new
+  // plan. We key on the plan's identity-stable contents (shopId +
+  // line IDs) instead of the plan object reference — the parent
+  // screen may re-create the same plan object across renders, and
+  // we don't want a re-render to wipe the customer's dismissals
+  // mid-interaction. See `buildPlanKey` JSDoc.
+  const planKey = buildPlanKey(plan);
+  React.useEffect(() => {
+    setDismissedIds(new Set());
+  }, [planKey]);
+
   // Subtotal preview: only available lines contribute, at CURRENT
   // (live) prices. Same number planToCartItems would surface in
   // the cart screen, so the customer doesn't see a jump.
@@ -58,6 +86,19 @@ export default function ReorderModal({
         (s, l) => s + (l.currentMenuItem?.price ?? 0) * l.oldQuantity,
         0,
       ) ?? 0;
+
+  // PR-NEXT-8 §A — derive the visible Unavailable list. The CTA
+  // count, subtotal, and `planToCartItems` (in the parent screen)
+  // are all unchanged: dismissing an unavailable row is a
+  // presentation-only act and never affects what gets added to
+  // the cart.
+  const allUnavailableLines = plan
+    ? plan.lines.filter(l => !l.status.startsWith('available_'))
+    : [];
+  const visibleUnavailableLines = allUnavailableLines.filter(
+    l => !dismissedIds.has(l.menuItemId),
+  );
+  const visibleUnavailableCount = visibleUnavailableLines.length;
 
   const ctaTitle = !plan
     ? 'Loading…'
@@ -114,16 +155,29 @@ export default function ReorderModal({
                 </Section>
               )}
 
-              {plan.unavailableCount > 0 && (
+              {/* PR-NEXT-8 §A (finding #14) — section title +
+                  rendered list both use the post-dismissal counts;
+                  whole section disappears when the customer has
+                  dismissed all unavailable rows. The underlying
+                  `plan.unavailableCount` is unchanged (it's the
+                  immutable plan's truth); the visible count is a
+                  presentation-only derivation. */}
+              {visibleUnavailableCount > 0 && (
                 <Section
-                  title={`Unavailable (${plan.unavailableCount})`}
+                  title={`Unavailable (${visibleUnavailableCount})`}
                   muted
                 >
-                  {plan.lines
-                    .filter(l => !l.status.startsWith('available_'))
-                    .map(l => (
-                      <UnavailableRow key={l.menuItemId} line={l} />
-                    ))}
+                  {visibleUnavailableLines.map(l => (
+                    <UnavailableRow
+                      key={l.menuItemId}
+                      line={l}
+                      onDismiss={() =>
+                        setDismissedIds(prev =>
+                          addDismissedId(prev, l.menuItemId),
+                        )
+                      }
+                    />
+                  ))}
                 </Section>
               )}
 
@@ -231,7 +285,17 @@ function AvailableRow({ line }: { line: ReorderLine }) {
   );
 }
 
-function UnavailableRow({ line }: { line: ReorderLine }) {
+// PR-NEXT-8 §A (finding #14) — `onDismiss` prop wires the ✕ glyph
+// to a real Pressable (was a static <Text> pre-PR). Hit-slop +
+// accessibilityLabel make the small touch target reliable on
+// Android (where row density is tighter than iOS).
+function UnavailableRow({
+  line,
+  onDismiss,
+}: {
+  line: ReorderLine;
+  onDismiss: () => void;
+}) {
   // Use live menu fields when present (e.g. out_of_stock), fall
   // back to the past-order snapshot for removed_from_menu (the
   // menu doc no longer exists).
@@ -252,7 +316,20 @@ function UnavailableRow({ line }: { line: ReorderLine }) {
           {line.reason ?? 'Unavailable'}
         </Text>
       </View>
-      <Text style={[styles.rowIcon, styles.rowIconMuted]}>✕</Text>
+      <Pressable
+        onPress={onDismiss}
+        hitSlop={12}
+        accessibilityRole="button"
+        accessibilityLabel={`Dismiss ${name}`}
+        style={({ pressed }) => [
+          styles.dismissBtn,
+          pressed && { opacity: 0.6 },
+        ]}
+      >
+        <Text style={[styles.rowIcon, styles.rowIconMuted, styles.dismissIcon]}>
+          ✕
+        </Text>
+      </Pressable>
     </View>
   );
 }
@@ -360,6 +437,16 @@ const styles = StyleSheet.create({
     marginLeft: spacing.sm,
   },
   rowIconMuted: { color: colors.textSecondary },
+  // PR-NEXT-8 §A (finding #14) — pressable touch target around the
+  // ✕ glyph. The padding gives Android comfortable hit area beyond
+  // the `hitSlop={12}` we already set on the Pressable; the glyph
+  // itself drops its left margin so the ROW's spacing comes from
+  // this wrapper instead (preserves the pre-PR visual rhythm).
+  dismissBtn: {
+    padding: spacing.xs,
+    marginLeft: spacing.sm,
+  },
+  dismissIcon: { marginLeft: 0 },
   totalRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',

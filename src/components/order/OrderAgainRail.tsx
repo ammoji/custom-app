@@ -74,9 +74,24 @@ export default function OrderAgainRail({ entries, onTap }: Props) {
               ratingCount={entry.ratingCount}
               size="sm"
             />
-            <Text style={styles.subtext}>
-              {entry.orderCount}{' '}
-              {entry.orderCount === 1 ? 'order' : 'orders'}
+            {/* PR-NEXT-8 §B (finding #15) — action-predictive
+                subtext. Pre-PR this read "{N} orders" (the
+                lifetime delivered-count for this shop), which
+                customers misread as "tap to see a list of past
+                orders" — but the modal that opens shows the items
+                of a SINGLE order (the most recent one), so the
+                "3 orders" → "Add 4 items to cart" sequence broke
+                the mental model on every first encounter. The new
+                copy honestly describes what the tap will deliver.
+                Lifetime frequency is still implicit in the rail
+                ordering itself (most-frequent shop comes first;
+                PR 14's sort is unchanged). `numberOfLines={1}` so
+                a fixed-card-width truncation is graceful on very
+                small phones. */}
+            <Text style={styles.subtext} numberOfLines={1}>
+              Last order ·{' '}
+              {entry.lastOrderItemCount}{' '}
+              {entry.lastOrderItemCount === 1 ? 'item' : 'items'}
             </Text>
             <Text style={styles.cta}>Order again →</Text>
           </Pressable>

@@ -26,6 +26,12 @@ import { Analytics } from '../../services/analytics';
 import { authService } from '../../services/authService';
 import { locationService } from '../../services/locationService';
 import { orderService } from '../../services/orderService';
+// PR-NEXT-5 (finding #7) — DO NOT REMOVE. Sentry breadcrumbs +
+// captureMessage on the dashboard's polling-watcher outage gate.
+// The auto-formatter has stripped service imports from this file
+// before (see the comment block above `authService` below); if tsc
+// complains "Cannot find name 'Sentry'", re-add this import.
+import { Sentry } from '../../services/sentry';
 import { useAuthStore } from '../../store/useAuthStore';
 import type { GeoPoint, Order } from '../../types';
 // PR 49 — nearest-first sort + per-card ride distance. Pure helper
@@ -42,6 +48,13 @@ import {
 } from '../../utils/format';
 import { handleRoleAuthError } from '../../utils/handleRoleAuthError';
 import { shouldRollbackOptimistic } from '../../utils/optimisticRollback';
+// PR-NEXT-5 (finding #7) — temporal dampening helper for the
+// dashboard's two polling watchers. Pure / unit-tested in
+// `tests/utils/pollFailureGate.test.ts`.
+import {
+    applyPollOutcome,
+    POLL_FAILURE_THRESHOLD,
+} from '../../utils/pollFailureGate';
 
 /**
  * DeliveryDashboardScreen — Phase 12b.
@@ -120,20 +133,73 @@ export default function DeliveryDashboardScreen() {
       return;
     }
     let firstSeen = false;
-    let availableErr: Error | null = null;
-    let mineErr: Error | null = null;
+    // PR-NEXT-5 (finding #7) — replace the simple `Error | null` flags
+    // with per-watcher consecutive-failure counters. Pre-PR the
+    // banner showed the INSTANT both watchers happened to error on
+    // the same tick — Cloud Run cold start, brief Wi-Fi blip, iOS
+    // TCP idle reap — and the partner saw flicker, flicker, flicker
+    // even though there was no real outage to act on. Both counters
+    // must reach `POLL_FAILURE_THRESHOLD` (default 3 → ~45s at the
+    // slower 15s cadence) before the banner shows; a single success
+    // on either watcher resets that watcher's counter.
+    //
+    // `outageCaptured` suppresses repeated `captureMessage` calls
+    // while the banner is showing — Sentry hygiene per the
+    // `pollFailureGate` helper's `justTripped` contract. The flag
+    // is reset whenever the banner goes back to hidden so the NEXT
+    // outage fires its own captureMessage cleanly.
+    let availableCount = 0;
+    let mineCount = 0;
+    let outageCaptured = false;
+    let latestErrorMessage: string | null = null;
+
     const reconcileError = () => {
-      // Only show error banner if BOTH watchers have errored — if just
-      // one source is healthy, render whatever it produced and stay
-      // quiet. Latest error wins so the user sees the freshest cause.
-      if (availableErr && mineErr) {
+      const availableTripped = availableCount >= POLL_FAILURE_THRESHOLD;
+      const mineTripped = mineCount >= POLL_FAILURE_THRESHOLD;
+      if (availableTripped && mineTripped) {
         setError(
-          (mineErr.message || availableErr.message) ||
-            'Could not load deliveries. Tap Retry.',
+          latestErrorMessage || 'Network connection lost. Tap Retry.',
         );
       } else {
         setError(null);
+        // Banner hidden again — arm the captureMessage gate for the
+        // next distinct outage event.
+        outageCaptured = false;
       }
+    };
+    const maybeCaptureOutage = () => {
+      const availableTripped = availableCount >= POLL_FAILURE_THRESHOLD;
+      const mineTripped = mineCount >= POLL_FAILURE_THRESHOLD;
+      if (availableTripped && mineTripped && !outageCaptured) {
+        outageCaptured = true;
+        Sentry.captureMessage(
+          'Delivery dashboard outage: both watchers failed ' +
+            `${POLL_FAILURE_THRESHOLD}+ times consecutively`,
+          'warning',
+        );
+      }
+    };
+    const breadcrumbForFailure = (
+      watcher: 'watchAvailableDeliveries' | 'watchMyDeliveries',
+      err: Error,
+      consecutiveFailures: number,
+    ) => {
+      Sentry.addBreadcrumb({
+        category: 'delivery-dashboard',
+        message: `${watcher} poll failed`,
+        level: 'warning',
+        data: {
+          consecutiveFailures,
+          errorMessage: err.message?.slice(0, 200) ?? null,
+          // firebase-functions errors carry a string `code` (e.g.
+          // 'unavailable', 'permission-denied'); surface it when
+          // present so a captured event has the diagnostic axis.
+          functionsCode:
+            typeof (err as any)?.code === 'string'
+              ? (err as any).code
+              : null,
+        },
+      });
     };
     const markLoaded = () => {
       if (!firstSeen) {
@@ -143,30 +209,52 @@ export default function DeliveryDashboardScreen() {
     };
     const off1 = orderService.watchAvailableDeliveries((list, err) => {
       if (err) {
-        availableErr = err;
+        const update = applyPollOutcome({
+          currentCount: availableCount,
+          outcome: 'failure',
+        });
+        availableCount = update.nextCount;
+        latestErrorMessage = err.message || latestErrorMessage;
         setAvailable([]);
         // PR 3 — best-effort claim refresh on permission-denied.
         // No-op for unrelated errors. Fire-and-forget; the role-guard
         // render branch will pick up the cleared claim on next render.
         void handleRoleAuthError(err, authService.refreshClaims, setUser);
+        breadcrumbForFailure('watchAvailableDeliveries', err, availableCount);
       } else {
-        availableErr = null;
+        const update = applyPollOutcome({
+          currentCount: availableCount,
+          outcome: 'success',
+        });
+        availableCount = update.nextCount;
         setAvailable(list);
       }
       reconcileError();
       markLoaded();
+      maybeCaptureOutage();
     });
     const off2 = orderService.watchMyDeliveries((list, err) => {
       if (err) {
-        mineErr = err;
+        const update = applyPollOutcome({
+          currentCount: mineCount,
+          outcome: 'failure',
+        });
+        mineCount = update.nextCount;
+        latestErrorMessage = err.message || latestErrorMessage;
         setMine([]);
         void handleRoleAuthError(err, authService.refreshClaims, setUser);
+        breadcrumbForFailure('watchMyDeliveries', err, mineCount);
       } else {
-        mineErr = null;
+        const update = applyPollOutcome({
+          currentCount: mineCount,
+          outcome: 'success',
+        });
+        mineCount = update.nextCount;
         setMine(list);
       }
       reconcileError();
       markLoaded();
+      maybeCaptureOutage();
     });
     return () => {
       off1();

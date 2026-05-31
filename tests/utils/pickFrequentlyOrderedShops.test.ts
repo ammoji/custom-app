@@ -149,6 +149,76 @@ describe('pickFrequentlyOrderedShops', () => {
     expect(pickFrequentlyOrderedShops(orders)).toHaveLength(3);
   });
 
+  test('PR-NEXT-8 §B (finding #15) — lastOrderItemCount comes from the most-recent order, not the lifetime total', () => {
+    // Two orders at the same shop: an OLDER order with 3 items
+    // and a NEWER order with 5 items. The rail card on tap will
+    // surface the NEWER order's items in the reorder modal, so
+    // the card subtext "Last order · N items" must show 5 — NOT
+    // 8 (3+5 lifetime) and NOT 3 (oldest).
+    const orders = [
+      {
+        ...makeOrder({
+          id: 'o_old',
+          shopId: 'shop_a',
+          deliveredAt: 100,
+        }),
+        items: [
+          { menuItemId: 'm1' } as any,
+          { menuItemId: 'm2' } as any,
+          { menuItemId: 'm3' } as any,
+        ],
+      },
+      {
+        ...makeOrder({
+          id: 'o_new',
+          shopId: 'shop_a',
+          deliveredAt: 500,
+        }),
+        items: [
+          { menuItemId: 'm1' } as any,
+          { menuItemId: 'm2' } as any,
+          { menuItemId: 'm3' } as any,
+          { menuItemId: 'm4' } as any,
+          { menuItemId: 'm5' } as any,
+        ],
+      },
+    ];
+    const result = pickFrequentlyOrderedShops(orders);
+    expect(result[0].lastOrderId).toBe('o_new');
+    expect(result[0].lastOrderItemCount).toBe(5);
+    expect(result[0].orderCount).toBe(2);
+  });
+
+  test('PR-NEXT-8 §B — missing/non-array items field defaults to 0 (no crash)', () => {
+    // Malformed order doc — should never happen for a real
+    // delivered order, but the rail must tolerate it gracefully.
+    // The card will render "Last order · 0 items"; tapping it
+    // surfaces an empty plan in the modal which already handles
+    // the all-unavailable / no-items case via the existing
+    // `availableCount === 0` CTA path.
+    const broken = makeOrder({
+      id: 'o1',
+      shopId: 'shop_a',
+      deliveredAt: 100,
+    });
+    (broken as any).items = undefined;
+    const result = pickFrequentlyOrderedShops([broken]);
+    expect(result).toHaveLength(1);
+    expect(result[0].lastOrderItemCount).toBe(0);
+  });
+
+  test('PR-NEXT-8 §B — empty items array → lastOrderItemCount 0', () => {
+    const empty = makeOrder({
+      id: 'o1',
+      shopId: 'shop_a',
+      deliveredAt: 100,
+    });
+    // makeOrder defaults items to [], so this just pins the
+    // contract explicitly.
+    const result = pickFrequentlyOrderedShops([empty]);
+    expect(result[0].lastOrderItemCount).toBe(0);
+  });
+
   test('mixes delivered with in-flight in same history (only delivered count)', () => {
     // Real-world case: customer just placed a fresh order from
     // shop_b (still pending) and has 2 historical delivered from

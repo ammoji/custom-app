@@ -32,6 +32,20 @@ export type FrequentShopEntry = {
   orderCount: number;
   // Used for tie-breaking (more-recent-first).
   mostRecentDeliveredAt: number;
+  // PR-NEXT-8 §B (finding #15) — item count of the most recent
+  // delivered order from this shop. The reorder modal will surface
+  // the items from THAT order on tap, so the rail card's subtext
+  // copy "Last order · {N} items" needs this number to stay
+  // honest. Pre-PR the rail showed `orderCount` ("3 orders"), which
+  // suggested a list-of-orders the modal couldn't deliver. Lifetime
+  // frequency is still implicit in the rail ordering itself (the
+  // sort below is unchanged), so the signal isn't lost — just
+  // moved from copy to position.
+  //
+  // Computed defensively: malformed orders with missing/non-array
+  // `items` produce `0` rather than crashing the rail. Card copy
+  // renders "Last order · 0 items" honestly in that case.
+  lastOrderItemCount: number;
   // PR 20 — optional rolling rating stats. Order docs don't snapshot
   // shop ratings (and shouldn't — the rating moves; the order is a
   // historical artifact). The HomeScreen caller can OPTIONALLY hydrate
@@ -89,6 +103,15 @@ export function pickFrequentlyOrderedShops(
         typeof mostRecent.deliveredAt === 'number'
           ? mostRecent.deliveredAt
           : mostRecent.createdAt,
+      // PR-NEXT-8 §B (finding #15) — see field-level JSDoc for
+      // rationale. The Array.isArray guard handles the (extremely
+      // unlikely) malformed order doc without crashing the rail —
+      // defensive consistent with how the rest of this file
+      // tolerates missing fields (deliveredAt / createdAt fallback
+      // above).
+      lastOrderItemCount: Array.isArray(mostRecent.items)
+        ? mostRecent.items.length
+        : 0,
     });
   }
 
