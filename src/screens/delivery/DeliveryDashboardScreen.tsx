@@ -1,6 +1,11 @@
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
+// PR-NEXT-6 (finding #13) — DO NOT REMOVE. Used by the
+// `handleAddDeliveryProof` flow below for the success haptic on
+// upload-complete. Auto-formatter risk per code-discipline.
+import * as Haptics from 'expo-haptics';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+    ActivityIndicator,
     Alert,
     FlatList,
     Pressable,
@@ -47,7 +52,13 @@ import {
     isToday,
 } from '../../utils/format';
 import { handleRoleAuthError } from '../../utils/handleRoleAuthError';
+import { pickAndResizeImage } from '../../utils/imageUpload';
 import { shouldRollbackOptimistic } from '../../utils/optimisticRollback';
+// PR-NEXT-6 (finding #13) — DO NOT REMOVE. Used by
+// `handleAddDeliveryProof` below to orchestrate the get-url → PUT →
+// record-confirm flow. Real correctness lives in the server-side
+// helper tests; this client-side helper is a thin glue.
+import { uploadDeliveryProof } from '../../utils/uploadDeliveryProof';
 // PR-NEXT-5 (finding #7) — temporal dampening helper for the
 // dashboard's two polling watchers. Pure / unit-tested in
 // `tests/utils/pollFailureGate.test.ts`.
@@ -90,6 +101,17 @@ export default function DeliveryDashboardScreen() {
   const [online, setOnline] = useState(false);
   const [togglingOnline, setTogglingOnline] = useState(false);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
+  // PR-NEXT-6 (finding #13) — delivery proof photo state. Per-order
+  // upload-in-flight flag so the photo button on a single card can
+  // show a spinner without freezing the rest of the dashboard. The
+  // recently-uploaded path map lets the just-uploaded card show
+  // "Photo added" immediately rather than waiting for the next
+  // watcher tick to bring `deliveryProofStoragePath` back from the
+  // order doc.
+  const [photoUploading, setPhotoUploading] = useState<string | null>(null);
+  const [recentlyUploadedProof, setRecentlyUploadedProof] = useState<
+    Record<string, string>
+  >({});
   const [showAvailable, setShowAvailable] = useState(true);
   // PR 12 — "heads up" pool (accepted/preparing) shown above the
   // claimable section so partners can plan ahead. Defaults open
@@ -628,6 +650,49 @@ export default function DeliveryDashboardScreen() {
     }
   };
 
+  // PR-NEXT-6 (finding #13) — orchestrate the optional delivery
+  // proof photo flow on an ACTIVE order card. Camera-only by
+  // design (gallery would defeat the freshness premise — see
+  // out-of-scope notes in the PR prompt). Failures alert + reset;
+  // the button stays available so a re-try after a transient
+  // network blip is one tap. NO precondition is added to the
+  // Delivered CTA — partner can deliver with or without a photo.
+  const handleAddDeliveryProof = async (order: Order) => {
+    const picked = await pickAndResizeImage('camera');
+    if (!picked.ok) {
+      // 'cancelled' is the user backing out of the picker — silent.
+      // 'permission-denied' / 'too-large' / 'unknown' surface the
+      // helper's message verbatim so the partner knows whether to
+      // retry or open Settings.
+      if (picked.reason === 'cancelled') return;
+      Alert.alert(
+        'Photo not added',
+        picked.message || 'Please try again.',
+      );
+      return;
+    }
+    setPhotoUploading(order.id);
+    try {
+      const { storagePath } = await uploadDeliveryProof({
+        orderId: order.id,
+        localUri: picked.uri,
+      });
+      // Track the just-uploaded path locally so the card flips to
+      // "Photo added" without waiting for the watcher tick.
+      setRecentlyUploadedProof(prev => ({ ...prev, [order.id]: storagePath }));
+      // Light haptic confirmation — same posture as the new-order
+      // arrival tick (PR 16). Best-effort; no rethrow on platforms
+      // without haptics support.
+      void Haptics.notificationAsync(
+        Haptics.NotificationFeedbackType.Success,
+      );
+    } catch (e: any) {
+      Alert.alert('Upload failed', e?.message || 'Please try again.');
+    } finally {
+      setPhotoUploading(null);
+    }
+  };
+
   if (!isDelivery) {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
@@ -799,6 +864,17 @@ export default function DeliveryDashboardScreen() {
                     onDelivered={() => handleDelivered(o)}
                     onConfirmCodPayment={paidMethod =>
                       handleConfirmCodPayment(o, paidMethod)
+                    }
+                    // PR-NEXT-6 — proof photo is per-card. Parent
+                    // owns the upload-in-flight + recently-uploaded
+                    // state so a re-render of one card doesn't
+                    // disrupt another's spinner / "Photo added"
+                    // copy.
+                    onAddPhoto={() => handleAddDeliveryProof(o)}
+                    uploadingPhoto={photoUploading === o.id}
+                    hasProof={
+                      !!o.deliveryProofStoragePath ||
+                      !!recentlyUploadedProof[o.id]
                     }
                     onPress={() =>
                       nav.navigate('DeliveryOrderDetail', { orderId: o.id })
@@ -1160,6 +1236,9 @@ function ActiveDeliveryCard({
   onPickedUp,
   onDelivered,
   onConfirmCodPayment,
+  onAddPhoto,
+  uploadingPhoto,
+  hasProof,
   onPress,
 }: {
   order: Order;
@@ -1171,6 +1250,15 @@ function ActiveDeliveryCard({
   // on a COD-unpaid order. Parent handles the optimistic flip +
   // `confirmCodPayment` callable.
   onConfirmCodPayment: (paidMethod: 'cash' | 'online') => void;
+  // PR-NEXT-6 (finding #13) — emitted when the partner taps the
+  // optional "Add delivery proof" button. Parent runs the
+  // `pickAndResizeImage('camera')` → `uploadDeliveryProof` flow
+  // and toggles `uploadingPhoto` for the duration. Photo is
+  // OPTIONAL and parallel to the Delivered CTA — the partner can
+  // tap Delivered with or without ever touching this button.
+  onAddPhoto: () => void;
+  uploadingPhoto: boolean;
+  hasProof: boolean;
   onPress: () => void;
 }) {
   const itemCount = order.items.reduce((n, i) => n + i.quantity, 0);
@@ -1221,6 +1309,42 @@ function ActiveDeliveryCard({
         {itemCount} item{itemCount > 1 ? 's' : ''} ·{' '}
         {formatRupees(order.total)}
       </Text>
+      {pickedUp && (
+        // PR-NEXT-6 (finding #13) — optional delivery proof photo
+        // CTA. Sits ABOVE the Delivered / COD-pill row at lower
+        // visual weight (slate-grey, single text line) so it reads
+        // as "extra credit", not a primary action. Server gates on
+        // `pickedUpAt` precondition, so we only show this branch
+        // after pickup; before pickup the upload would be rejected
+        // and the button would dead-end.
+        <View style={{ marginTop: spacing.md }}>
+          <Pressable
+            onPress={onAddPhoto}
+            disabled={uploadingPhoto}
+            style={({ pressed }) => [
+              styles.photoBtn,
+              uploadingPhoto && styles.photoBtnDisabled,
+              pressed && { opacity: 0.85 },
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel={
+              hasProof
+                ? 'Replace delivery proof photo'
+                : 'Add delivery proof photo (optional)'
+            }
+          >
+            {uploadingPhoto ? (
+              <ActivityIndicator size="small" color={colors.textPrimary} />
+            ) : (
+              <Text style={styles.photoBtnText}>
+                {hasProof
+                  ? '📸 Photo added — re-take?'
+                  : '📸 Add delivery proof (optional)'}
+              </Text>
+            )}
+          </Pressable>
+        </View>
+      )}
       <View style={{ marginTop: spacing.md }}>
         {needsCodConfirmation ? (
           // PR-NEXT-3 §H — COD payment selector. Cash and UPI both
@@ -1537,5 +1661,27 @@ const styles = StyleSheet.create({
   codPillText: {
     ...typography.bodyBold,
     color: colors.primary,
+  },
+  // PR-NEXT-6 (finding #13) — optional delivery proof photo CTA.
+  // Lower visual weight than the Delivered button (slate-grey
+  // surface, primary text colour) so it reads as "extra credit",
+  // not a primary action. NO red error state — failures alert and
+  // reset; the button stays available for re-tap.
+  photoBtn: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  photoBtnDisabled: {
+    opacity: 0.6,
+  },
+  photoBtnText: {
+    ...typography.body,
+    color: colors.textPrimary,
   },
 });

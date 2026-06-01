@@ -580,6 +580,40 @@ export const orderService = {
     return Math.max(0, Math.floor(data?.count ?? 0));
   },
 
+  // PR-NEXT-7 (finding #9): shop-owner-scoped count of online
+  // delivery partners who would actually receive a push for a new
+  // order at the caller's shop. Auth + shopId are derived from
+  // claims server-side — DO NOT add a shopId parameter here, that
+  // would invite cross-shop snooping attempts. Used by the
+  // `useOnlinePartnersNearMyShop` hook on ShopOwnerDashboard.
+  async getOnlinePartnersNearMyShop(): Promise<{
+    count: number;
+    filtered: boolean;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'getOnlinePartnersNearMyShop',
+      );
+      const result = await fn();
+      const data = result.data as
+        | { count?: number; filtered?: boolean }
+        | undefined;
+      return {
+        count: Math.max(0, Math.floor(data?.count ?? 0)),
+        filtered: data?.filtered === true,
+      };
+    }
+    const fn = httpsCallable(functions, 'getOnlinePartnersNearMyShop');
+    const result = await fn();
+    const data = result.data as
+      | { count?: number; filtered?: boolean }
+      | undefined;
+    return {
+      count: Math.max(0, Math.floor(data?.count ?? 0)),
+      filtered: data?.filtered === true,
+    };
+  },
+
   async listAllShops(): Promise<Shop[]> {
     if (isNative) {
       const fn = getNativeFunctions().httpsCallable('listAllShops');
@@ -1176,6 +1210,75 @@ export const orderService = {
     const fn = httpsCallable(functions, 'getShopKycReadUrls');
     const result = await fn(args);
     return result.data as { urls: Record<string, string> };
+  },
+
+  // PR-NEXT-6 (findings #13, #16) — delivery proof photo upload
+  // pipeline (3 callables). Mirrors the KYC + menu-image pattern:
+  //   1. getDeliveryProofUploadUrl  → mint v4 signed PUT
+  //   2. <client PUTs JPEG bytes>
+  //   3. recordDeliveryProofUpload  → stamp the order doc
+  //   4. getDeliveryProofReadUrl    → on-demand signed READ for
+  //                                   any consumer screen render
+  //
+  // Auth is server-validated (assigned partner only for upload +
+  // record; role-mixed for read — customer / shop owner / admin /
+  // assigned partner). DO NOT add an `auth.uid` parameter to any of
+  // these — claims drive the gate server-side.
+  async getDeliveryProofUploadUrl(orderId: string): Promise<{
+    uploadUrl: string;
+    storagePath: string;
+    expiresAt: number;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'getDeliveryProofUploadUrl',
+      );
+      const result = await fn({ orderId });
+      return result.data as {
+        uploadUrl: string;
+        storagePath: string;
+        expiresAt: number;
+      };
+    }
+    const fn = httpsCallable(functions, 'getDeliveryProofUploadUrl');
+    const result = await fn({ orderId });
+    return result.data as {
+      uploadUrl: string;
+      storagePath: string;
+      expiresAt: number;
+    };
+  },
+
+  async recordDeliveryProofUpload(args: {
+    orderId: string;
+    storagePath: string;
+  }): Promise<{ ok: true }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'recordDeliveryProofUpload',
+      );
+      const result = await fn(args);
+      return result.data as { ok: true };
+    }
+    const fn = httpsCallable(functions, 'recordDeliveryProofUpload');
+    const result = await fn(args);
+    return result.data as { ok: true };
+  },
+
+  async getDeliveryProofReadUrl(orderId: string): Promise<{
+    readUrl: string;
+    expiresAt: number;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'getDeliveryProofReadUrl',
+      );
+      const result = await fn({ orderId });
+      return result.data as { readUrl: string; expiresAt: number };
+    }
+    const fn = httpsCallable(functions, 'getDeliveryProofReadUrl');
+    const result = await fn({ orderId });
+    return result.data as { readUrl: string; expiresAt: number };
   },
 
   // PR 8 Part B — Bulk-toggle availability on multiple menu items

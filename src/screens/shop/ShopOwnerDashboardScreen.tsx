@@ -25,6 +25,13 @@ import { detectNewOrderIds } from '../../utils/detectNewOrderIds';
 import { handleRoleAuthError } from '../../utils/handleRoleAuthError';
 import { OrderStatus } from '../../utils/orderStateMachine';
 import { mapShopOrdersError } from '../../utils/shopOrdersErrorMessage';
+// PR-NEXT-7 (finding #9) — DO NOT REMOVE. "N delivery partners
+// online nearby" trust badge. Hook is gated by
+// `isShopOwner && !!shopId` at the call-site so unsigned-in /
+// wrong-role callers don't trigger the callable. Server reuses
+// `filterPartnersByNotificationRadius` (PR 50) so the count
+// cannot disagree with the push fanout.
+import { useOnlinePartnersNearMyShop } from '../../hooks/useOnlinePartnersNearMyShop';
 
 /**
  * Per-shop order dashboard for users with the shopOwner claim.
@@ -110,6 +117,15 @@ export default function ShopOwnerDashboardScreen() {
   // and cleared on tap-card / scroll / banner-dismiss.
   const [seenOrderIds, setSeenOrderIds] = useState<Set<string> | null>(null);
   const [newOrderIds, setNewOrderIds] = useState<Set<string>>(new Set());
+
+  // PR-NEXT-7 (finding #9) — trust badge: how many online partners
+  // would actually receive a push for a new order at this shop.
+  // Hook gated by the role+shopId predicate so unsigned-in / wrong-
+  // role callers don't trigger the callable + permission-denied
+  // noise in Sentry. Lives ABOVE the role-guard returns per Rule 2.
+  const nearbyPartners = useOnlinePartnersNearMyShop(
+    !!isShopOwner && !!shopId,
+  );
 
   useEffect(() => {
     if (!isShopOwner || !shopId) {
@@ -303,6 +319,40 @@ export default function ShopOwnerDashboardScreen() {
                   emphasize={stats.pendingCount > 0}
                 />
               </View>
+            </View>
+            {/* PR-NEXT-7 (finding #9) — "N delivery partners online
+                nearby" trust badge. Renders as a chip directly under
+                the Today KPIs to keep the live current-state signal
+                visually separated from the historical KPIs above.
+                Copy mapping (intentional):
+                  count==null  → "Checking partner availability…"
+                                 (covers loading AND permanent-fail
+                                 stale-clear; never shows "Network
+                                 error" here — that would erode the
+                                 trust the badge is trying to build)
+                  count===0    → "No delivery partners online nearby"
+                  count>=1     → "N delivery partner(s) online nearby"
+                When the shop has no `location` set, the server
+                returns `filtered: false` and we surface a hint
+                nudging the owner to set a location for an accurate
+                count (the count itself is still meaningful — it
+                mirrors the push fanout's fail-open total). */}
+            <View style={styles.partnersChip}>
+              <Text style={styles.partnersChipIcon}>📦</Text>
+              <Text style={styles.partnersChipText}>
+                {nearbyPartners.count == null
+                  ? 'Checking partner availability…'
+                  : nearbyPartners.count === 0
+                    ? 'No delivery partners online nearby'
+                    : `${nearbyPartners.count} delivery partner${
+                        nearbyPartners.count === 1 ? '' : 's'
+                      } online nearby`}
+              </Text>
+              {nearbyPartners.count != null && !nearbyPartners.filtered && (
+                <Text style={styles.partnersChipHint}>
+                  Set your shop location for an accurate count
+                </Text>
+              )}
             </View>
             {/* PR 5 — shop settings (deliveryFee + minOrder). Placed
                 above Manage Menu per the prompt; same visual
@@ -504,6 +554,37 @@ const styles = StyleSheet.create({
   statLabel: {
     ...typography.caption,
     color: colors.textSecondary,
+    marginTop: 2,
+  },
+  // PR-NEXT-7 (finding #9) — partners-online chip placed under the
+  // Today KPIs. Surface-coloured + bordered so it reads as a
+  // distinct live-state pill rather than another stats card.
+  // `flexWrap` + `width: '100%'` on the hint let the secondary line
+  // ("Set your shop location...") drop below the icon+text row on
+  // narrow screens without pushing the chip wider than the parent.
+  partnersChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    marginBottom: spacing.md,
+    borderRadius: radii.sm,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    gap: spacing.xs,
+  },
+  partnersChipIcon: { fontSize: 16 },
+  partnersChipText: {
+    ...typography.body,
+    color: colors.textPrimary,
+    flexShrink: 1,
+  },
+  partnersChipHint: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    width: '100%',
     marginTop: 2,
   },
   toggleRow: {

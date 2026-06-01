@@ -114,6 +114,22 @@ import {
 } from './deliveryRequestHelpers';
 import { canReadOrder } from './getOrderAuth';
 import { computeOnlineDeliveryCount } from './onlineDeliveryCountHelpers';
+// PR-NEXT-7 (finding #9) — shop-owner-scoped count of online
+// delivery partners who would actually receive a push for a new
+// order at the caller's shop. Reuses
+// `filterPartnersByNotificationRadius` (PR 50) so the count cannot
+// disagree with `sendNewPickupPushToDelivery`.
+import { computeNearbyOnlinePartnerCount } from './nearbyPartnersCountHelpers';
+// PR-NEXT-6 (findings #13, #16) — DO NOT REMOVE. Used by the three
+// new delivery-proof callables below (`getDeliveryProofUploadUrl`,
+// `recordDeliveryProofUpload`, `getDeliveryProofReadUrl`). Auto-
+// formatter risk per code-discipline; if tsc complains "Cannot
+// find name 'validateDeliveryProof…'", re-add this block.
+import {
+  validateDeliveryProofReadAuth,
+  validateDeliveryProofRecordInput,
+  validateDeliveryProofUploadAuth,
+} from './deliveryProofHelpers';
 import {
     applyFavoriteToggle,
     validateToggleFavoriteInput,
@@ -3694,6 +3710,166 @@ export const markDelivered = onCall<{ orderId: string }>(
 );
 
 // ────────────────────────────────────────────────────────────────────
+// PR-NEXT-6 (findings #13, #16) — Delivery proof photo: signed-URL
+// upload + record-confirm + signed-URL read.
+//
+// Photo is OPTIONAL. `markDelivered` does NOT require a proof
+// photo (would block legitimate door-handoff / no-camera-permission
+// deliveries). Capture is parallel to the Delivered CTA on the
+// partner dashboard; the photo is a force-multiplier when present
+// for dispute-resolution, not a delivery gate.
+//
+// Auth + precondition matrix lives in `deliveryProofHelpers.ts`
+// (pure, fully tested). Same signed-URL posture as `/menu/` (PR 6.1)
+// + `/shop-kyc/` (PR 31): admin SDK signing bypasses Storage rules
+// at signing time, so `/delivery-proofs/` stays write-deny.
+//
+// Path scheme: `delivery-proofs/{orderId}.jpg` (one photo per
+// order; re-upload overwrites cleanly). 15-min URL validity matches
+// `getMenuImageUploadUrl` / `getShopKycReadUrls` — short enough that
+// a leaked URL goes stale before scaled abuse, long enough not to
+// flake on a slow re-render.
+// ────────────────────────────────────────────────────────────────────
+
+// PR-NEXT-6 — mint a v4 signed PUT URL for the assigned partner of
+// an already-picked-up order. Auth gate runs in
+// `validateDeliveryProofUploadAuth`; we re-run the same gate inside
+// `recordDeliveryProofUpload` below so a forged record-call without
+// a prior upload-call mint can't bypass the precondition checks.
+export const getDeliveryProofUploadUrl = onCall<{ orderId: string }>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const orderId = request.data?.orderId;
+    if (typeof orderId !== 'string' || !orderId) {
+      throw new HttpsError('invalid-argument', 'orderId required');
+    }
+    const ref = db.doc(`orders/${orderId}`);
+    const snap = await ref.get();
+    const order = snap.exists ? (snap.data() as any) : null;
+
+    const check = validateDeliveryProofUploadAuth({
+      auth: request.auth
+        ? {
+            uid: request.auth.uid,
+            token: request.auth.token as unknown as { delivery?: unknown },
+          }
+        : null,
+      order,
+    });
+    if (!check.ok) {
+      throw new HttpsError(check.code, check.message);
+    }
+
+    const storagePath = `delivery-proofs/${orderId}.jpg`;
+    const bucket = getStorage().bucket();
+    const file = bucket.file(storagePath);
+    const expiresAt = Date.now() + 15 * 60 * 1000;
+    const [uploadUrl] = await file.getSignedUrl({
+      version: 'v4',
+      action: 'write',
+      expires: expiresAt,
+      // contentType is bound into the signature in v4; the client
+      // MUST send `Content-Type: image/jpeg` on the PUT or GCS
+      // rejects with a signature mismatch. `pickAndResizeImage`
+      // always emits JPEG, so this holds.
+      contentType: 'image/jpeg',
+    });
+    return { uploadUrl, storagePath, expiresAt };
+  },
+);
+
+// PR-NEXT-6 — stamp the order doc with the proof storagePath +
+// timestamp once the PUT has succeeded. Re-runs the upload auth
+// gate AND validates the storagePath matches the expected scheme
+// for the orderId (defends against forged record-calls). Does NOT
+// mint or store a read URL — those are minted on demand by
+// `getDeliveryProofReadUrl` so a leaked link goes stale.
+export const recordDeliveryProofUpload = onCall<{
+  orderId: string;
+  storagePath: string;
+}>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const inputCheck = validateDeliveryProofRecordInput({
+      orderId: request.data?.orderId,
+      storagePath: request.data?.storagePath,
+    });
+    if (!inputCheck.ok) {
+      throw new HttpsError(inputCheck.code, inputCheck.message);
+    }
+    const { orderId, storagePath } = inputCheck;
+    const ref = db.doc(`orders/${orderId}`);
+    const snap = await ref.get();
+    const order = snap.exists ? (snap.data() as any) : null;
+
+    const authCheck = validateDeliveryProofUploadAuth({
+      auth: request.auth
+        ? {
+            uid: request.auth.uid,
+            token: request.auth.token as unknown as { delivery?: unknown },
+          }
+        : null,
+      order,
+    });
+    if (!authCheck.ok) {
+      throw new HttpsError(authCheck.code, authCheck.message);
+    }
+    await ref.update({
+      deliveryProofStoragePath: storagePath,
+      deliveryProofUploadedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    return { ok: true };
+  },
+);
+
+// PR-NEXT-6 — mint a v4 signed READ URL for the proof photo. Read
+// auth is role-mixed (customer of the order, shop owner of the
+// shop, admin, or the assigned delivery partner); each is checked
+// independently in the pure helper. Same expiry tier as the upload
+// URL (15 min) — short enough that a leaked link goes stale, long
+// enough to not flake on a slow re-render.
+export const getDeliveryProofReadUrl = onCall<{ orderId: string }>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const orderId = request.data?.orderId;
+    if (typeof orderId !== 'string' || !orderId) {
+      throw new HttpsError('invalid-argument', 'orderId required');
+    }
+    const ref = db.doc(`orders/${orderId}`);
+    const snap = await ref.get();
+    const order = snap.exists ? (snap.data() as any) : null;
+
+    const check = validateDeliveryProofReadAuth({
+      auth: request.auth
+        ? {
+            uid: request.auth.uid,
+            token: request.auth.token as unknown as {
+              admin?: unknown;
+              shopOwner?: unknown;
+              shopId?: unknown;
+              delivery?: unknown;
+            },
+          }
+        : null,
+      order,
+    });
+    if (!check.ok) {
+      throw new HttpsError(check.code, check.message);
+    }
+    const bucket = getStorage().bucket();
+    const file = bucket.file(check.storagePath);
+    const expiresAt = Date.now() + 15 * 60 * 1000;
+    const [readUrl] = await file.getSignedUrl({
+      version: 'v4',
+      action: 'read',
+      expires: expiresAt,
+    });
+    return { readUrl, expiresAt };
+  },
+);
+
+// ────────────────────────────────────────────────────────────────────
 // PR-NEXT-3 §D — Part B: delivery-partner COD confirmation.
 //
 // When the partner arrives at a customer with a still-COD order
@@ -5714,6 +5890,80 @@ export const getOnlineDeliveryCount = onCall(
       throw new HttpsError(result.code, result.message);
     }
     return { count: result.count };
+  },
+);
+
+/**
+ * PR-NEXT-7 (finding #9) — per-shop count of online delivery
+ * partners who would actually receive a push for a new order at
+ * the caller's shop. Powers the "N partners online nearby" trust
+ * badge on ShopOwnerDashboard. Auth: shop owner only
+ * (`claims.shopOwner` + `claims.shopId`). Reuses
+ * `filterPartnersByNotificationRadius` so the surfaced count
+ * cannot disagree with the push fanout.
+ *
+ * Query shape: same two-equality filter as
+ * `sendNewPickupPushToDelivery` and `getOnlineDeliveryCount`
+ * (`isDelivery==true && deliveryStatus=='online'`). No composite
+ * index needed — Firestore intersects single-field indexes.
+ *
+ * Cost: 1 shop doc read + N online-partner doc reads per call. At
+ * pilot scale (handful of partners) N is tiny. Polled every 30s
+ * by the dashboard hook → ~2 reads/min/owner.
+ *
+ * Privacy: returns `{ count, filtered }` only — no partner UIDs,
+ * names, FCM tokens, or locations are surfaced to the shop owner.
+ *
+ * The `GeoPoint → LatLng` normalisation block in `fetchShop` is
+ * intentional: shop docs store `location` as a Firestore
+ * `GeoPoint` (with `latitude`/`longitude` accessors), but the
+ * helper + push fanout share a `{lat,lng}` plain-object shape.
+ * Centralising the normalisation here means a future migration
+ * that flips the storage format only changes this read site.
+ */
+export const getOnlinePartnersNearMyShop = onCall(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const result = await computeNearbyOnlinePartnerCount({
+      auth: request.auth,
+      fetchShop: async (shopId) => {
+        const snap = await db.collection('shops').doc(shopId).get();
+        if (!snap.exists) return null;
+        const data = (snap.data() ?? {}) as Record<string, any>;
+        const loc = data.location;
+        const latLng =
+          loc &&
+          typeof loc.latitude === 'number' &&
+          typeof loc.longitude === 'number'
+            ? { lat: loc.latitude, lng: loc.longitude }
+            : loc &&
+                typeof loc.lat === 'number' &&
+                typeof loc.lng === 'number'
+              ? { lat: loc.lat, lng: loc.lng }
+              : null;
+        return { location: latLng };
+      },
+      fetchOnlinePartners: async () => {
+        const snap = await db
+          .collection('users')
+          .where('isDelivery', '==', true)
+          .where('deliveryStatus', '==', 'online')
+          .get();
+        return snap.docs.map(d => {
+          const data = (d.data() ?? {}) as Record<string, any>;
+          return {
+            uid: d.id,
+            currentLocation: data.currentLocation ?? null,
+            notificationRadiusKm: data.notificationRadiusKm,
+            fcmTokens: data.fcmTokens ?? [],
+          };
+        });
+      },
+    });
+    if (!result.ok) {
+      throw new HttpsError(result.code, result.message);
+    }
+    return { count: result.count, filtered: result.filtered };
   },
 );
 

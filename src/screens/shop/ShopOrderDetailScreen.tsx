@@ -18,10 +18,16 @@ import Button from '../../components/common/Button';
 import EmptyState from '../../components/common/EmptyState';
 import Loader from '../../components/common/Loader';
 import ScreenHeader from '../../components/common/ScreenHeader';
+// PR-NEXT-6 (finding #13) — DO NOT REMOVE. Renders the delivery
+// proof photo (if uploaded by the partner). Auto-formatter risk.
+import DeliveryProofViewer from '../../components/order/DeliveryProofViewer';
 import OrderStatusChip from '../../components/order/OrderStatusChip';
 import { colors, radii, spacing, typography } from '../../constants/theme';
 import { useAuthStore } from '../../store/useAuthStore';
 import { formatOrderTime, formatRupees } from '../../utils/format';
+// PR-NEXT-6 (finding #16d) — DO NOT REMOVE. Surfaces the actual
+// settlement method (cod-paid-online, cod-paid-cash, online, …).
+import { formatPaymentMethod } from '../../utils/formatPaymentMethod';
 import {
     ACTION_LABELS,
     nextActionsFor,
@@ -410,7 +416,30 @@ export default function ShopOrderDetailScreen() {
               }
             />
           )}
+          {/* PR-NEXT-6 (finding #16d) — explicit "Paid via …" line.
+              Today the shop sees only `paymentMethod` (the customer's
+              ORIGINAL choice), so a COD order paid mid-flow via
+              `payCodOrder` mislabels as "Cash on Delivery" even
+              though Razorpay actually settled it. The helper picks
+              the correct copy from `paymentMethod` + `paidMethod` +
+              `paymentStatus`. */}
+          <Row
+            label="Paid via"
+            value={formatPaymentMethod({
+              paymentMethod: order.paymentMethod,
+              paidMethod: order.paidMethod,
+              paymentStatus: order.paymentStatus,
+            })}
+          />
         </View>
+        {/* PR-NEXT-6 (finding #13) — delivery proof photo. Renders
+            null when the partner hasn't uploaded one (legacy orders,
+            or partner skipped the optional capture). Auth + signed-
+            read URL are server-side. */}
+        <DeliveryProofViewer
+          orderId={order.id}
+          hasProof={!!order.deliveryProofStoragePath}
+        />
 
         {/* PR 12 — surface the current ETA so the shop knows what
             the customer is seeing before tapping any action. */}

@@ -61,6 +61,24 @@ service firebase.storage {
       allow read: if request.auth != null
                   && request.auth.token.admin == true;
     }
+    // PR-NEXT-6 (findings #13, #16) — Delivery proof photos. Same
+    // signed-URL pattern as /menu/ and /shop-kyc/: writes go through
+    // `getDeliveryProofUploadUrl` (v4 signed PUT), reads through
+    // `getDeliveryProofReadUrl` (v4 signed READ), so direct client
+    // reads and writes are denied here. Read auth is role-mixed
+    // (customer of the order, shop owner of the shop, admin, the
+    // assigned delivery partner) which is too complex to express in
+    // rules — the callable evaluates it server-side from the order
+    // doc on every request.
+    //
+    // Path scheme: `delivery-proofs/{orderId}.jpg` (one photo per
+    // order; re-upload overwrites). The catch-all below would deny
+    // direct reads/writes anyway, but an explicit block keeps intent
+    // visible alongside /menu/ and /shop-kyc/.
+    match /delivery-proofs/{filename} {
+      allow read: if false;
+      allow write: if false;
+    }
     match /{allPaths=**} {
       allow read, write: if false;
     }

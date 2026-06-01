@@ -6,6 +6,10 @@ import Button from '../components/common/Button';
 import EmptyState from '../components/common/EmptyState';
 import Loader from '../components/common/Loader';
 import ScreenHeader from '../components/common/ScreenHeader';
+// PR-NEXT-6 (finding #13) — DO NOT REMOVE. Renders the delivery
+// proof photo on a delivered order so the customer has independent
+// visual confirmation. Auto-formatter risk per code-discipline.
+import DeliveryProofViewer from '../components/order/DeliveryProofViewer';
 import OrderStatusChip from '../components/order/OrderStatusChip';
 import RateOrderCard from '../components/order/RateOrderCard';
 import { colors, radii, spacing, typography } from '../constants/theme';
@@ -16,6 +20,9 @@ import { shopService } from '../services/shopService';
 import type { Order, Shop } from '../types';
 import { usePressGuard } from '../hooks/usePressGuard';
 import { formatOrderTime, formatRupees } from '../utils/format';
+// PR-NEXT-6 (finding #16d) — DO NOT REMOVE. Surfaces the actual
+// settlement method (cod-paid-online, cod-paid-cash, online, …).
+import { formatPaymentMethod } from '../utils/formatPaymentMethod';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
 import { orderEtaDisplay } from '../utils/orderEtaDisplay';
 import { openRazorpayCheckout } from '../utils/razorpay';
@@ -558,7 +565,30 @@ export default function OrderDetailScreen() {
               Place a new order to try again.
             </Text>
           )}
+          {/* PR-NEXT-6 (finding #16d) — explicit "Paid via …" line.
+              For COD orders converted mid-flow via `payCodOrder` the
+              method label above still says "Cash on Delivery"
+              (customer's original choice); this line names the
+              actual settlement so the customer's record matches
+              what their bank statement will show. */}
+          <Row
+            label="Paid via"
+            value={formatPaymentMethod({
+              paymentMethod: order.paymentMethod,
+              paidMethod: order.paidMethod,
+              paymentStatus: order.paymentStatus,
+            })}
+          />
         </View>
+        {/* PR-NEXT-6 (finding #13) — delivery proof photo. Customers
+            benefit from seeing "yes, my order was delivered to the
+            door" both for transparency and for backing their own
+            disputes. Renders nothing when the partner skipped the
+            optional capture. */}
+        <DeliveryProofViewer
+          orderId={order.id}
+          hasProof={!!order.deliveryProofStoragePath}
+        />
 
         {/* PR 7 — Customer in-window cancel for paid orders. Visible
             ONLY when the order is paid + still pending + within the

@@ -8524,6 +8524,55 @@ immediately. The checklist is the only thing that survives memory.
       against the address proof or for PAN-specific tax
       flows), the schema split is purely additive. `[Post-launch]`
 
+## PR-NEXT-7 — "Online delivery partners nearby" trust badge `[Phase NEXT-7]`
+
+- [x] **Why this PR exists.** Finding **#9** in `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md`. Shop owners had no visibility into whether anyone would actually pick up the orders they were preparing. At pilot scale that anxiety is real ("am I going to prepare 5 dishes and watch them go cold because no rider was online?"). A simple count — "**N delivery partners online nearby**" — is the cheapest trust signal we can ship. The signal must agree with reality: PR 50 wired per-partner notification radius into the push fanout, so the partners who would actually receive a push for a new order at this shop are a haversine-filtered subset of the total online count. Showing the unfiltered total would lie ("5 partners online" → only 1 of 5 within their own notification radius gets pushed) and create a contradiction the shop owner sees the moment they accept an order.
+
+- [x] **What shipped.**
+      - **Pure helper** `@c:\Users\dahiy\grocery-mvp\functions\src\nearbyPartnersCountHelpers.ts` — `computeNearbyOnlinePartnerCount({auth, fetchShop, fetchOnlinePartners}) → {ok, count, filtered}`. Auth-gates `claims.shopOwner === true && typeof claims.shopId === 'string'` (admins do NOT get this surface — they have `getOnlineDeliveryCount` on AdminOrdersScreen). Reuses **`filterPartnersByNotificationRadius` (PR 50) verbatim** so the count cannot disagree with `sendNewPickupPushToDelivery`. `filtered: false` when shop has no `location` (fail-open mirroring the push fanout's behavior for legacy shops). `NEARBY_PARTNER_HARD_CAP = 999` clamps absurd counts. Privacy: helper returns `{count, filtered}` only — no partner UIDs / names / FCM tokens / locations.
+      - **Callable** `@c:\Users\dahiy\grocery-mvp\functions\src\index.ts:5754-5798` (`getOnlinePartnersNearMyShop`). `onCall({cors: true, enforceAppCheck: false})` matching `getOnlineDeliveryCount`'s posture. `fetchShop` normalises Firestore `GeoPoint`'s `latitude`/`longitude` accessors to the plain `{lat,lng}` shape the helper + push fanout share. `fetchOnlinePartners` runs the same `isDelivery==true && deliveryStatus=='online'` two-equality query the existing admin callable + push trigger use — no composite index required.
+      - **Service method** in `@c:\Users\dahiy\grocery-mvp\src\services\orderService.ts:583-615` (RNFB native + web JS callable wrappers, mirroring the `getOnlineDeliveryCount` pattern). Defensive: `count` floored to a non-negative integer, `filtered === true` strict equality so any non-boolean shape from a misbehaving server collapses to `false`.
+      - **Hook** `@c:\Users\dahiy\grocery-mvp\src\hooks\useOnlinePartnersNearMyShop.ts` — line-for-line adaptation of `useOnlineDeliveryCount`. 30s polling cadence (vs. 15s for the admin admin variant — partner availability changes slower than overall online count, lower owner-side cost). Same `cancelled` cleanup flag, same ref-based no-rerender on transient failure, same `setState` change-only gate. State machine pulled into the pure `nextNearbyPartnersState` so it's testable without a React renderer (RNTL out of scope per `.windsurf/test-discipline.md`). 3-strike stale-clear: 3 consecutive failures → `{count: null, filtered: false}` so the placeholder copy renders honestly rather than holding a stale value forever.
+      - **UI badge** in `@c:\Users\dahiy\grocery-mvp\src\screens\shop\ShopOwnerDashboardScreen.tsx:121-128,323-356`. Hook call sits ABOVE the early-return guards (Rule 2). Chip renders directly under the Today KPIs. Copy: `Checking partner availability…` for `count == null` (covers loading + permanent stale-clear; never shows a raw error message which would erode the trust the badge is trying to build) / `No delivery partners online nearby` / `N delivery partner[s] online nearby`. Optional secondary line `Set your shop location for an accurate count` only when `count != null && !filtered`. New `partnersChip` styles preserve the existing dashboard's chip rhythm (surface fill, border, gap, flex-wrap so the hint drops below on narrow phones).
+
+- [x] **Tests.** 23 new cases. Suite green at **1089 / 1089**, up from 1066.
+      - 14 cases in `@c:\Users\dahiy\grocery-mvp\tests\functions\nearbyPartnersCountHelpers.test.ts` — auth boundary (5: unauth, non-shopOwner, missing-shopId, empty-shopId, dual shopOwner+admin claims), shop existence (1: missing doc → not-found), happy paths (4: mixed near/far, no online partners, partner-without-currentLocation kept fail-open, custom-larger-radius covering shop), fail-open (3: shop missing location, NaN coordinates, undefined location field), bounds (1: hard-cap clamp).
+      - 9 cases in `@c:\Users\dahiy\grocery-mvp\tests\hooks\useOnlinePartnersNearMyShop.test.ts` — initial-state shape, success installs value + resets failures, fail-open `filtered: false` propagated verbatim, single transient failure preserves value, 3-strike stale-clear, recovery after stale-clear, counter-reset between transient failures, custom threshold, `filtered` flip on success even when count is unchanged.
+
+- [ ] **Deploy plan — server-first.**
+
+      ```powershell
+      # Step 1: server
+      cd functions
+      npm run build
+      firebase deploy --only "functions:getOnlinePartnersNearMyShop"
+      ```
+
+      Then verify the Cloud Run `allUsers` IAM binding (recurring gotcha — Firebase has stripped this on redeploy before; the callable returns silent 401 "access token could not be verified" without it and the badge shows "Checking…" forever):
+
+      ```powershell
+      gcloud run services get-iam-policy getonlinepartnersnearmyshop --region asia-south1
+      # if allUsers / roles/run.invoker missing:
+      gcloud run services add-iam-policy-binding getonlinepartnersnearmyshop --region asia-south1 --member=allUsers --role=roles/run.invoker
+      ```
+
+      Step 2 — client OTA (only after callable is live + IAM verified):
+
+      ```powershell
+      eas update --branch production --message "PR-NEXT-7 partners-nearby badge"
+      ```
+
+- [ ] **Smoke acceptance (18-step checklist from the PR prompt; abbreviated here, full version in `@c:\Users\dahiy\grocery-mvp\docs\pr-next-7-online-partners-nearby-windsurf-prompt.md`).**
+      - Auth gating: customer / non-shopOwner admin → no callable hits.
+      - Happy path: partner toggles Online → shop owner's chip reads `1 delivery partner online nearby` within 30s; partner Offline → flips to `No delivery partners online nearby`.
+      - Out-of-range: partner narrows radius below shop distance → chip flips to "No partners"; widens → flips back.
+      - Fail-open: clear shop's `location` (dev only) → chip shows `N nearby` + the "Set your shop location" hint; restore location → hint disappears next poll.
+      - Regressions: AdminOrdersScreen's online count still works (separate callable); push fanout count still agrees with badge; tsc + jest clean.
+
+- [x] **Doc trail.** Finding `#9` marked **SHIPPED in PR-NEXT-7** in `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md:135`.
+
+- [ ] **Out of scope (deferred).** Pull-to-refresh forcing a re-poll of the partners chip (30s background poll is sufficient at pilot scale). Per-area breakdown ("2 within 1 km, 3 within 3 km" — adds value at scale, not pilot). "Last 24h availability" trend (separate question, separate PR). WebSocket / Firestore live listener instead of polling (more reads at scale; 30s cadence fine at pilot). Push to shop owner when partners drop below threshold (introduces a new push type + cadence question).
+
 ## PR-NEXT-8 — Reorder UX cluster: dismissable ✕ + accurate "Order again" rail copy `[Phase NEXT-8]`
 
 - [x] **Why this PR exists.** Two reorder-flow UX bugs from May 30 Android testing (findings **#14** + **#15** in `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md`). Both small, both broke the user's mental model on first encounter.
@@ -8555,6 +8604,53 @@ immediately. The checklist is the only thing that survives memory.
 - [x] **Doc trail.** Findings `#14` and `#15` marked **SHIPPED in PR-NEXT-8** in `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md:205,213`.
 
 - [ ] **Out of scope (deferred).** Showing an actual list of past orders to pick from on tap (option (b) of finding #15 — bigger UX change; once option (a) is shipped, the copy honestly describes what happens). Undo affordance for dismissed rows (close-and-reopen restores; v1 doesn't need an explicit undo). Animating row removal on dismissal (`LayoutAnimation` is finicky on Android, instant is fine for a quick-fix PR). In-shop search (finding #6 / PR-NEXT-9 — separate, larger PR).
+
+## PR-NEXT-6 — Delivery proof photo + payment-method visibility `[Phase NEXT-6]`
+
+- [x] **Why this PR exists.** Findings **#13** + **#16(c)** + **#16(d)** in `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md`. (1) When a customer says "they never delivered" or "items missing", the only artifact today is `deliveredAt` — a partner self-attestation, not evidence. A doorstep / handoff photo at the moment of delivery is the cheapest dispute-prevention tool we can ship. (2) Today the shop sees only `paymentMethod` (the customer's ORIGINAL choice), so a COD order paid mid-flow via `payCodOrder` mislabels as "Cash on Delivery" even though Razorpay actually settled it. The shop reads the COD label and either expects cash that never comes, or sees a confusing mismatch on every COD-converted order. The two are a single PR because both surfaces (the partner's photo + the shop's payment label) need to render together on the order-detail screen for "what actually happened" to be a complete record.
+
+- [x] **What shipped.**
+      - **Storage rules** at `@c:\Users\dahiy\grocery-mvp\storage.rules:64-81` — explicit deny-all `/delivery-proofs/{filename}` block alongside `/menu/` + `/shop-kyc/`. Same signed-URL posture: writes via `getDeliveryProofUploadUrl`, reads via `getDeliveryProofReadUrl`, both bypassing rules at signing time via the Admin SDK. Path scheme is deterministic `delivery-proofs/{orderId}.jpg` — one photo per order, re-upload overwrites cleanly.
+      - **Pure helpers** at `@c:\Users\dahiy\grocery-mvp\functions\src\deliveryProofHelpers.ts` — three validators returning tagged union Results so the wrapping callables stay thin Firestore + HttpsError shells. `validateDeliveryProofUploadAuth` (delivery claim + assignee match + `pickedUpAt > 0` precondition), `validateDeliveryProofRecordInput` (path-prefix check defending against forged record-calls), `validateDeliveryProofReadAuth` (role-mixed: customer of order / shop owner of shop / admin / assigned partner — each independently checked, none alone is sufficient by default).
+      - **Three callables** in `@c:\Users\dahiy\grocery-mvp\functions\src\index.ts:3712-3870` — `getDeliveryProofUploadUrl` (15-min v4 signed PUT, contentType-bound to `image/jpeg`), `recordDeliveryProofUpload` (re-runs upload auth + path-prefix check, stamps `deliveryProofStoragePath` + `deliveryProofUploadedAt` via `serverTimestamp()`), `getDeliveryProofReadUrl` (15-min v4 signed READ, on-demand minting so leaked URLs go stale). The record callable does NOT cache a long-lived URL on the order doc — that would defeat the privacy model (delivery photos are PII-adjacent: doorstep / building / customer-handoff imagery).
+      - **Schema-additive `Order` fields** at `@c:\Users\dahiy\grocery-mvp\src\types\index.ts:593-610` — `deliveryProofStoragePath?: string` + `deliveryProofUploadedAt?: number | null`. Both optional; pre-PR-NEXT-6 orders have them absent. Rule 4 compliant; no migration.
+      - **Client service wrappers** at `@c:\Users\dahiy\grocery-mvp\src\services\orderService.ts:1215-1282` — `getDeliveryProofUploadUrl(orderId)`, `recordDeliveryProofUpload({orderId, storagePath})`, `getDeliveryProofReadUrl(orderId)`. RNFB native + web-SDK paths mirror the existing menu / KYC wrappers exactly.
+      - **Upload orchestrator** at `@c:\Users\dahiy\grocery-mvp\src\utils\uploadDeliveryProof.ts` — get-url → PUT (with explicit `Content-Type: image/jpeg` to satisfy the v4 signature binding) → record-confirm. PUT failures throw with the HTTP code + body excerpt; record-confirm is NOT called on a failed PUT (a half-stamped order doc would point at storage that doesn't exist). Returns `{storagePath}` so the caller can mint a read URL immediately for the just-uploaded thumbnail without waiting for the watcher tick.
+      - **Photo CTA on `ActiveDeliveryCard`** at `@c:\Users\dahiy\grocery-mvp\src\screens\delivery\DeliveryDashboardScreen.tsx:1312-1347` — optional, camera-only (gallery picker would defeat the freshness premise), gated on `pickedUp` so the partner can't tap before the server precondition would accept the upload. Lower visual weight than the Delivered button (slate-grey surface, primary text colour) so it reads as "extra credit", not a primary action. NO red error state — failures alert and reset; the button stays available for re-tap. NO new server precondition on `markDelivered` — partner can deliver with or without a photo (deliberate non-feature; door-handoff / no-camera-permission cases must not be blocked). Per-order `photoUploading` state + `recentlyUploadedProof` map at the parent level so a re-render of one card doesn't disrupt another's spinner. Light haptic success tick mirrors PR 16's new-order arrival pattern.
+      - **`DeliveryProofViewer` component** at `@c:\Users\dahiy\grocery-mvp\src\components\order\DeliveryProofViewer.tsx` — single component reused by `ShopOrderDetailScreen` + customer `OrderDetailScreen`. Returns null when `hasProof === false`; otherwise mints a 15-min signed read URL on mount and renders a 120×120 thumbnail with tap-to-zoom into a full-screen modal. Hooks discipline (Rule 2): all `useState` / `useEffect` calls live above the `if (!hasProof) return null` guard. Auth boundary lives in the callable; permission-denied responses surface as inline error strings rather than masking the bug class with a generic copy. `hasProof → false` resets stale URL state so a flip back to true triggers a fresh mint.
+      - **Payment-method line** via new pure helper `@c:\Users\dahiy\grocery-mvp\src\utils\formatPaymentMethod.ts` — renders `Cash on delivery — paid online (converted)` / `Cash on delivery — paid in cash` / `Online (paid up front)` / `Cash on delivery — paid` (legacy COD without `paidMethod` stamp) / `Not yet paid` (any non-paid status, regardless of method — critical UX gate so a "pending" online order doesn't lie about an outstanding balance) / `Paid` (defensive fallback for paid-but-unknown-method). Wired on shop side at `@c:\Users\dahiy\grocery-mvp\src\screens\shop\ShopOrderDetailScreen.tsx:419-433` and customer side at `@c:\Users\dahiy\grocery-mvp\src\screens\OrderDetailScreen.tsx:568-581`. Same `<DeliveryProofViewer />` placement on both screens directly below the Payment card.
+      - **Tests** — 19 new helper-test cases in `@c:\Users\dahiy\grocery-mvp\tests\functions\deliveryProofHelpers.test.ts` (auth + precondition matrix exhaustive across upload / record-input / read), 5 smoke tests in `@c:\Users\dahiy\grocery-mvp\tests\utils\uploadDeliveryProof.test.ts` (happy path, PUT non-2xx, get-url rejection, record rejection, storagePath round-trip — pinning that the helper trusts the server-minted path rather than rebuilding it locally), 7 tests in `@c:\Users\dahiy\grocery-mvp\tests\utils\formatPaymentMethod.test.ts` (every settlement variant + the non-paid gate). Suite at **1131 / 1131** (was 1089 → +42, includes other in-flight PRs in the same session).
+
+- [x] **Type + test discipline.** `npx tsc --noEmit` clean (root + `functions/`). `npx jest --config tests/jest.unit.config.js` — 94 suites, 1131 tests, 0 failures. One stale-spread lint in `DeliveryProofViewer` (`color: '#fff'` overwritten by a typography spread) caught + fixed at `@c:\Users\dahiy\grocery-mvp\src\components\order\DeliveryProofViewer.tsx:148` by reordering.
+
+- [ ] **Server + storage-rules + client deploy plan.** Server-first → storage rules → client OTA. Storage rules MUST land before the client OTA so a misbehaving client during the deploy gap can't try a direct upload (the catch-all denies anyway, but the explicit rule keeps intent visible).
+
+      ```powershell
+      # Step 1 — server callables (3 new). Recurring gotcha: Cloud Run `allUsers` / `roles/run.invoker` strip on first deploy.
+      firebase deploy --only "functions:getDeliveryProofUploadUrl,functions:recordDeliveryProofUpload,functions:getDeliveryProofReadUrl"
+      gcloud run services get-iam-policy getdeliveryproofuploadurl --region asia-south1
+      gcloud run services get-iam-policy recorddeliveryproofupload --region asia-south1
+      gcloud run services get-iam-policy getdeliveryproofreadurl --region asia-south1
+      # If allUsers / roles/run.invoker missing on any:
+      # gcloud run services add-iam-policy-binding <svc> --region asia-south1 --member=allUsers --role=roles/run.invoker
+
+      # Step 2 — storage rules (adds the explicit /delivery-proofs/ deny-all).
+      firebase deploy --only storage
+
+      # Step 3 — client OTA (only after callables are live + IAM verified + storage rules deployed).
+      eas update --branch production --message "PR-NEXT-6 delivery proof photo + payment-method visibility"
+      ```
+
+- [ ] **Smoke acceptance (24-step checklist from the PR prompt; abbreviated here, full version in `@c:\Users\dahiy\grocery-mvp\docs\pr-next-6-delivery-proof-photo-windsurf-prompt.md`).**
+      - Upload happy path: partner picks up order → `📸 Add delivery proof (optional)` button appears above Delivered CTA → tap → camera opens → take photo → button flips to `📸 Photo added — re-take?` with haptic tick → tap Delivered → completes normally with no new precondition error.
+      - Auth gates (direct callable invocation): customer token → `permission-denied`, unassigned partner → `permission-denied`, assigned partner before pickup → `failed-precondition`, read with non-customer / non-shop-owner / non-assigned-partner / non-admin → `permission-denied`.
+      - Re-upload overwrites cleanly (same `delivery-proofs/{orderId}.jpg`); viewer re-fetches signed-read URL on next mount.
+      - Display: shop owner / customer / admin (via callable for admin — no UI surface yet) all see the proof thumbnail + tap-to-zoom modal + the new `Paid via …` line on order detail. No-proof orders render the payment line but no viewer (returns null cleanly).
+      - Regressions: `markDelivered` still works without a proof (deliberate); menu image uploads + KYC uploads still work (unchanged code paths); tsc + jest clean.
+
+- [x] **Doc trail.** Findings `#13` + `#16(c)` + `#16(d)` marked **SHIPPED in PR-NEXT-6** in `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md:196,221`.
+
+- [ ] **Out of scope (deferred).** Multi-photo capture (per-item / per-corner-of-doorstep). Photo annotation / pinning. Upload-window enforcement (e.g. only within 1h after delivered). Photo required to deliver (deliberate non-feature — would block legitimate door-handoff / camera-permission-denied cases). Migration to public download tokens (PR 42.0.2 pattern) for cheaper reads — v1 prioritises privacy via signed-read; revisit if call volume becomes a real cost. Gallery picker alongside camera (defeats freshness premise). AI verification ("does this look like a doorstep?"). Admin order-detail screen integration — admin views orders inline on `AdminOrdersScreen` (list, no dedicated detail screen); admins still hold proof-read auth via the callable for dispute lookup, but a UI surface there is its own design pass.
 
 ## PR-NEXT-5 — Delivery dashboard error-banner dampening `[Phase NEXT-5]`
 

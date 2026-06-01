@@ -589,6 +589,25 @@ export type Order = {
   // call_me copy explicitly (safe), customer OrderDetail silently
   // omits the section (no choice was made; nothing to confirm).
   substitutionPreference?: SubstitutionPreference;
+
+  // PR-NEXT-6 (findings #13, #16) — delivery proof photo. Storage
+  // path only; read URLs are minted on demand by
+  // `getDeliveryProofReadUrl` so leaked URLs go stale (15-min
+  // expiry). Path scheme is `delivery-proofs/{orderId}.jpg` — one
+  // photo per order, re-upload overwrites cleanly. Optional /
+  // schema-additive (Rule 4): photo is OPTIONAL by design — the
+  // partner can deliver without one, and `markDelivered` does NOT
+  // require this field. Pre-PR-NEXT-6 orders have it absent.
+  //
+  // DO NOT add a long-lived `deliveryProofUrl` field here — storing
+  // a permanent URL would defeat the signed-read-URL security
+  // model (delivery photos are PII-adjacent: doorstep / building
+  // / customer-handoff imagery).
+  deliveryProofStoragePath?: string;
+  // Timestamp of the most recent upload (millis since epoch). Set
+  // by `recordDeliveryProofUpload` via serverTimestamp(). Bumps on
+  // re-upload (overwrite at the same storagePath).
+  deliveryProofUploadedAt?: number | null;
 };
 
 // PR 21 — substitution preference. Set ONCE at checkout. Tells the
