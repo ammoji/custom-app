@@ -132,9 +132,33 @@ export function canCustomerCancelPaidOrder(
 
   // 7. paidAt sanity. The webhook always sets this when flipping
   //    paymentStatus to 'paid', so missing == data corruption.
+  //
+  // PR-NEXT-HOTFIX-2 — Firestore `serverTimestamp()` is stored as a
+  // `Timestamp` object on read (not millis). The original
+  // `typeof order.paidAt !== 'number'` check always failed in
+  // production because the Admin SDK hands the raw `Timestamp` back
+  // to us — the webhook at `functions/src/index.ts:1383` + `:3930`
+  // writes `paidAt: FieldValue.serverTimestamp()`. Accept BOTH
+  // shapes: plain millis numbers (test fixtures + any caller that
+  // pre-normalizes) AND Timestamp-likes (everything from a real
+  // Firestore read). The `paidAtMillis <= 0` clause rejects a
+  // Timestamp at the Unix epoch (cannot represent a real payment).
+  //
+  // Same pattern as HOTFIX-1 applied to
+  // `validateDeliveryProofUploadAuth`. See
+  // `.windsurf/code-discipline.md` Rule 12 — Firestore `Timestamp`
+  // reads are NOT plain millis numbers.
+  const rawPaidAt: unknown = order.paidAt;
+  const paidAtMillis: number | null =
+    typeof rawPaidAt === 'number'
+      ? rawPaidAt
+      : typeof (rawPaidAt as { toMillis?: unknown })?.toMillis === 'function'
+        ? (rawPaidAt as { toMillis: () => number }).toMillis()
+        : null;
   if (
-    typeof order.paidAt !== 'number' ||
-    !Number.isFinite(order.paidAt)
+    paidAtMillis === null ||
+    !Number.isFinite(paidAtMillis) ||
+    paidAtMillis <= 0
   ) {
     return {
       ok: false,
@@ -143,7 +167,7 @@ export function canCustomerCancelPaidOrder(
     };
   }
 
-  const elapsed = now - order.paidAt;
+  const elapsed = now - paidAtMillis;
 
   // 8. Clock-skew defense. A future paidAt could mean a malicious
   //    client wrote a synthetic doc OR a clock-skew between regions.

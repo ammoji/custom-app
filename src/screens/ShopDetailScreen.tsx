@@ -4,6 +4,7 @@ import {
     Alert,
     Image,
     Pressable,
+    ScrollView,
     SectionList,
     StyleSheet,
     Text,
@@ -19,7 +20,10 @@ import QuantityStepper from '../components/common/QuantityStepper';
 import ScreenHeader from '../components/common/ScreenHeader';
 import MenuSearchBar from '../components/menu/MenuSearchBar';
 import ShopRatingBadge from '../components/shop/ShopRatingBadge';
-import { CATEGORIES } from '../constants/categories';
+// PR-NEXT-ENH-3 (finding #6 follow-up) — DO NOT REMOVE. `CategoryId`
+// types the new `selectedCategory` state powering the quick-pick
+// chip row below the search bar.
+import { CATEGORIES, CategoryId } from '../constants/categories';
 import { colors, radii, spacing, typography } from '../constants/theme';
 import { Analytics } from '../services/analytics';
 import {
@@ -36,6 +40,9 @@ import {
   filterMenuByQuery,
   pushToSearchHistory,
 } from '../utils/menuSearchHelpers';
+// PR-NEXT-ENH-3 — DO NOT REMOVE. Powers the category chip filter
+// composed AFTER the existing search filter on this screen.
+import { filterMenuByCategory } from '../utils/filterMenuByCategory';
 
 /**
  * Phase 12a-v2-iii: customer-facing per-shop menu. Replaces the legacy
@@ -67,6 +74,13 @@ export default function ShopDetailScreen() {
   // PR-NEXT-9 (finding #6) — in-shop menu search.
   const [searchQuery, setSearchQuery] = useState('');
   const [searchHistory, setSearchHistory] = useState<string[]>([]);
+  // PR-NEXT-ENH-3 (finding #6 follow-up) — category quick-pick chips.
+  // Single-select: tap a chip to filter; tap the same chip again to
+  // clear. `null` = no category filter (all 10 sections render as
+  // today). Composes WITH `searchQuery` (search applies first, then
+  // category filter; see useMemo chain below).
+  const [selectedCategory, setSelectedCategory] =
+    useState<CategoryId | null>(null);
 
   const cartShopId = useCartStore(s => s.shopId);
   const cartShopName = useCartStore(s => s.shopName);
@@ -135,9 +149,20 @@ export default function ShopDetailScreen() {
     [menu, searchQuery],
   );
 
+  // PR-NEXT-ENH-3 (finding #6 follow-up) — category filter composes
+  // AFTER the search filter so the resulting sections list reflects
+  // what the customer would actually see post-search. When
+  // `selectedCategory == null` the helper returns the input array by
+  // reference, so the next useMemo doesn't churn for callers that
+  // never touch a chip.
+  const categoryFilteredMenu = useMemo(
+    () => filterMenuByCategory(filteredMenu, selectedCategory),
+    [filteredMenu, selectedCategory],
+  );
+
   const sections = useMemo(() => {
     const groups: Record<string, MenuItem[]> = {};
-    filteredMenu.forEach(m => {
+    categoryFilteredMenu.forEach(m => {
       (groups[m.category] ??= []).push(m);
     });
     return CATEGORIES.filter(c => groups[c.id]?.length).map(c => ({
@@ -146,7 +171,7 @@ export default function ShopDetailScreen() {
       // stable even when shop owners add custom items mid-session.
       data: groups[c.id]!.slice().sort((a, b) => a.name.localeCompare(b.name)),
     }));
-  }, [filteredMenu]);
+  }, [categoryFilteredMenu]);
 
   // PR-NEXT-9 — fire-and-forget history write on blur /
   // onSubmitEditing (first wins). Failures swallowed by the wrapper
@@ -283,6 +308,58 @@ export default function ShopDetailScreen() {
                 });
               }}
             />
+            {/* PR-NEXT-ENH-3 (finding #6 follow-up) — category
+                quick-pick chip row. Single-select: tap a chip to
+                filter; tap the same chip again to clear. Composes
+                WITH the search query above (search applies first,
+                then category filter — the chip's effective result
+                set reflects what the customer would see after
+                their search). Horizontal scroll for the 10
+                categories; matches the HomeScreen chip pattern.
+                `keyboardShouldPersistTaps="handled"` is essential
+                — without it, a chip tap while the search input is
+                focused fires the input's blur first and the chip
+                tap never lands. */}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={styles.categoryChipRow}
+            >
+              {CATEGORIES.map(cat => {
+                const active = selectedCategory === cat.id;
+                return (
+                  <Pressable
+                    key={cat.id}
+                    onPress={() =>
+                      setSelectedCategory(active ? null : cat.id)
+                    }
+                    style={({ pressed }) => [
+                      styles.categoryChip,
+                      active && styles.categoryChipActive,
+                      pressed && { opacity: 0.8 },
+                    ]}
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      active
+                        ? `Clear ${cat.label} filter`
+                        : `Filter to ${cat.label}`
+                    }
+                    accessibilityState={{ selected: active }}
+                  >
+                    <Text
+                      style={[
+                        styles.categoryChipText,
+                        active && styles.categoryChipTextActive,
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {cat.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
           </View>
         }
         renderSectionHeader={({ section: { title } }) => (
@@ -291,17 +368,35 @@ export default function ShopDetailScreen() {
           </View>
         )}
         ListEmptyComponent={
-          // PR-NEXT-9 — distinguish query-driven empty from the
-          // genuine empty-menu case. A non-empty query takes
-          // precedence; otherwise the existing "shop has no items"
-          // copy still applies.
-          searchQuery.trim() ? (
+          // PR-NEXT-9 + PR-NEXT-ENH-3 — four-branch empty state.
+          // Search-AND-category takes precedence so the customer
+          // sees the most specific reason their list is empty.
+          searchQuery.trim() && selectedCategory ? (
+            <View style={styles.noResults}>
+              <Text style={styles.noResultsTitle}>
+                No items in {labelForCategory(selectedCategory)} match “
+                {searchQuery.trim()}”
+              </Text>
+              <Text style={styles.noResultsSub}>
+                Try clearing the search or picking a different category.
+              </Text>
+            </View>
+          ) : searchQuery.trim() ? (
             <View style={styles.noResults}>
               <Text style={styles.noResultsTitle}>
                 No items match “{searchQuery.trim()}”
               </Text>
               <Text style={styles.noResultsSub}>
                 Try a shorter or different word, or clear the search.
+              </Text>
+            </View>
+          ) : selectedCategory ? (
+            <View style={styles.noResults}>
+              <Text style={styles.noResultsTitle}>
+                No {labelForCategory(selectedCategory)} items in this shop
+              </Text>
+              <Text style={styles.noResultsSub}>
+                Try picking a different category or clearing the filter.
               </Text>
             </View>
           ) : (
@@ -343,6 +438,16 @@ export default function ShopDetailScreen() {
       )}
     </SafeAreaView>
   );
+}
+
+// PR-NEXT-ENH-3 (finding #6 follow-up) — small lookup so the
+// empty-state copy uses the human-readable category label
+// ("Dairy & Eggs") instead of the canonical id ("dairy_eggs").
+// Falls back to the id if the lookup ever fails — defensive
+// against a stale `selectedCategory` value after a categories
+// list change.
+function labelForCategory(id: CategoryId): string {
+  return CATEGORIES.find(c => c.id === id)?.label ?? id;
 }
 
 // Inline card for menu items. Mirrors the visual treatment of the
@@ -430,6 +535,35 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.textSecondary,
     textAlign: 'center',
+  },
+  // PR-NEXT-ENH-3 (finding #6 follow-up) — category chip row sits
+  // directly below the search bar inside the SectionList header.
+  // `gap` works on RN 0.71+; this codebase already uses it
+  // elsewhere (e.g. ShopMenuScreen bulk bar).
+  categoryChipRow: {
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.sm,
+    gap: spacing.xs,
+  },
+  categoryChip: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  categoryChipActive: {
+    backgroundColor: colors.primaryLight,
+    borderColor: colors.primary,
+  },
+  categoryChipText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '600',
+  },
+  categoryChipTextActive: {
+    color: colors.primaryDark,
   },
   titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm },
   address: { ...typography.body, color: colors.textSecondary, marginTop: spacing.xs },

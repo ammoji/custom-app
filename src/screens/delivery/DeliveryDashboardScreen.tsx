@@ -909,6 +909,17 @@ export default function DeliveryDashboardScreen() {
                     onPress={() =>
                       nav.navigate('DeliveryOrderDetail', { orderId: o.id })
                     }
+                    // PR-NEXT-13d — same handler + same per-order
+                    // upload state as `ActiveDeliveryCard`; the
+                    // server validator already permits post-
+                    // delivered upload (no `deliveredAt` gate), so
+                    // this is purely a presentation reuse.
+                    onAddPhoto={() => handleAddDeliveryProof(o)}
+                    uploadingPhoto={photoUploading === o.id}
+                    hasProof={
+                      !!o.deliveryProofStoragePath ||
+                      !!recentlyUploadedProof[o.id]
+                    }
                   />
                 </View>
               ))}
@@ -1200,9 +1211,25 @@ function DeliveryLocationLabel({ order }: { order: Order }) {
 function DeliveryHistoryCard({
   order,
   onPress,
+  // PR-NEXT-13d (finding #13 sub-(d) follow-up) — same photo-upload
+  // props as `ActiveDeliveryCard`. Sudhir's HOTFIX-1 smoke testing
+  // surfaced the gap: if the partner forgot to capture the proof
+  // photo before hitting Delivered, the CTA disappeared with the
+  // active card and there was no recovery path. The server validator
+  // (post-HOTFIX-1) has no `deliveredAt` gate — only `pickedUpAt`
+  // and assignee — so a partner can upload a missed proof any time
+  // while still assigned to the order. Window is intentionally
+  // unbounded for v1; revisit if pilot disputes show late-upload
+  // abuse.
+  onAddPhoto,
+  uploadingPhoto,
+  hasProof,
 }: {
   order: Order;
   onPress: () => void;
+  onAddPhoto: () => void;
+  uploadingPhoto: boolean;
+  hasProof: boolean;
 }) {
   const when = formatRelativeDeliveryTime(order.deliveredAt ?? 0);
   return (
@@ -1225,6 +1252,44 @@ function DeliveryHistoryCard({
         {order.deliveryAddress.line1} · {order.deliveryAddress.pincode}
       </Text>
       <Text style={styles.meta}>{formatRupees(order.total)}</Text>
+
+      {/* PR-NEXT-13d — photo CTA stays available post-delivery so
+          the partner can correct a missed capture. Mirrors the
+          `ActiveDeliveryCard` styling verbatim (same `photoBtn` /
+          `photoBtnText` / `photoBtnDisabled` style tokens). The
+          inner `Pressable`'s `e.stopPropagation()` prevents the tap
+          from bubbling to the parent card's `onPress` (which would
+          otherwise also navigate to the order detail). */}
+      <View style={{ marginTop: spacing.sm }}>
+        <Pressable
+          onPress={e => {
+            e.stopPropagation();
+            onAddPhoto();
+          }}
+          disabled={uploadingPhoto}
+          style={({ pressed }) => [
+            styles.photoBtn,
+            uploadingPhoto && styles.photoBtnDisabled,
+            pressed && { opacity: 0.85 },
+          ]}
+          accessibilityRole="button"
+          accessibilityLabel={
+            hasProof
+              ? 'Replace delivery proof photo'
+              : 'Add delivery proof photo (optional)'
+          }
+        >
+          {uploadingPhoto ? (
+            <ActivityIndicator size="small" color={colors.textPrimary} />
+          ) : (
+            <Text style={styles.photoBtnText}>
+              {hasProof
+                ? '📸 Photo added — re-take?'
+                : '📸 Add delivery proof (optional)'}
+            </Text>
+          )}
+        </Pressable>
+      </View>
     </Pressable>
   );
 }

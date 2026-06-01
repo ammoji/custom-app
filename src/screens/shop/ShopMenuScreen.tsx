@@ -35,6 +35,10 @@ import {
   filterMenuByQuery,
   pushToSearchHistory,
 } from '../../utils/menuSearchHelpers';
+// PR-NEXT-ENH-1 (finding #4 follow-up) — DO NOT REMOVE. Drives the
+// smart-label bulk action bar (each button shows the count of items
+// it would actually flip; no-op buttons hide entirely).
+import { computeBulkAvailabilityCounts } from '../../utils/bulkAvailabilityCounts';
 
 type Filter = 'all' | 'available' | 'unavailable' | 'custom';
 
@@ -193,6 +197,22 @@ export default function ShopMenuScreen() {
     return out;
   }, [visibleItems]);
 
+  // PR-NEXT-ENH-1 (finding #4 follow-up) — smart bulk-action labels.
+  // `bulkAvailableCount` drives the "Mark N unavailable" button
+  // (those items flip down); `bulkUnavailableCount` drives
+  // "Mark N available" (those flip up). Buttons whose flip-count is
+  // 0 are no-ops and get hidden entirely by the render below — see
+  // the bulk action bar JSX. Memoised against `items` + `selectedIds`
+  // so flipping selection state doesn't pay an O(N) cost on every
+  // unrelated re-render.
+  const {
+    availableCount: bulkAvailableCount,
+    unavailableCount: bulkUnavailableCount,
+  } = useMemo(
+    () => computeBulkAvailabilityCounts(items, selectedIds),
+    [items, selectedIds],
+  );
+
   // PR 8 Part B — toggle a single id's selection state.
   // Don't recreate the Set on every render — only on toggle.
   const toggleSelected = useCallback((id: string) => {
@@ -213,11 +233,28 @@ export default function ShopMenuScreen() {
   // surface skippedCount in the success toast if non-zero so the
   // owner notices stale ids.
   const handleBulkSetAvailability = async (available: boolean) => {
-    const ids = Array.from(selectedIds);
-    if (ids.length === 0) return;
+    // PR-NEXT-ENH-1 (finding #4 follow-up) — send only the IDs whose
+    // current state DIFFERS from the target. Pre-fix the handler
+    // sent every selected id and the server re-wrote already-in-
+    // target-state items to the same value (wasteful, and confused
+    // the "Mark N unavailable / Mark N available" labels into
+    // showing N as the total selection size instead of the actual
+    // flip count). Now `idsToFlip` matches the smart-label count
+    // exactly, the optimistic update touches only the items that
+    // flipped, and the confirmation Alert title is correct.
+    //
+    // Recomputing `idsToFlip` from current `items` at click time
+    // (not snapshotting from the smart-label memo) means a
+    // mid-flight watcher refresh that flipped some items is
+    // reflected in the actual server payload — see acceptance step
+    // 10 ("Server-side no-op check").
+    const idsToFlip = items
+      .filter(i => selectedIds.has(i.id) && i.available !== available)
+      .map(i => i.id);
+    if (idsToFlip.length === 0) return;
     const verb = available ? 'available' : 'unavailable';
     Alert.alert(
-      `Mark ${ids.length} item${ids.length > 1 ? 's' : ''} ${verb}?`,
+      `Mark ${idsToFlip.length} item${idsToFlip.length > 1 ? 's' : ''} ${verb}?`,
       'This will update all selected items at once.',
       [
         { text: 'Cancel', style: 'cancel' },
@@ -228,14 +265,18 @@ export default function ShopMenuScreen() {
             setBulkSubmitting(true);
             try {
               const r = await orderService.bulkUpdateMenuAvailability({
-                menuItemIds: ids,
+                menuItemIds: idsToFlip,
                 available,
               });
               // Optimistically reflect locally before the refresh
               // round-trip completes so the toggles flip immediately.
+              // PR-NEXT-ENH-1 — only the items that actually flipped
+              // server-side change locally; already-in-target-state
+              // items in the selection are deliberately untouched.
+              const flippedSet = new Set(idsToFlip);
               setItems(prev =>
                 prev.map(it =>
-                  selectedIds.has(it.id) ? { ...it, available } : it,
+                  flippedSet.has(it.id) ? { ...it, available } : it,
                 ),
               );
               exitSelectMode();
@@ -250,6 +291,63 @@ export default function ShopMenuScreen() {
             } catch (e: any) {
               Alert.alert(
                 'Bulk update failed',
+                e?.message ?? 'Please try again.',
+              );
+            } finally {
+              setBulkSubmitting(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  // PR-NEXT-ENH-2 (finding #5 follow-up) — bulk soft-delete handler.
+  // Mirrors `handleBulkSetAvailability`'s optimistic-update +
+  // confirmation Alert + `skippedCount` surfacing pattern. Sends ALL
+  // selected ids (the server idempotently skips already-deleted
+  // docs via the `deletedAt != null` check, so no client-side
+  // flip-filter is needed here — deletion is unconditional).
+  //
+  // Optimistic: drop the deleted ids from local `items` immediately
+  // so the UI feels instant; the watcher / `fetchOnce` reconciles
+  // on the next tick.
+  //
+  // The destructive verb on the Confirm button + the "Past orders
+  // are unaffected" subtitle on the Alert keep shopkeepers from
+  // mis-firing this action. Soft-delete makes recovery possible
+  // (Firestore Console → clear `deletedAt`) but the in-app UX
+  // treats it as terminal.
+  const handleBulkDelete = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    Alert.alert(
+      `Delete ${ids.length} item${ids.length > 1 ? 's' : ''}?`,
+      'Deleted items disappear from your menu and from the customer browse path. Past orders that included these items are unaffected (the order keeps a snapshot of name + price + image).',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            setBulkSubmitting(true);
+            try {
+              const r = await orderService.bulkRemoveMenuItems({
+                menuItemIds: ids,
+              });
+              const deletedSet = new Set(ids);
+              setItems(prev => prev.filter(it => !deletedSet.has(it.id)));
+              exitSelectMode();
+              if (r.skippedCount > 0) {
+                Alert.alert(
+                  'Deleted with skips',
+                  `${r.deletedCount} deleted, ${r.skippedCount} skipped (already deleted, or item may no longer exist).`,
+                );
+              }
+              fetchOnce();
+            } catch (e: any) {
+              Alert.alert(
+                'Bulk delete failed',
                 e?.message ?? 'Please try again.',
               );
             } finally {
@@ -565,28 +663,78 @@ export default function ShopMenuScreen() {
         }}
       />
       {/* PR 8 Part B — bottom sticky action bar. Visible only in
-          selectMode; disabled when 0 items selected. Both buttons
-          loading-disabled while a bulk request is in flight. */}
-      {selectMode && (
+          selectMode; both buttons loading-disabled while a bulk
+          request is in flight.
+
+          PR-NEXT-ENH-1 (finding #4 follow-up) — instead of two
+          constant-count buttons that include no-op options
+          (e.g. "Mark 3 available" when all 3 selected items are
+          already available), each button renders only when its
+          flip-count is > 0:
+
+            bulkAvailableCount   > 0 → show "Mark N unavailable"
+            bulkUnavailableCount > 0 → show "Mark N available"
+
+          Empty selection (both counts 0) → bar collapses to nothing
+          (no empty colored strip). The header's "Done" affordance
+          stays available to exit select mode. Uniform selection
+          shows one full-width button; mixed selection shows the
+          two side-by-side flex:1 buttons with a small spacer
+          (matches the pre-PR look). */}
+      {selectMode && selectedIds.size > 0 && (
         <View style={styles.bulkBar}>
-          <View style={{ flex: 1 }}>
-            <Button
-              title={`Mark ${selectedIds.size} unavailable`}
-              onPress={() => handleBulkSetAvailability(false)}
-              variant="secondary"
-              disabled={selectedIds.size === 0 || bulkSubmitting}
-              loading={bulkSubmitting}
-            />
-          </View>
-          <View style={{ width: spacing.sm }} />
-          <View style={{ flex: 1 }}>
-            <Button
-              title={`Mark ${selectedIds.size} available`}
-              onPress={() => handleBulkSetAvailability(true)}
-              disabled={selectedIds.size === 0 || bulkSubmitting}
-              loading={bulkSubmitting}
-            />
-          </View>
+          {/* PR-NEXT-ENH-1 — Row 1: smart Mark buttons. Each
+              renders only when its flip-count is > 0 (uniform
+              selection collapses to a single full-width button;
+              mixed shows both side-by-side). The whole row hides
+              when neither count is > 0 — but in practice that's
+              impossible while `selectedIds.size > 0` because every
+              selected item is either available or unavailable. */}
+          {(bulkAvailableCount > 0 || bulkUnavailableCount > 0) && (
+            <View style={styles.markRow}>
+              {bulkAvailableCount > 0 && (
+                <View style={{ flex: 1 }}>
+                  <Button
+                    title={`Mark ${bulkAvailableCount} unavailable`}
+                    onPress={() => handleBulkSetAvailability(false)}
+                    variant="secondary"
+                    disabled={bulkSubmitting}
+                    loading={bulkSubmitting}
+                  />
+                </View>
+              )}
+              {bulkAvailableCount > 0 && bulkUnavailableCount > 0 && (
+                <View style={{ width: spacing.sm }} />
+              )}
+              {bulkUnavailableCount > 0 && (
+                <View style={{ flex: 1 }}>
+                  <Button
+                    title={`Mark ${bulkUnavailableCount} available`}
+                    onPress={() => handleBulkSetAvailability(true)}
+                    disabled={bulkSubmitting}
+                    loading={bulkSubmitting}
+                  />
+                </View>
+              )}
+            </View>
+          )}
+          {/* PR-NEXT-ENH-2 (finding #5 follow-up) — Row 2: Delete.
+              Always rendered while a selection is non-empty (unlike
+              the smart Mark buttons, which can both hide on no-flip
+              selections — though that case is currently
+              unreachable). Destructive variant flags the
+              irreversible action; the Alert subtitle reassures
+              shopkeepers that past orders are unaffected. */}
+          <Button
+            title={`Delete ${selectedIds.size} item${
+              selectedIds.size > 1 ? 's' : ''
+            }`}
+            onPress={handleBulkDelete}
+            variant="destructive"
+            disabled={bulkSubmitting}
+            loading={bulkSubmitting}
+            fullWidth
+          />
         </View>
       )}
     </SafeAreaView>
@@ -739,13 +887,23 @@ const styles = StyleSheet.create({
     ...typography.bodyBold,
     color: colors.primary,
   },
+  // PR-NEXT-ENH-2 — bar now stacks two rows (ENH-1 mark buttons +
+  // the ENH-2 destructive Delete button) so flex-column with a
+  // small vertical gap. Pre-PR this was a single horizontal row.
   bulkBar: {
-    flexDirection: 'row',
+    flexDirection: 'column',
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
     backgroundColor: colors.surface,
     borderTopWidth: 1,
     borderTopColor: colors.border,
+    gap: spacing.sm,
     ...shadow.card,
+  },
+  // PR-NEXT-ENH-2 — Row 1 (the ENH-1 mark buttons) keeps the
+  // pre-PR side-by-side flex:1 layout. Wrapping it in its own row
+  // lets the Delete button below sit on its own full-width row.
+  markRow: {
+    flexDirection: 'row',
   },
 });

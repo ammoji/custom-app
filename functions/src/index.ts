@@ -55,6 +55,12 @@ import {
 // / 'validateBulkMenuRequest'", re-add THESE TWO LINES below.
 import { AuditLogInput, buildAuditLogEntry } from './auditLogHelpers';
 import { validateBulkMenuRequest } from './bulkMenuHelpers';
+// PR-NEXT-ENH-2 (finding #5 follow-up) — DO NOT REMOVE. Used by the
+// new `bulkRemoveMenuItems` callable below to validate shopOwner
+// claim + the menuItemIds payload before issuing the soft-delete
+// batch. Auto-formatter risk per code-discipline; if tsc complains
+// "Cannot find name 'validateBulkRemoveRequest'", re-add this line.
+import { validateBulkRemoveRequest } from './bulkRemoveMenuHelpers';
 // PR 32 — DO NOT REMOVE. Used by `addCustomMenuItem` (since PR 6),
 // `addExtractedMenuItems`, and `extractMenuFromImage` to validate
 // the `category` field against the canonical 10-value whitelist.
@@ -2330,6 +2336,104 @@ export const bulkUpdateMenuAvailability = onCall<{
     });
 
     return { updatedCount, skippedCount };
+  },
+);
+
+// PR-NEXT-ENH-2 (finding #5 follow-up) — Bulk soft-delete menu items
+// for the calling shop owner. Same shape as
+// `bulkUpdateMenuAvailability` above (chunk-query the shop's menu
+// subcollection, batch-write per matched doc, return
+// `{deletedCount, skippedCount}`); the difference is purely the
+// write payload — `deletedAt: serverTimestamp() + available: false +
+// updatedAt: serverTimestamp()`, matching the per-item
+// `removeMenuItem` callable so customer / public listings filter
+// the deleted docs identically. Already-deleted items
+// (`deletedAt != null`) are skipped, not re-stamped — re-stamping
+// would be harmless but skews `deletedCount` upward in a way that
+// confuses the shopkeeper UI's "X deleted, Y skipped" toast.
+//
+// Order history is unaffected — `CartItem` snapshots name / price /
+// imageUrl at order time, no live read of the menu doc.
+export const bulkRemoveMenuItems = onCall<{ menuItemIds: string[] }>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    const check = validateBulkRemoveRequest({
+      auth: auth
+        ? {
+            uid: auth.uid,
+            token: auth.token as unknown as {
+              shopOwner?: unknown;
+              shopId?: unknown;
+            },
+          }
+        : null,
+      menuItemIds: request.data?.menuItemIds,
+    });
+    if (!check.ok) {
+      throw new HttpsError(check.code, check.message);
+    }
+    const { shopId, validIds } = check;
+
+    // Chunk + match against the shop's own subcollection — same
+    // shape as `bulkUpdateMenuAvailability`. Firestore `in` query is
+    // limited to 30 ids per batch in v9+; BULK_REMOVE_MAX_IDS = 100
+    // ⇒ at most 4 chunks.
+    const CHUNK = 30;
+    const menuRef = db.collection(`shops/${shopId}/menu`);
+    const matchedIds: string[] = [];
+    for (let i = 0; i < validIds.length; i += CHUNK) {
+      const chunk = validIds.slice(i, i + CHUNK);
+      // eslint-disable-next-line no-await-in-loop
+      const snap = await menuRef
+        .where(FieldPath.documentId(), 'in', chunk)
+        .get();
+      for (const doc of snap.docs) {
+        const data = doc.data() as { deletedAt?: unknown };
+        // Skip already-deleted (see header note).
+        if (data.deletedAt != null) continue;
+        matchedIds.push(doc.id);
+      }
+    }
+
+    // Batch write. Firestore batches are capped at 500 ops; 100 ids
+    // fits comfortably. Soft-delete payload mirrors the per-item
+    // `removeMenuItem` callable verbatim so the same `deletedAt`
+    // filter on every listing surface (`listMyShopMenu`,
+    // `listShopMenuPublic`, `searchMenuPublic`,
+    // `bulkUpdateMenuAvailability`) drops these docs identically.
+    if (matchedIds.length > 0) {
+      const batch = db.batch();
+      for (const id of matchedIds) {
+        batch.update(menuRef.doc(id), {
+          deletedAt: FieldValue.serverTimestamp(),
+          available: false,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
+      await batch.commit();
+    }
+
+    const deletedCount = matchedIds.length;
+    const skippedCount = validIds.length - matchedIds.length;
+
+    // Best-effort audit log; non-fatal. Mirrors the
+    // `bulkUpdateMenuAvailability` posture (actorRole=shopOwner,
+    // actionType=shop.bulk_menu_remove).
+    await writeAuditLog({
+      actorUid: auth!.uid,
+      actorRole: 'shopOwner',
+      actionType: 'shop.bulk_menu_remove',
+      targetType: 'shop',
+      targetId: shopId,
+      metadata: {
+        requestedCount: validIds.length,
+        deletedCount,
+        skippedCount,
+      },
+    });
+
+    return { deletedCount, skippedCount };
   },
 );
 

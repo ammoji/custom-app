@@ -216,4 +216,99 @@ describe('canCustomerCancelPaidOrder — paidAt + window math', () => {
     });
     expect(r.ok).toBe(true);
   });
+
+  // PR-NEXT-HOTFIX-2 — the bug-class repetition this hotfix closes.
+  // Production webhook writes `paidAt: FieldValue.serverTimestamp()`
+  // (see `functions/src/index.ts:1383` + `:3930`); the Admin SDK
+  // hands the field back as a Firestore `Timestamp` object on read,
+  // not as millis. Pre-hotfix the validator's `typeof !== 'number'`
+  // check rejected every real production cancel attempt with
+  // "Order has no paid timestamp" — fully blocking the customer
+  // self-service cancel window for paid online orders. Razorpay's
+  // suspension during the May 30 pilot kept this bug latent; the
+  // moment Razorpay restores, this is a pilot-blocker.
+  //
+  // Mirrors HOTFIX-1's `validateDeliveryProofUploadAuth` widening.
+
+  test('PR-NEXT-HOTFIX-2 — accepts Firestore Timestamp-like (the actual production shape)', () => {
+    const paidAtMillis = 1_000_000;
+    const timestampLike = { toMillis: () => paidAtMillis };
+    const r = canCustomerCancelPaidOrder({
+      auth: baseAuth,
+      order: makeOrder({ paidAt: timestampLike }),
+      now: paidAtMillis + 60_000, // 1 min in — well inside the window
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  test('PR-NEXT-HOTFIX-2 — Timestamp-like at epoch 0 → failed-precondition', () => {
+    // Defensive: a Timestamp at Unix epoch 0 cannot represent a real
+    // payment event. Reject the same way a missing paidAt does.
+    const zeroTs = { toMillis: () => 0 };
+    const r = canCustomerCancelPaidOrder({
+      auth: baseAuth,
+      order: makeOrder({ paidAt: zeroTs }),
+      now: 60_000,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe('failed-precondition');
+      expect(r.message).toMatch(/timestamp/i);
+    }
+  });
+
+  test('PR-NEXT-HOTFIX-2 — Timestamp-like with non-finite millis → failed-precondition', () => {
+    // Hostile / malformed Timestamp returning NaN or Infinity must
+    // not pass the gate.
+    const badTs = { toMillis: () => NaN };
+    const r = canCustomerCancelPaidOrder({
+      auth: baseAuth,
+      order: makeOrder({ paidAt: badTs }),
+      now: 60_000,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('failed-precondition');
+  });
+
+  test('PR-NEXT-HOTFIX-2 — object without toMillis → failed-precondition (defensive)', () => {
+    // An object that's NOT Timestamp-shaped (no `.toMillis` method)
+    // must not silently pass. Falls through to the null branch.
+    const r = canCustomerCancelPaidOrder({
+      auth: baseAuth,
+      order: makeOrder({ paidAt: { foo: 'bar' } }),
+      now: 60_000,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('failed-precondition');
+  });
+
+  test('PR-NEXT-HOTFIX-2 — Timestamp-like + window boundary still respects elapsed math', () => {
+    // Compose the Timestamp-like fix with the existing
+    // window-boundary semantics: at exactly CUSTOMER_CANCEL_WINDOW_MS
+    // elapsed, the answer is still ok (inclusive boundary — matches
+    // the `accepts at exactly the boundary` test above).
+    const paidAtMillis = 1_000_000;
+    const timestampLike = { toMillis: () => paidAtMillis };
+    const r = canCustomerCancelPaidOrder({
+      auth: baseAuth,
+      order: makeOrder({ paidAt: timestampLike }),
+      now: paidAtMillis + CUSTOMER_CANCEL_WINDOW_MS,
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  test('PR-NEXT-HOTFIX-2 — Timestamp-like past the window expires the same as numeric', () => {
+    const paidAtMillis = 1_000_000;
+    const timestampLike = { toMillis: () => paidAtMillis };
+    const r = canCustomerCancelPaidOrder({
+      auth: baseAuth,
+      order: makeOrder({ paidAt: timestampLike }),
+      now: paidAtMillis + CUSTOMER_CANCEL_WINDOW_MS + 1_000,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe('failed-precondition');
+      expect(r.message).toMatch(/expired/i);
+    }
+  });
 });

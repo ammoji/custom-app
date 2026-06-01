@@ -288,6 +288,75 @@ identities entirely if the side-effect is meaningless for them.
 identity, cache key) attaches to the wrong user — usually the
 anonymous launch session or whoever was signed in first.
 
+## Rule 12 — Firestore `Timestamp` reads are NOT plain millis numbers
+
+PR-NEXT-HOTFIX-1 (May 31 2026) and PR-NEXT-HOTFIX-2 (June 1 2026).
+Twice in two days the same bug class shipped to production:
+a server-side validator gated on `typeof someTimestampField !== 'number'`,
+the corresponding write was `FieldValue.serverTimestamp()`, and
+the Admin SDK handed back a Firestore `Timestamp` object on
+read — not millis. Every real production attempt was rejected
+even though the underlying state was correct.
+
+- HOTFIX-1: `validateDeliveryProofUploadAuth` gated on
+  `typeof order.pickedUpAt !== 'number'`. `markPickedUp` writes
+  `pickedUpAt` via `FieldValue.serverTimestamp()`. Every photo
+  upload returned `failed-precondition: "Pick up the order before…"`
+  on demonstrably picked-up orders.
+- HOTFIX-2: `canCustomerCancelPaidOrder` gated on
+  `typeof order.paidAt !== 'number'`. The Razorpay webhook writes
+  `paidAt` via `FieldValue.serverTimestamp()`. Every customer's
+  in-window cancel attempt would have returned
+  `failed-precondition: "Order has no paid timestamp"` — only
+  Razorpay's pilot suspension kept this latent.
+
+Both shipped against test fixtures that used plain millis numbers
+(`paidAt: 1_000_000`), so the unit suite was green while
+production was 100% broken on the gated path. The fixture didn't
+match the production shape.
+
+```ts
+// BUG — typeof gate rejects every Firestore Timestamp read
+if (typeof order.someField !== 'number') return failedPrecondition;
+
+// FIX — normalize-then-narrow; accept both shapes
+const raw: unknown = order.someField;
+const millis: number | null =
+  typeof raw === 'number'
+    ? raw
+    : typeof (raw as { toMillis?: unknown })?.toMillis === 'function'
+      ? (raw as { toMillis: () => number }).toMillis()
+      : null;
+if (millis === null || !Number.isFinite(millis) || millis <= 0) {
+  return failedPrecondition;
+}
+```
+
+**The rule:**
+
+1. **Any server-side validator that gates on a server-written
+   timestamp field MUST normalize via `.toMillis()`** (or accept
+   both shapes via the `toMillis()`-narrowing pattern) BEFORE the
+   gate check. Fields covered: `paidAt`, `pickedUpAt`,
+   `deliveredAt`, `createdAt`, `updatedAt`, anything written via
+   `FieldValue.serverTimestamp()` or upgraded from a millis number
+   later.
+2. **New validator fields comparing against server timestamps
+   require a Firestore-shape fixture in the test suite**, not just
+   a numeric fixture. Add a Timestamp-like
+   (`{ toMillis: () => N }`) test alongside the numeric one.
+3. Any future validator that does
+   `typeof someTimestampField !== 'number'` is **suspect on review**.
+   Either it's wrong now or the field is purely millis-on-write
+   (rare for server timestamps); the burden is on the author to
+   show which.
+
+**Symptom:** a callable returns `failed-precondition` with a
+"missing/invalid timestamp" message on orders that demonstrably
+have the timestamp set. Client-side UI (which gets RNFB's
+flattened-millis serialization) shows the field correctly; only
+the Admin-SDK server path mis-types it.
+
 ## Quick reference
 
 | Layer | What it does | When it fires |
@@ -298,6 +367,7 @@ anonymous launch session or whoever was signed in first.
 | Rule 9 | `<Image>` URIs must guard against empty strings | During edits / review |
 | Rule 10 | Firestore tx: all reads before any writes | During edits / review |
 | Rule 11 | "Register-once" gates keyed to identity, not a bool | During edits / review |
+| Rule 12 | Firestore Timestamp reads need `.toMillis()`-narrowing | During edits / review |
 | `.vscode/settings.json` | Disables organize-imports on save | On IDE save |
 | `npm run audit` | Grep for stripped DO-NOT-REMOVE imports | Before deploy |
 | `tsc --noEmit` | Compile check | Before deploy |

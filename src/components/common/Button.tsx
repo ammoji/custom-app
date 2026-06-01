@@ -5,7 +5,10 @@ import { colors, radii, spacing, typography } from '../../constants/theme';
 type Props = {
   title: string;
   onPress: () => void;
-  variant?: 'primary' | 'secondary' | 'ghost';
+  // PR-NEXT-ENH-2 — `destructive` added for the bulk-delete CTA on
+  // ShopMenuScreen (red surface + white text, full-width-friendly).
+  // Same activity-indicator-on-loading semantics as `primary`.
+  variant?: 'primary' | 'secondary' | 'ghost' | 'destructive';
   size?: 'md' | 'lg';
   loading?: boolean;
   disabled?: boolean;
@@ -37,6 +40,7 @@ export default function Button({
         variant === 'primary' && styles.primary,
         variant === 'secondary' && styles.secondary,
         variant === 'ghost' && styles.ghost,
+        variant === 'destructive' && styles.destructive,
         fullWidth && styles.fullWidth,
         isDisabled && styles.disabled,
         pressed && !isDisabled && { opacity: 0.85 },
@@ -44,7 +48,13 @@ export default function Button({
       ]}
     >
       {loading ? (
-        <ActivityIndicator color={variant === 'primary' ? '#fff' : colors.primary} />
+        <ActivityIndicator
+          color={
+            variant === 'primary' || variant === 'destructive'
+              ? '#fff'
+              : colors.primary
+          }
+        />
       ) : (
         <Text
           style={[
@@ -52,6 +62,7 @@ export default function Button({
             variant === 'primary' && styles.textPrimary,
             variant === 'secondary' && styles.textSecondary,
             variant === 'ghost' && styles.textGhost,
+            variant === 'destructive' && styles.textDestructive,
           ]}
         >
           {title}
@@ -68,10 +79,14 @@ const styles = StyleSheet.create({
   primary: { backgroundColor: colors.primary },
   secondary: { backgroundColor: colors.primaryLight },
   ghost: { backgroundColor: 'transparent' },
+  // PR-NEXT-ENH-2 — destructive: red surface + white text. Used by
+  // the bulk-delete CTA on ShopMenuScreen.
+  destructive: { backgroundColor: colors.danger },
   fullWidth: { alignSelf: 'stretch' },
   disabled: { opacity: 0.4 },
   text: { ...typography.bodyBold },
   textPrimary: { color: '#fff' },
   textSecondary: { color: colors.primaryDark },
   textGhost: { color: colors.primary },
+  textDestructive: { color: '#fff' },
 });

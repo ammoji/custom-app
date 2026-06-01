@@ -88,6 +88,30 @@ export function orderEtaDisplay(
     return { kind: 'hidden' };
   }
 
+  // PR-NEXT-17 (finding #17) — once the shop marks the order
+  // `ready_for_pickup`, the "Pickup ready in/ago" countdown loses
+  // meaning. The order IS ready; counting time-since-ready creates
+  // the stale "Pickup ready 5 min ago" line that contradicts the
+  // chip's post-claim "Ready — Partner is picking up" label.
+  //
+  // Pre-partner-claim window (`ready_for_pickup`,
+  // `deliveryPersonId` still null): the chip alone signals
+  // "ready, awaiting partner."
+  //
+  // Post-partner-claim window (`ready_for_pickup`,
+  // `deliveryPersonId` set, `pickedUpAt` still null): the chip +
+  // PR-NEXT-13a's `PartnerIdentityCard` carry the fresh context.
+  //
+  // Post-pickup window (`pickedUpAt != null`): handled by the
+  // earlier branch above (PR-NEXT-1).
+  //
+  // `deliveryPersonId` is deliberately NOT in `EtaInput` — both
+  // sub-windows produce the same suppression decision, so dragging
+  // a new field into the state machine adds no value.
+  if (order.status === 'ready_for_pickup') {
+    return { kind: 'hidden' };
+  }
+
   // PR 43 — gate the minute count behind shop acceptance. The
   // customer sees no number until the shop owner taps Accept.
   // Pre-PR-43 this state showed "Arriving in ~29 min" based on
@@ -97,7 +121,8 @@ export function orderEtaDisplay(
     return { kind: 'awaiting_confirmation' };
   }
 
-  // Status is accepted / preparing / ready_for_pickup.
+  // Status is accepted / preparing (ready_for_pickup is caught by
+  // the PR-NEXT-17 branch above; pending by the PR 43 branch).
   // Prefer the shop's accepted ETA; fall back to the order's
   // creation-time estimate ONLY if the shop's accepted ETA is
   // somehow missing (legacy orders, defensive).

@@ -62,14 +62,69 @@ describe('PR 43 — orderEtaDisplay', () => {
     });
   });
 
-  test('ready_for_pickup order with readyByEstimate returns ready_by', () => {
+  test('ready_for_pickup order returns hidden (finding #17 — countdown stale once ready)', () => {
+    // PR-NEXT-17 (finding #17) — pre-fix this returned `ready_by`
+    // and the customer saw a contradictory "Pickup ready X min ago"
+    // countdown alongside the chip's "Ready — Partner is picking up"
+    // label. Post-fix the ETA slot stays empty and the chip +
+    // PR-NEXT-13a's `PartnerIdentityCard` carry the fresh context.
     const order: EtaInput = {
       status: 'ready_for_pickup',
       readyByEstimate: NOW + 5 * MIN,
     };
+    expect(orderEtaDisplay(order, NOW)).toEqual({ kind: 'hidden' });
+  });
+
+  test('ready_for_pickup order whose readyByEstimate is in the past also returns hidden (finding #17)', () => {
+    // The "Pickup ready 5 minutes AGO" symptom Sudhir reported: the
+    // shop marked ready, the readyByEstimate moment passed, and the
+    // countdown flipped to elapsed-time copy. Suppression applies
+    // regardless of whether readyByEstimate is in the past or
+    // future — the moment status === 'ready_for_pickup' the
+    // countdown is meaningless.
+    const order: EtaInput = {
+      status: 'ready_for_pickup',
+      readyByEstimate: NOW - 5 * MIN,
+    };
+    expect(orderEtaDisplay(order, NOW)).toEqual({ kind: 'hidden' });
+  });
+
+  test('ready_for_pickup order with NO readyByEstimate also returns hidden (finding #17 — defensive)', () => {
+    // Legacy / defensive: a `ready_for_pickup` order without a
+    // `readyByEstimate` would previously have fallen through to the
+    // `eta_fallback` branch and rendered "Arriving in ~N min" off
+    // `estimatedDeliveryAt`. Same contradiction as the primary
+    // symptom; the new branch suppresses it regardless of estimate
+    // shape.
+    const order: EtaInput = {
+      status: 'ready_for_pickup',
+      estimatedDeliveryAt: NOW + 12 * MIN,
+    };
+    expect(orderEtaDisplay(order, NOW)).toEqual({ kind: 'hidden' });
+  });
+
+  test('accepted order with readyByEstimate still returns ready_by (regression: only ready_for_pickup is suppressed)', () => {
+    // Regression anchor for PR-NEXT-17 — make sure the new
+    // suppression branch didn't accidentally swallow the
+    // accepted/preparing-state countdown.
+    const order: EtaInput = {
+      status: 'accepted',
+      readyByEstimate: NOW + 10 * MIN,
+    };
     expect(orderEtaDisplay(order, NOW)).toEqual({
       kind: 'ready_by',
-      readyByEstimate: NOW + 5 * MIN,
+      readyByEstimate: NOW + 10 * MIN,
+    });
+  });
+
+  test('preparing order with readyByEstimate still returns ready_by (same regression check)', () => {
+    const order: EtaInput = {
+      status: 'preparing',
+      readyByEstimate: NOW + 10 * MIN,
+    };
+    expect(orderEtaDisplay(order, NOW)).toEqual({
+      kind: 'ready_by',
+      readyByEstimate: NOW + 10 * MIN,
     });
   });
 
