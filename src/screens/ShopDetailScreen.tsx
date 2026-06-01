@@ -1,5 +1,5 @@
 import { useNavigation, useRoute } from '@react-navigation/native';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
     Alert,
     Image,
@@ -17,16 +17,25 @@ import Loader from '../components/common/Loader';
 import Price from '../components/common/Price';
 import QuantityStepper from '../components/common/QuantityStepper';
 import ScreenHeader from '../components/common/ScreenHeader';
+import MenuSearchBar from '../components/menu/MenuSearchBar';
 import ShopRatingBadge from '../components/shop/ShopRatingBadge';
 import { CATEGORIES } from '../constants/categories';
 import { colors, radii, spacing, typography } from '../constants/theme';
 import { Analytics } from '../services/analytics';
+import {
+  loadMenuSearchHistory,
+  saveMenuSearchHistory,
+} from '../services/menuSearchHistory';
 import { orderService } from '../services/orderService';
 import { useCartStore } from '../store/useCartStore';
 import { useLocationStore } from '../store/useLocationStore';
 import { MenuItem, Shop } from '../types';
 import { haversineKm } from '../utils/distance';
 import { formatDistance, formatRupees } from '../utils/format';
+import {
+  filterMenuByQuery,
+  pushToSearchHistory,
+} from '../utils/menuSearchHelpers';
 
 /**
  * Phase 12a-v2-iii: customer-facing per-shop menu. Replaces the legacy
@@ -55,6 +64,9 @@ export default function ShopDetailScreen() {
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // PR-NEXT-9 (finding #6) — in-shop menu search.
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchHistory, setSearchHistory] = useState<string[]>([]);
 
   const cartShopId = useCartStore(s => s.shopId);
   const cartShopName = useCartStore(s => s.shopName);
@@ -109,9 +121,23 @@ export default function ShopDetailScreen() {
     };
   }, [shopId, location]);
 
+  // PR-NEXT-9 — hydrate per-(role, shopId) recent-query history
+  // from AsyncStorage on mount + shopId change.
+  useEffect(() => {
+    if (!shopId) return;
+    loadMenuSearchHistory('customer', shopId).then(setSearchHistory);
+  }, [shopId]);
+
+  // PR-NEXT-9 — substring filter on item name, applied BEFORE the
+  // category grouping so empty categories disappear cleanly.
+  const filteredMenu = useMemo(
+    () => filterMenuByQuery(menu, searchQuery),
+    [menu, searchQuery],
+  );
+
   const sections = useMemo(() => {
     const groups: Record<string, MenuItem[]> = {};
-    menu.forEach(m => {
+    filteredMenu.forEach(m => {
       (groups[m.category] ??= []).push(m);
     });
     return CATEGORIES.filter(c => groups[c.id]?.length).map(c => ({
@@ -120,7 +146,21 @@ export default function ShopDetailScreen() {
       // stable even when shop owners add custom items mid-session.
       data: groups[c.id]!.slice().sort((a, b) => a.name.localeCompare(b.name)),
     }));
-  }, [menu]);
+  }, [filteredMenu]);
+
+  // PR-NEXT-9 — fire-and-forget history write on blur /
+  // onSubmitEditing (first wins). Failures swallowed by the wrapper
+  // so a storage hiccup never breaks the search input.
+  const persistHistory = useCallback(() => {
+    if (!shopId || !searchQuery.trim()) return;
+    setSearchHistory(prev => {
+      const next = pushToSearchHistory(prev, searchQuery);
+      if (next !== prev) {
+        void saveMenuSearchHistory('customer', shopId, next);
+      }
+      return next;
+    });
+  }, [shopId, searchQuery]);
 
   const onAdd = (item: MenuItem) => {
     if (!shop) return;
@@ -184,6 +224,11 @@ export default function ShopDetailScreen() {
         ListHeaderComponent={
           <View>
             <Image source={{ uri: shop.imageUrl }} style={styles.hero} />
+            {/* hero/meta block first; search bar slots in BELOW the
+                meta so the shop identity reads as the page-header
+                anchor, search reads as a tool you reach for after
+                you've landed. Bar is intentionally non-sticky:
+                scrolls out of view with the rest of the header. */}
             <View style={styles.heroBody}>
               <View style={styles.titleRow}>
                 <Text
@@ -215,6 +260,29 @@ export default function ShopDetailScreen() {
                 {formatRupees(shop.minOrder)}
               </Text>
             </View>
+            {/* PR-NEXT-9 — in-shop search bar. Filters the menu by
+                name, case-insensitive substring. Recent-query chips
+                appear on focus while empty. */}
+            <MenuSearchBar
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              onSubmit={persistHistory}
+              onBlur={persistHistory}
+              recents={searchHistory}
+              onRecentTap={q => {
+                setSearchQuery(q);
+                // Re-tapping a chip promotes it to position 0 via
+                // the dedup-then-move-to-front semantics in
+                // pushToSearchHistory.
+                setSearchHistory(prev => {
+                  const next = pushToSearchHistory(prev, q);
+                  if (next !== prev && shopId) {
+                    void saveMenuSearchHistory('customer', shopId, next);
+                  }
+                  return next;
+                });
+              }}
+            />
           </View>
         }
         renderSectionHeader={({ section: { title } }) => (
@@ -223,12 +291,27 @@ export default function ShopDetailScreen() {
           </View>
         )}
         ListEmptyComponent={
-          <View style={{ paddingTop: spacing.xl }}>
-            <EmptyState
-              title="No items right now"
-              subtitle="This shop hasn't added anything to its menu yet. Check back soon."
-            />
-          </View>
+          // PR-NEXT-9 — distinguish query-driven empty from the
+          // genuine empty-menu case. A non-empty query takes
+          // precedence; otherwise the existing "shop has no items"
+          // copy still applies.
+          searchQuery.trim() ? (
+            <View style={styles.noResults}>
+              <Text style={styles.noResultsTitle}>
+                No items match “{searchQuery.trim()}”
+              </Text>
+              <Text style={styles.noResultsSub}>
+                Try a shorter or different word, or clear the search.
+              </Text>
+            </View>
+          ) : (
+            <View style={{ paddingTop: spacing.xl }}>
+              <EmptyState
+                title="No items right now"
+                subtitle="This shop hasn't added anything to its menu yet. Check back soon."
+              />
+            </View>
+          )
         }
         renderItem={({ item }) => (
           <View style={styles.productRow}>
@@ -331,6 +414,23 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg },
   hero: { width: '100%', height: 180, backgroundColor: colors.surface },
   heroBody: { padding: spacing.lg },
+  // PR-NEXT-9 — inline empty-state for query-driven no-results.
+  noResults: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.xl,
+    alignItems: 'center',
+  },
+  noResultsTitle: {
+    ...typography.bodyBold,
+    color: colors.textPrimary,
+    marginBottom: spacing.xs,
+    textAlign: 'center',
+  },
+  noResultsSub: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    textAlign: 'center',
+  },
   titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm },
   address: { ...typography.body, color: colors.textSecondary, marginTop: spacing.xs },
   meta: { ...typography.caption, marginTop: spacing.sm },

@@ -16,16 +16,25 @@ import Button from '../../components/common/Button';
 import EmptyState from '../../components/common/EmptyState';
 import Loader from '../../components/common/Loader';
 import ScreenHeader from '../../components/common/ScreenHeader';
+import MenuSearchBar from '../../components/menu/MenuSearchBar';
 import { CATEGORIES, CategoryId } from '../../constants/categories';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
 // PR 3 — concurrency cleanup. authService used to refresh claims
 // when the server says permission-denied (role was revoked).
 import { authService } from '../../services/authService';
+import {
+  loadMenuSearchHistory,
+  saveMenuSearchHistory,
+} from '../../services/menuSearchHistory';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
 import type { MenuItem } from '../../types';
 import { formatRupees } from '../../utils/format';
 import { handleRoleAuthError } from '../../utils/handleRoleAuthError';
+import {
+  filterMenuByQuery,
+  pushToSearchHistory,
+} from '../../utils/menuSearchHelpers';
 
 type Filter = 'all' | 'available' | 'unavailable' | 'custom';
 
@@ -70,6 +79,11 @@ export default function ShopMenuScreen() {
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkSubmitting, setBulkSubmitting] = useState(false);
+  // PR-NEXT-9 (finding #6) — shopkeeper-side menu search.
+  // Independent history namespace from the customer surface (see
+  // menuSearchHistory.ts) so the two roles don't cross-pollute.
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchHistory, setSearchHistory] = useState<string[]>([]);
 
   const fetchOnce = useCallback(async () => {
     try {
@@ -115,18 +129,44 @@ export default function ShopMenuScreen() {
     fetchOnce();
   }, [isShopOwner, shopId, fetchOnce]);
 
+  // PR-NEXT-9 — hydrate per-(role, shopId) recent-query history.
+  useEffect(() => {
+    if (!shopId) return;
+    loadMenuSearchHistory('shopkeeper', shopId).then(setSearchHistory);
+  }, [shopId]);
+
+  // PR-NEXT-9 — substring filter on item name. Composes BEFORE the
+  // status filter so the status counts reflect what's visible.
+  const queryFilteredItems = useMemo(
+    () => filterMenuByQuery(items, searchQuery),
+    [items, searchQuery],
+  );
+
   const visibleItems = useMemo(() => {
     switch (filter) {
       case 'available':
-        return items.filter(i => i.available);
+        return queryFilteredItems.filter(i => i.available);
       case 'unavailable':
-        return items.filter(i => !i.available);
+        return queryFilteredItems.filter(i => !i.available);
       case 'custom':
-        return items.filter(i => i.isCustom);
+        return queryFilteredItems.filter(i => i.isCustom);
       default:
-        return items;
+        return queryFilteredItems;
     }
-  }, [items, filter]);
+  }, [queryFilteredItems, filter]);
+
+  // PR-NEXT-9 — fire-and-forget history write on blur /
+  // onSubmitEditing.
+  const persistHistory = useCallback(() => {
+    if (!shopId || !searchQuery.trim()) return;
+    setSearchHistory(prev => {
+      const next = pushToSearchHistory(prev, searchQuery);
+      if (next !== prev) {
+        void saveMenuSearchHistory('shopkeeper', shopId, next);
+      }
+      return next;
+    });
+  }, [shopId, searchQuery]);
 
   // Build a flat list with category headers as inert rows so a
   // single FlatList can render section titles without sectioning
@@ -310,6 +350,27 @@ export default function ShopMenuScreen() {
           </Pressable>
         </View>
       )}
+      {/* PR-NEXT-9 — shopkeeper menu search bar sits ABOVE the
+          status-filter chips. Search-by-name is the dominant
+          intent when a shop has many items; status filtering is
+          the modifier (composes via queryFilteredItems above). */}
+      <MenuSearchBar
+        value={searchQuery}
+        onChangeText={setSearchQuery}
+        onSubmit={persistHistory}
+        onBlur={persistHistory}
+        recents={searchHistory}
+        onRecentTap={q => {
+          setSearchQuery(q);
+          setSearchHistory(prev => {
+            const next = pushToSearchHistory(prev, q);
+            if (next !== prev && shopId) {
+              void saveMenuSearchHistory('shopkeeper', shopId, next);
+            }
+            return next;
+          });
+        }}
+      />
       <View style={styles.toolbar}>
         <View style={styles.filterRow}>
           {(['all', 'available', 'unavailable', 'custom'] as Filter[]).map(f => (
@@ -391,6 +452,15 @@ export default function ShopMenuScreen() {
             <EmptyState
               title="Couldn't load menu"
               subtitle="Tap Retry above when your connection is back."
+            />
+          ) : searchQuery.trim() ? (
+            // PR-NEXT-9 — query-driven empty takes precedence over
+            // the genuine no-items-yet copy so the shopkeeper isn't
+            // pushed to add a duplicate of something that already
+            // exists but is hidden behind the active filter.
+            <EmptyState
+              title={`No items match “${searchQuery.trim()}”`}
+              subtitle="Try a shorter or different word, or clear the search."
             />
           ) : (
             <EmptyState
