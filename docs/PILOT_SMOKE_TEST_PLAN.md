@@ -130,7 +130,7 @@ Sign in as **Admin** (+91 3145415346, OTP 123456).
       (bottom nav). Scroll to a new **"Help & Support"**
       section. One row: "Contact support." Tap it. The OS
       mail app opens with:
-      - To: `sudhir.davim@gmail.com`
+      - To: `sarastacklabs@gmail.com`
       - Subject: `HamaraSetu support`
       - Body starts with two blank lines, then `---`, then
         `Platform: ios`, then `App: HamaraSetu`, then a hint

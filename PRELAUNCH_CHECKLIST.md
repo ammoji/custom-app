@@ -7459,7 +7459,7 @@ immediately. The checklist is the only thing that survives memory.
 - [x] **Single source of truth — `src/constants/branding.ts`.**
       Exports `APP_NAME` (`'HamaraSetu'`), `TAGLINE`
       (`'Shop Smart, Shop Local'`), `SUPPORT_EMAIL`
-      (`'sudhir.davim@gmail.com'`), `OPERATING_ENTITY`
+      (`'sarastacklabs@gmail.com'`), `OPERATING_ENTITY`
       (`'Sara Stack Labs'`), `OPERATING_CITY` / `OPERATING_DISTRICT`
       / `OPERATING_STATE` / `LEGAL_JURISDICTION`. Every in-app
       brand string now imports from here so a future rename is
@@ -7486,7 +7486,7 @@ immediately. The checklist is the only thing that survives memory.
       "Contact support" row that calls `openSupportEmail()`.
 
 - [x] **`src/utils/openSupport.ts`.** New helper builds a
-      `mailto:sudhir.davim@gmail.com?subject=HamaraSetu support&body=…`
+      `mailto:sarastacklabs@gmail.com?subject=HamaraSetu support&body=…`
       URL with a `Platform: <ios|android|web>` stamp and
       `App: HamaraSetu` line, gates on `Linking.canOpenURL`,
       and silently no-ops on failure (no crash if the device
@@ -7536,7 +7536,7 @@ immediately. The checklist is the only thing that survives memory.
       trigger camera / photos / mic / location prompts and
       verify each iOS/Android system dialog reads "HamaraSetu
       needs …", (4) `Profile → Contact support` opens the
-      mail app pre-filled to `sudhir.davim@gmail.com` with
+      mail app pre-filled to `sarastacklabs@gmail.com` with
       `HamaraSetu support` subject + `App: HamaraSetu` body
       line, (5) `Profile → Privacy policy` + `Terms of service`
       open the HamaraSetu-titled hosted pages. `[Phase 39-smoke]`
@@ -8929,6 +8929,8 @@ immediately. The checklist is the only thing that survives memory.
       5. **Mid-cycle race resilience** → 3 orders back-to-back through the full lifecycle in parallel. No status display ghosting on any.
 
 - [ ] **Doc trail.** Findings `#2`, `#3`, `#10`, `#11` marked **SHIPPED** in `@c:\Users\dahiy\grocery-mvp\docs\TESTING-FINDINGS-2026-05-30.md`; finding `#16` marked **partially shipped** (sub-a — push fan-out — done; sub-b/c/d defer to PR-NEXT-3 / PR-NEXT-6).
+
+- [x] **PR-NEXT-13a addendum — partner-accept customer push + identity surface.** Closes a gap from Sudhir's smoke testing: when the delivery partner accepted a pickup, the customer got no notification and the partner's identity wasn't visible until the actual pickup event (5–30 min window of opacity). Server extends `claimDelivery` (`@c:\Users\dahiy\grocery-mvp\functions\src\index.ts:3480`) with two post-transaction best-effort steps wrapped in `try/catch` so neither failure mode can roll back the successful atomic claim: (1) read the partner's `users/{uid}.displayName` via new pure helper `pickPartnerDisplayName` (`@c:\Users\dahiy\grocery-mvp\functions\src\claimDeliveryHelpers.ts`) and denormalise onto the order as `deliveryPersonName`; (2) fire `pushToUser(customerUid, "Your delivery partner is on the way", "<partnerName> will pick up your order from <shopName>.", { type: 'order_partner_accepted' })`. Schema-additive `Order.deliveryPersonName?: string` (legacy + mid-flight orders absent → fallback copy "Your delivery partner"). Client adds `PartnerIdentityCard` (`@c:\Users\dahiy\grocery-mvp\src\components\order\PartnerIdentityCard.tsx`) on `OrderDetailScreen` between the status card and delivery-address card whenever `deliveryPersonId` is set and the order isn't cancelled — initials-in-coloured-circle avatar (NOT a real photo; partner profile photo flow doesn't exist yet, and the KYC selfie is PII) + display name + state-aware subtitle (📦 Heading to the shop / 🛵 On the way to you) keyed on `pickedUpAt`. Phone number stays gated to post-pickup; this PR doesn't change that. `AuthBootstrap.tsx` adds the new `order_partner_accepted` deep-link case (customer-only single-target, same posture as `order_picked_up`). Pure helper `initialsFor` (`@c:\Users\dahiy\grocery-mvp\src\utils\partnerInitials.ts`) lives in its own pure `.ts` file so the test suite pins the avatar-glyph logic without dragging the `.tsx` component through the JSX-free `tests/tsconfig.json`. Pinned by 8 `pickPartnerDisplayName` tests + 9 `initialsFor` tests; suite at **1172 / 1172** (was 1155). Server-first deploy: `firebase deploy --only "functions:claimDelivery"` → verify `allUsers` IAM on the `claimdelivery` Cloud Run service → `eas update --branch production --message "PR-NEXT-13a partner-accept push"`.
 
 - [ ] **Out of scope (deferred).** Promoting `'picked_up'` to a real `OrderStatus` enum value (server-side state-machine refactor — synthetic state in `displayOrderStatus` is the cheap defensive fix for now). Shop-dashboard "Delivered today" section enhancement (#16(d)). COD confirmation flow (#12 → PR-NEXT-3). Delivery proof photo (#13 → PR-NEXT-6).
 

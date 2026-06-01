@@ -272,7 +272,7 @@ with third parties (Y/N + who)*, *Processed ephemerally (Y/N)*.
 | Question | Answer |
 | --- | --- |
 | Is all of the user data collected by your app encrypted in transit? | **Yes** — all client-server traffic is HTTPS/TLS (Firebase + Razorpay both enforce TLS). |
-| Do you provide a way for users to request that their data be deleted? | **Yes — via support email** (currently `sudhir.davim@gmail.com`). **TODO (post-pilot):** add an in-app "Delete my account" flow. Until then, the email-based path is acceptable to Play. |
+| Do you provide a way for users to request that their data be deleted? | **Yes — via support email** (currently `sarastacklabs@gmail.com`). **TODO (post-pilot):** add an in-app "Delete my account" flow. Until then, the email-based path is acceptable to Play. |
 | Has your app committed to following the Google Play Families Policy? | **N/A** — app is 18+. |
 | Has your data collection and handling been independently validated against a global security standard? | **No** — answer truthfully; no ISO 27001 / SOC 2 at this stage. |
 
@@ -352,7 +352,7 @@ Paste verbatim:
 >
 > **Operating entity:** Sara Stack Labs, Faridabad, Haryana.
 >
-> **Support:** sudhir.davim@gmail.com
+> **Support:** sarastacklabs@gmail.com
 > **Privacy policy:** https://grocery-mvp-dev.web.app/privacy
 > **Terms of service:** https://grocery-mvp-dev.web.app/terms
 
@@ -370,7 +370,7 @@ room to extend.)
 
 | Field | Value |
 | --- | --- |
-| Email | `sudhir.davim@gmail.com` *(per `src/constants/branding.ts` `SUPPORT_EMAIL`; switch to `sarastacklabs@gmail.com` post-pilot when the email migration happens — flagged in CLAUDE.md)* |
+| Email | `sarastacklabs@gmail.com` *(per `src/constants/branding.ts` `SUPPORT_EMAIL`; switch to `sarastacklabs@gmail.com` post-pilot when the email migration happens — flagged in CLAUDE.md)* |
 | Phone | Optional — leave blank for pilot, add a support number before public launch |
 | Website | `https://grocery-mvp-dev.web.app` *(or a marketing site once one exists)* |
 
@@ -541,7 +541,7 @@ Store readiness":
 
 - [ ] In-app "Delete my account" flow (Play strongly recommends for
       public launch; email-based path acceptable for pilot).
-- [ ] Switch `SUPPORT_EMAIL` from `sudhir.davim@gmail.com` to a
+- [ ] Switch `SUPPORT_EMAIL` from `sarastacklabs@gmail.com` to a
       brand email (`sarastacklabs@gmail.com`) — deferred post-pilot
       per CLAUDE.md, but Play listing exposes this email publicly,
       so do it before public launch.

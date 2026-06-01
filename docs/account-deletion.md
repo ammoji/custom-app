@@ -2,7 +2,7 @@
 
 **App:** HamaraSetu (हमारा सेतु)
 **Operating entity:** Sara Stack Labs, Faridabad, Haryana, India
-**Contact:** sudhir.davim@gmail.com
+**Contact:** sarastacklabs@gmail.com
 
 This page describes how to request deletion of your HamaraSetu
 account and the data associated with it.
@@ -11,7 +11,7 @@ account and the data associated with it.
 
 ## How to request account deletion
 
-Send an email to **sudhir.davim@gmail.com** with:
+Send an email to **sarastacklabs@gmail.com** with:
 
 - **Subject:** `Account deletion request — HamaraSetu`
 - **From:** the email address you have on file with us (if any), or
@@ -72,7 +72,7 @@ regulatory ones listed above.
 We currently offer account-level deletion only. To remove individual
 items (e.g., a specific saved address or a specific past order)
 without deleting your entire account, please contact us at
-**sudhir.davim@gmail.com** with the specific request and we will
+**sarastacklabs@gmail.com** with the specific request and we will
 process it on a best-effort basis within the same 30-day window.
 
 ---
@@ -82,4 +82,4 @@ process it on a best-effort basis within the same 30-day window.
 For any questions about this account-deletion process or about how
 HamaraSetu handles your data, please see our
 [Privacy Policy](https://grocery-mvp-dev.web.app/privacy) or contact
-**sudhir.davim@gmail.com**.
+**sarastacklabs@gmail.com**.

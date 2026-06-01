@@ -527,6 +527,20 @@ export type Order = {
   //   ready_for_pickup + deliveryPersonId=X + pickedUpAt=ts  → picked up, on the way to customer
   //   delivered        + deliveredAt=ts                     → done
   deliveryPersonId: string | null;
+  // PR-NEXT-13a — denormalized partner displayName captured at claim
+  // time. Set by `claimDelivery` immediately after the atomic
+  // transaction succeeds; absent on legacy / mid-flight orders or on
+  // partners whose user doc doesn't have a `displayName`. Customer
+  // renders this on `OrderDetailScreen` via `PartnerIdentityCard` as
+  // soon as the partner claims, not waiting for pickup.
+  //
+  // Why denormalize (not look up `users/{deliveryPersonId}` from the
+  // client): the customer's order watcher is a single-doc subscription;
+  // adding a partner-user-doc lookup would double the read cost on
+  // every order render. The denormalization is a one-time write at
+  // claim time. If the partner later renames themselves, this snapshot
+  // stays — order documents are historical records.
+  deliveryPersonName?: string;
   pickedUpAt: number | null;
   deliveredAt: number | null;
   // Audit trail of every status change. Server (Cloud Functions) is

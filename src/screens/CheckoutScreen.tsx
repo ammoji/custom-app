@@ -741,7 +741,12 @@ export default function CheckoutScreen() {
 
   if (items.length === 0) {
     return (
-      <SafeAreaView style={styles.container} edges={['top']}>
+      // HOTFIX-3 — include the 'bottom' edge so the Android
+      // gesture-nav pill doesn't overlap the in-flow "Pay" /
+      // "Place Order" CTA below. Same reasoning as CartScreen —
+      // see that file's HOTFIX-3 comment for the floating-vs-in-flow
+      // distinction with PR-NEXT-2.
+      <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
         <ScreenHeader title="Checkout" onBack={() => nav.goBack()} />
         <EmptyState
           title="Your cart is empty"
@@ -754,7 +759,10 @@ export default function CheckoutScreen() {
   }
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
+    // HOTFIX-3 — see comment on the empty-cart branch above. Both
+    // branches need the bottom edge so the bottom CTA clears the
+    // Android gesture-nav pill.
+    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <ScreenHeader title="Checkout" onBack={() => nav.goBack()} />
       <KeyboardAvoidingView
         style={{ flex: 1 }}

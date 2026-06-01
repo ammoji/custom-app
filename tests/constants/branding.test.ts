@@ -40,8 +40,12 @@ describe('PR 39 — branding constants', () => {
     expect(TAGLINE).toBe('Shop Smart, Shop Local');
   });
 
-  test('SUPPORT_EMAIL is the personal pilot address (Sara Stack Labs migration is post-pilot)', () => {
-    expect(SUPPORT_EMAIL).toBe('sudhir.davim@gmail.com');
+  test('SUPPORT_EMAIL is the Sara Stack Labs operating-entity inbox', () => {
+    // Migrated from `sudhir.davim@gmail.com` ahead of the Razorpay
+    // KYC resubmission. Apple Developer `appleId` in eas.json stays
+    // on the personal account during pilot; only the customer-facing
+    // support address moved.
+    expect(SUPPORT_EMAIL).toBe('sarastacklabs@gmail.com');
   });
 
   test('OPERATING_ENTITY is Sara Stack Labs', () => {

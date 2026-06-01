@@ -7,7 +7,7 @@ This Privacy Policy describes how HamaraSetu ("we", "our", "us")
 collects, uses, and protects your personal information when you use
 our mobile application ("the App").
 
-If you have any questions, contact us at: **sudhir.davim@gmail.com**
+If you have any questions, contact us at: **sarastacklabs@gmail.com**
 
 ---
 
@@ -135,7 +135,7 @@ any circumstances.
 
 - **Account data** is retained while your account is active. You may
   request deletion at any time by emailing
-  sudhir.davim@gmail.com.
+  sarastacklabs@gmail.com.
 - **Order history** is retained for at least 3 years after the order
   date, for tax and regulatory reasons under Indian law.
 - **Saved addresses** are retained until you delete them.
@@ -157,7 +157,7 @@ similar regulations, you have the right to:
 - **Withdraw consent** for any optional data collection (e.g.
   location). Withdrawing consent may limit some App functionality
 
-To exercise these rights, email **sudhir.davim@gmail.com**. We will
+To exercise these rights, email **sarastacklabs@gmail.com**. We will
 respond within 30 days.
 
 ---
@@ -183,7 +183,7 @@ information.
 HamaraSetu is not intended for users under the age of 13. We do
 not knowingly collect personal information from children under 13.
 If you believe we have collected such information, please contact
-us at sudhir.davim@gmail.com and we will delete it promptly.
+us at sarastacklabs@gmail.com and we will delete it promptly.
 
 ---
 
@@ -200,7 +200,7 @@ significant changes, we will notify users via the App or via email.
 For any questions about this Privacy Policy, or to exercise your
 rights, contact us at:
 
-**Email:** sudhir.davim@gmail.com
+**Email:** sarastacklabs@gmail.com
 
 ---
 

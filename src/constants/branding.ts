@@ -19,7 +19,12 @@
 export const APP_NAME = 'HamaraSetu';
 export const APP_NAME_DEVANAGARI = 'हमारा सेतु';
 export const TAGLINE = 'Shop Smart, Shop Local';
-export const SUPPORT_EMAIL = 'sudhir.davim@gmail.com';
+// Migrated from `sudhir.davim@gmail.com` to the operating-entity
+// inbox as part of the pre-Razorpay-resubmission cleanup. The Apple
+// Developer `appleId` in eas.json stays on the personal account
+// (transferring the Apple team is multi-week and out of scope); only
+// the customer-facing support address moves here.
+export const SUPPORT_EMAIL = 'sarastacklabs@gmail.com';
 export const OPERATING_ENTITY = 'Sara Stack Labs';
 export const OPERATING_CITY = 'Ballabgarh';
 export const OPERATING_DISTRICT = 'Faridabad';

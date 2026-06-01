@@ -30,11 +30,14 @@ describe('PR 39 — openSupportEmail', () => {
     (Linking.openURL as jest.Mock).mockResolvedValue(undefined);
   });
 
-  test('opens a mailto: URL addressed to the pilot support address', async () => {
+  test('opens a mailto: URL addressed to the Sara Stack Labs support address', async () => {
+    // Email migrated from `sudhir.davim@gmail.com` to the
+    // operating-entity inbox in the Razorpay-resubmission cleanup.
+    // Test pins the new value so an accidental revert trips CI.
     await openSupportEmail();
     expect(Linking.openURL).toHaveBeenCalledTimes(1);
     const url = (Linking.openURL as jest.Mock).mock.calls[0][0] as string;
-    expect(url.startsWith('mailto:sudhir.davim@gmail.com')).toBe(true);
+    expect(url.startsWith('mailto:sarastacklabs@gmail.com')).toBe(true);
   });
 
   test('subject contains the brand name "HamaraSetu support"', async () => {

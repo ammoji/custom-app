@@ -196,6 +196,11 @@ import {
   validateMarkDeliveredCodGate,
   validatePayCodOrderPreconditions,
 } from './codPaymentHelpers';
+// PR-NEXT-13a — DO NOT REMOVE. Used by `claimDelivery` to denormalize
+// the partner's `displayName` onto the order doc after the atomic
+// transaction succeeds. Pure helper; unit-pinned in
+// `tests/functions/claimDeliveryHelpers.test.ts`.
+import { pickPartnerDisplayName } from './claimDeliveryHelpers';
 // PR 6 — DO NOT REMOVE. Auto-formatter has stripped this import twice
 // already during PR 6 development. Used by addCustomMenuItem +
 // updateMenuItem to validate that imageUrl points to our Storage
@@ -3484,6 +3489,13 @@ export const claimDelivery = onCall<{ orderId: string }>(
     // Transaction: atomic first-wins. Two delivery people tapping
     // Accept simultaneously will see exactly one success — the second
     // hits the deliveryPersonId guard and throws.
+    //
+    // PR-NEXT-13a — capture `customerUid` + `shopName` out of the
+    // transaction so the post-transaction customer-push block (below)
+    // can run on a stable copy of the relevant order fields without a
+    // second Firestore read.
+    let customerUid: string | undefined;
+    let orderShopName: string | undefined;
     await db.runTransaction(async tx => {
       const snap = await tx.get(ref);
       if (!snap.exists) {
@@ -3492,6 +3504,8 @@ export const claimDelivery = onCall<{ orderId: string }>(
       const order = snap.data() as {
         status: OrderStatus;
         deliveryPersonId: string | null;
+        customerUid?: string;
+        shopName?: string;
       };
       if (order.status !== 'ready_for_pickup') {
         throw new HttpsError(
@@ -3515,7 +3529,69 @@ export const claimDelivery = onCall<{ orderId: string }>(
           reason: 'Delivery partner claimed',
         }),
       });
+      customerUid =
+        typeof order.customerUid === 'string' ? order.customerUid : undefined;
+      orderShopName =
+        typeof order.shopName === 'string' ? order.shopName : undefined;
     });
+
+    // PR-NEXT-13a — denormalize partner displayName onto the order
+    // for customer-side rendering. Pre-PR the customer's
+    // OrderDetailScreen had `deliveryPersonId` but no way to show a
+    // human-readable name without a separate user lookup; the new
+    // `PartnerIdentityCard` reads `deliveryPersonName` directly off
+    // the single-doc order watcher.
+    //
+    // Best-effort: a failed partner-name lookup or order-update must
+    // NOT roll back the successful claim above. The customer push
+    // also tolerates a missing name (fallback copy).
+    let partnerDisplayName: string | null = null;
+    try {
+      const partnerSnap = await db.doc(`users/${uid}`).get();
+      partnerDisplayName = pickPartnerDisplayName(
+        partnerSnap.data()?.displayName,
+      );
+      if (partnerDisplayName) {
+        await ref.update({
+          deliveryPersonName: partnerDisplayName,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
+    } catch (e) {
+      console.warn(
+        '[claimDelivery] partner-name denormalization failed (non-fatal):',
+        e,
+      );
+    }
+
+    // PR-NEXT-13a — customer push. Pre-PR the customer learned about
+    // the pickup state only when `markPickedUp` fired its push
+    // (PR-NEXT-1). The gap between claim and pickup can be 5–30
+    // minutes; closing it is the whole point of this PR. Best-effort
+    // (matches `markPickedUp`'s `pushToUser(...).catch(...)` posture):
+    // a failed push must NOT fail the claim write the partner just
+    // made.
+    if (customerUid) {
+      const namePart = partnerDisplayName ?? 'Your delivery partner';
+      const shopPart = orderShopName ?? 'the shop';
+      pushToUser(
+        customerUid,
+        'Your delivery partner is on the way',
+        `${namePart} will pick up your order from ${shopPart}.`,
+        {
+          orderId,
+          // Type name pinned in three places — keep in sync:
+          //   1. here (server emit)
+          //   2. `src/components/AuthBootstrap.tsx` deep-link routing
+          //   3. acceptance checklist in
+          //      `docs/pr-next-13a-partner-accept-push-windsurf-prompt.md`
+          type: 'order_partner_accepted',
+        },
+      ).catch(e =>
+        console.warn('[claimDelivery] pushToUser failed:', e),
+      );
+    }
+
     return { ok: true };
   },
 );

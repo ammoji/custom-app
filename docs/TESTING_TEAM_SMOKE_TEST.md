@@ -166,7 +166,7 @@ problems, not solve them.
    ✅ Both sections present? Good.
 6. Tap **Contact support**. Your phone's email app should
    open with:
-   - "To" field: **sudhir.davim@gmail.com**
+   - "To" field: **sarastacklabs@gmail.com**
    - "Subject" field: **HamaraSetu support**
    - Body has some text mentioning iOS and HamaraSetu
    ✅ All good? Tap Cancel on the email — don't actually

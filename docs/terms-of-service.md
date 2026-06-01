@@ -7,7 +7,7 @@ These Terms of Service ("Terms") govern your use of the HamaraSetu
 mobile application ("the App"). By using the App, you agree to these
 Terms. If you do not agree, please do not use the App.
 
-If you have any questions, contact us at: **sudhir.davim@gmail.com**
+If you have any questions, contact us at: **sarastacklabs@gmail.com**
 
 ---
 
@@ -245,7 +245,7 @@ be limited or excluded under applicable Indian law.
 ### 11.1 Termination by you
 
 You may stop using the App at any time. To delete your account and
-personal data, email **sudhir.davim@gmail.com** with the subject
+personal data, email **sarastacklabs@gmail.com** with the subject
 "Delete my account" from your registered phone number's associated
 email (or include the phone number in the body). We process such
 requests within 30 days, subject to the order-history retention
@@ -285,7 +285,7 @@ Faridabad, Haryana**, without regard to conflict-of-laws
 principles.
 
 Before initiating any legal action, you agree to first email us at
-sudhir.davim@gmail.com so we can attempt to resolve the issue
+sarastacklabs@gmail.com so we can attempt to resolve the issue
 informally.
 
 ---
@@ -295,7 +295,7 @@ informally.
 For any questions about these Terms, or to report a violation,
 contact us at:
 
-**Email:** sudhir.davim@gmail.com
+**Email:** sarastacklabs@gmail.com
 
 ---
 

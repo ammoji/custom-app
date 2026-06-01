@@ -11,6 +11,11 @@ import ScreenHeader from '../components/common/ScreenHeader';
 // visual confirmation. Auto-formatter risk per code-discipline.
 import DeliveryProofViewer from '../components/order/DeliveryProofViewer';
 import OrderStatusChip from '../components/order/OrderStatusChip';
+// PR-NEXT-13a (finding #13 sub-(a)) — DO NOT REMOVE. Renders the
+// assigned delivery partner's display name + initials avatar the
+// moment they claim the pickup (not waiting for actual pickup).
+// Auto-formatter risk per code-discipline Rule 1.
+import PartnerIdentityCard from '../components/order/PartnerIdentityCard';
 import RateOrderCard from '../components/order/RateOrderCard';
 import { colors, radii, spacing, typography } from '../constants/theme';
 import { Analytics } from '../services/analytics';
@@ -403,6 +408,26 @@ export default function OrderDetailScreen() {
             <Text style={styles.eta}>Arriving soon</Text>
           )}
         </View>
+
+        {/* PR-NEXT-13a (finding #13 sub-(a)) — partner identity
+            surfaces the moment the partner claims the pickup, not
+            waiting for actual pickup. Render only when
+            `deliveryPersonId` is set AND the order isn't cancelled;
+            falls back to "Your delivery partner" copy when
+            `deliveryPersonName` is absent (legacy orders pre-PR or
+            partners without a `displayName` on their user doc).
+            Phone number is NOT shown here — that stays gated to
+            post-pickup as it was pre-PR. */}
+        {typeof order.deliveryPersonId === 'string' &&
+          order.deliveryPersonId.length > 0 &&
+          order.status !== 'cancelled' && (
+            <PartnerIdentityCard
+              name={order.deliveryPersonName}
+              pickedUpAt={
+                typeof order.pickedUpAt === 'number' ? order.pickedUpAt : null
+              }
+            />
+          )}
 
         {/* Delivery address */}
         <Text style={styles.sectionTitle}>Delivery address</Text>

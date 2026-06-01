@@ -239,6 +239,9 @@ html, body {
   code { background: #1f2937; }
   th { background: #1f2937; }
   td, th { border-color: #374151; }
+  .footer-note { border-top-color: #374151; color: #9ca3af; }
+  .hero { background: linear-gradient(135deg, #1e40af 0%, #0E7C3A 100%); }
+  .card { background: #1f2937; border-color: #374151; }
 }
 main {
   max-width: 720px;
@@ -280,6 +283,54 @@ th { background: #f9fafb; }
   color: #6B7280;
 }
 .footer-note a { color: inherit; text-decoration: underline; }
+
+/* Landing-page-only styles. The hero gradient matches the
+   HamaraSetu logo's blue-to-green progression (PR 39.1). */
+.hero {
+  background: linear-gradient(135deg, #1e40af 0%, #0E7C3A 100%);
+  color: #ffffff;
+  padding: 48px 24px;
+  margin: -24px -20px 32px;
+  text-align: center;
+  border-radius: 0 0 12px 12px;
+}
+.hero h1 {
+  margin: 0;
+  font-size: 2.4rem;
+  letter-spacing: 0.5px;
+}
+.hero .devanagari {
+  margin: 4px 0 0;
+  font-size: 1.4rem;
+  opacity: 0.95;
+}
+.hero .tagline {
+  margin: 12px 0 0;
+  font-size: 1.05rem;
+  opacity: 0.9;
+}
+.card {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 16px 0;
+}
+.card h2 { margin-top: 0; }
+.cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0;
+}
+.cta-row a {
+  display: inline-block;
+  padding: 8px 14px;
+  border: 1px solid #0E7C3A;
+  border-radius: 6px;
+  text-decoration: none;
+  font-weight: 600;
+}
 `.trim();
 
 function buildHtml(page: Page, bodyHtml: string): string {
@@ -305,6 +356,135 @@ ${bodyHtml}
 `;
 }
 
+/**
+ * Landing page (dist/index.html).
+ *
+ * Pre-PR the root URL was the Expo web-export shell (`<div id="root">`
+ * + a `/_expo/static/js/web/App-{hash}.js` script tag) which rendered
+ * blank in production because the JS bundle wasn't deployed alongside
+ * it. Reviewers (Razorpay KYC, App Store, Play Store) hit the URL and
+ * saw nothing. A real React Native Web build is out of scope for the
+ * pilot (RN components aren't all web-compatible) — a static landing
+ * page is what reviewers actually want.
+ *
+ * Lives in this build script (not as a tracked dist/index.html) so
+ * the page survives any accidental `expo export -p web` run that
+ * would otherwise clobber it. Deploy pipeline: `npm run build-legal`
+ * → `firebase deploy --only hosting`.
+ *
+ * Content is brand-locked from CLAUDE.md + src/constants/branding.ts:
+ *   - App: HamaraSetu (हमारा सेतु)
+ *   - Tagline: Shop Smart, Shop Local.
+ *   - Entity: Sara Stack Labs
+ *   - City: Ballabgarh, Faridabad, Haryana
+ *   - Contact: sarastacklabs@gmail.com (pilot phase)
+ *
+ * If brand strings change, update `src/constants/branding.ts` AND this
+ * function — server-side strings don't import the constants module
+ * (per CLAUDE.md). The pin test in `tests/constants/branding.test.ts`
+ * is the trip-wire for the in-app side; this script is the trip-wire
+ * for the public-web side.
+ */
+const LANDING_BODY = `
+<section class="hero">
+  <h1>HamaraSetu</h1>
+  <p class="devanagari">हमारा सेतु</p>
+  <p class="tagline">Shop Smart, Shop Local.</p>
+</section>
+
+<section>
+  <h2>What is HamaraSetu?</h2>
+  <p>
+    HamaraSetu connects neighborhood kirana shops with the customers
+    who live around them. Customers order groceries through the app;
+    shop owners fulfill orders from their own inventory; local
+    delivery partners deliver. We help small, family-run stores serve
+    their existing customers better — without forcing them onto a
+    discount-driven marketplace.
+  </p>
+  <p>
+    HamaraSetu is built and operated by <strong>Sara Stack Labs</strong>
+    in Ballabgarh, Faridabad, Haryana, India.
+  </p>
+</section>
+
+<section class="card">
+  <h2>Get the app</h2>
+  <p>
+    HamaraSetu is currently in pilot. Public App Store and Google Play
+    Store launches are scheduled within the coming weeks. If you'd
+    like to join the closed pilot or learn more, please contact us.
+  </p>
+  <div class="cta-row">
+    <a href="mailto:sarastacklabs@gmail.com?subject=HamaraSetu%20pilot%20access">Request pilot access</a>
+  </div>
+</section>
+
+<section>
+  <h2>For shop owners</h2>
+  <p>
+    Reach the customers already in your neighborhood. Manage your menu,
+    set your own prices, accept orders, and get paid by Cash on
+    Delivery, UPI, or online payment — all from one app. KYC and shop
+    approval are handled in-app; once approved, you can start
+    accepting orders immediately.
+  </p>
+</section>
+
+<section>
+  <h2>For delivery partners</h2>
+  <p>
+    Flexible work with transparent per-delivery earnings. Choose when
+    you're online; we route nearby pickups to you based on your own
+    notification radius. Each completed delivery is recorded with a
+    proof photo so disputes can be resolved fairly.
+  </p>
+</section>
+
+<section class="card">
+  <h2>Contact</h2>
+  <p>
+    Support: <a href="mailto:sarastacklabs@gmail.com">sarastacklabs@gmail.com</a>
+  </p>
+  <p>
+    Operating entity: <strong>Sara Stack Labs</strong><br />
+    Operating city: Ballabgarh, Faridabad district, Haryana, India
+  </p>
+</section>
+
+<section>
+  <h2>Legal</h2>
+  <ul>
+    <li><a href="/privacy">Privacy Policy</a></li>
+    <li><a href="/terms">Terms of Service</a></li>
+    <li><a href="/account-deletion">Account Deletion</a></li>
+  </ul>
+</section>
+`.trim();
+
+function buildLandingPage(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>HamaraSetu — Shop Smart, Shop Local.</title>
+<meta name="description" content="HamaraSetu connects neighborhood kirana shops with their customers. Built and operated by Sara Stack Labs in Ballabgarh, Faridabad." />
+<style>${CSS}</style>
+</head>
+<body>
+<main>
+${LANDING_BODY}
+<div class="footer-note">
+  © ${new Date().getFullYear()} Sara Stack Labs · Ballabgarh, Faridabad ·
+  <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a>
+</div>
+</main>
+</body>
+</html>
+`;
+}
+
 function build() {
   for (const page of PAGES) {
     const md = readFileSync(page.sourcePath, 'utf8');
@@ -314,6 +494,15 @@ function build() {
     writeFileSync(page.outPath, html, 'utf8');
     console.log(`[build-legal] wrote ${page.outPath}`);
   }
+
+  // Landing page lives alongside the legal pages so the same
+  // `npm run build-legal` → `firebase deploy --only hosting` pipeline
+  // covers everything. See the LANDING_BODY block above for rationale.
+  const indexOutPath = join(ROOT, 'dist', 'index.html');
+  const indexHtml = buildLandingPage();
+  mkdirSync(dirname(indexOutPath), { recursive: true });
+  writeFileSync(indexOutPath, indexHtml, 'utf8');
+  console.log(`[build-legal] wrote ${indexOutPath}`);
 }
 
 build();

@@ -436,11 +436,25 @@ artwork swap + their bg colors only.
 **Operating entity: Sara Stack Labs.**
 **Legal jurisdiction: Faridabad, Haryana** (Ballabgarh is the city,
 Faridabad the district HQ named in legal docs).
-**Support email (kept as personal during pilot):**
-`sudhir.davim@gmail.com`. Switching to `sarastacklabs@gmail.com`
-deferred to post-pilot — touching Apple Developer / Firebase /
-EAS / Sentry / Razorpay ownership during pilot is too risky
-relative to the zero pilot benefit.
+**Support email: `sarastacklabs@gmail.com`** (migrated from
+`sudhir.davim@gmail.com` on 2026-05-31 as part of the
+pre-Razorpay-resubmission cleanup). The original CLAUDE.md
+decision deferred the migration to post-pilot, but the Razorpay
+account being recreated from scratch was a free moment to start
+the migration on the customer-facing surfaces:
+
+- Tier 1 (app constants + pin tests + utility tests) ✅
+- Tier 2 (landing page + privacy + terms + account-deletion) ✅
+- Tier 3 (operational docs + smoke-test scripts) ✅
+- Tier 4 (Firebase / EAS / Sentry / Anthropic team-member adds) —
+  done manually, gradually, by Sudhir over the days following.
+  Old email kept as a second owner on each service so nothing
+  cuts over.
+- Tier 5 (Apple Developer `appleId`, Play Console developer
+  account, bundle IDs, Firebase project rename) — **explicitly
+  NOT touched.** `appleId: "sudhir.davim@gmail.com"` in eas.json
+  stays; transferring the Apple team or renaming bundle IDs
+  costs reviews/ratings/install base. Deferred indefinitely.
 **Bundle IDs unchanged** (`com.sudhirdavim.grocerymvp` on both
 platforms) — bundle ID is invisible to users; display name change
 is what matters. Bundle migration deferred to post-pilot,

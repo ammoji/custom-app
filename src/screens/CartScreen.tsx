@@ -23,7 +23,13 @@ export default function CartScreen() {
 
   if (items.length === 0) {
     return (
-      <SafeAreaView style={styles.container} edges={['top']}>
+      // HOTFIX-3 — include the 'bottom' edge so the Android
+      // gesture-nav pill doesn't overlap the in-flow CTA below.
+      // PR-NEXT-2 used `insets.bottom` for the floating cart bar
+      // (position: absolute) on browse screens; this CTA is in
+      // normal flow so `edges={['top','bottom']}` is the cleaner
+      // expression and avoids a manual insets import.
+      <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
         <ScreenHeader title="Your Cart" onBack={() => nav.goBack()} />
         <EmptyState
           title="Your cart is empty"
@@ -36,7 +42,10 @@ export default function CartScreen() {
   }
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
+    // HOTFIX-3 — see comment on the empty-cart branch above. Both
+    // branches need the bottom edge so the "Proceed to Checkout"
+    // CTA clears the Android gesture-nav pill.
+    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <ScreenHeader title="Your Cart" onBack={() => nav.goBack()} />
 
       <View style={styles.shopBanner}>

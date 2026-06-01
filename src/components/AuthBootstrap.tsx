@@ -312,6 +312,21 @@ export default function AuthBootstrap() {
           safeNavigate('OrderDetail', { orderId });
           return;
         }
+        // PR-NEXT-13a — partner-claim push. Only ever sent to the
+        // customer (`claimDelivery` emits `pushToUser(customerUid)`
+        // after the atomic claim transaction). Same single-target
+        // posture as `order_picked_up` — no audience precedence
+        // needed because the server doesn't fan this push out to
+        // shop owners / admins / partners. Type name pinned in three
+        // places: here, the server emit in
+        // `functions/src/index.ts::claimDelivery`, and the
+        // acceptance checklist in
+        // `docs/pr-next-13a-partner-accept-push-windsurf-prompt.md`.
+        // Keep all three in sync.
+        if (type === 'order_partner_accepted') {
+          safeNavigate('OrderDetail', { orderId });
+          return;
+        }
         // PR-NEXT-3 §I — COD-conversion fan-out push from
         // `confirmPayment`. Audience-aware routing mirrors
         // `order_cancelled` / `order_delivered`. The customer
