@@ -132,6 +132,57 @@ describe('validateDeliveryProofUploadAuth', () => {
     });
     expect(r.ok).toBe(true);
   });
+
+  test('PR-NEXT-HOTFIX-1 — accepts Firestore Timestamp-like (the actual production shape)', () => {
+    // The bug this hotfix fixes: production reads pickedUpAt as a
+    // Firestore `Timestamp` (object with .toMillis()), not millis.
+    // Pre-hotfix the validator's `typeof !== 'number'` check rejected
+    // every real upload.
+    const timestampLike = { toMillis: () => 1_700_000_000_000 };
+    const r = validateDeliveryProofUploadAuth({
+      auth: { uid: PARTNER_UID, token: { delivery: true } },
+      order: { ...VALID_ORDER, pickedUpAt: timestampLike } as any,
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  test('PR-NEXT-HOTFIX-1 — Timestamp-like that returns 0 → failed-precondition', () => {
+    // Defensive: if Firestore somehow returns a Timestamp at epoch 0,
+    // treat it the same as a missing pickup (it can't represent a
+    // real pickup event).
+    const zeroTs = { toMillis: () => 0 };
+    const r = validateDeliveryProofUploadAuth({
+      auth: { uid: PARTNER_UID, token: { delivery: true } },
+      order: { ...VALID_ORDER, pickedUpAt: zeroTs } as any,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('failed-precondition');
+  });
+
+  test('PR-NEXT-HOTFIX-1 — Timestamp-like with non-finite millis → failed-precondition', () => {
+    // Hostile / malformed Timestamp returning NaN or Infinity must not
+    // pass the gate.
+    const badTs = { toMillis: () => NaN };
+    const r = validateDeliveryProofUploadAuth({
+      auth: { uid: PARTNER_UID, token: { delivery: true } },
+      order: { ...VALID_ORDER, pickedUpAt: badTs } as any,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('failed-precondition');
+  });
+
+  test('PR-NEXT-HOTFIX-1 — object without toMillis → failed-precondition (defensive)', () => {
+    // An object that's NOT Timestamp-shaped (no .toMillis method)
+    // must not silently pass. Pre-hotfix this would already have
+    // failed via the typeof check; post-hotfix the narrowing falls
+    // through to the null branch and still rejects.
+    const r = validateDeliveryProofUploadAuth({
+      auth: { uid: PARTNER_UID, token: { delivery: true } },
+      order: { ...VALID_ORDER, pickedUpAt: { foo: 'bar' } } as any,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('failed-precondition');
+  });
 });
 
 describe('validateDeliveryProofRecordInput', () => {

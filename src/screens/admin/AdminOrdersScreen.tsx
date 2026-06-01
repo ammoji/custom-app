@@ -12,6 +12,10 @@ import ScreenHeader from '../../components/common/ScreenHeader';
 // kept verbose because the auto-formatter strips these on save and
 // the resulting JSX-vs-import drift takes a tsc run to surface.
 import CancelAndRefundModal from '../../components/order/CancelAndRefundModal';
+// PR-NEXT-6.1 — closes PR-NEXT-6 §D.4. Reusable thumbnail + tap-to-zoom
+// modal that mints a 15-min signed-read URL on mount. DO NOT REMOVE on
+// auto-format save.
+import DeliveryProofViewer from '../../components/order/DeliveryProofViewer';
 // PR 11 — admin order timeline. Renders the full statusHistory
 // behind a per-card disclosure. DO NOT REMOVE on auto-format save.
 import OrderStatusChip from '../../components/order/OrderStatusChip';
@@ -24,6 +28,10 @@ import { useAuthStore } from '../../store/useAuthStore';
 import type { Order } from '../../types';
 import { computeAdminOrderStats } from '../../utils/adminStats';
 import { formatOrderTime, formatRupees } from '../../utils/format';
+// PR-NEXT-6.1 — authoritative settlement-method copy shared with the
+// shop + customer order-detail screens (PR-NEXT-6). DO NOT REMOVE on
+// auto-format save.
+import { formatPaymentMethod } from '../../utils/formatPaymentMethod';
 import {
     ACTION_LABELS,
     nextActionsFor,
@@ -84,6 +92,14 @@ export default function AdminOrdersScreen() {
   const [timelineExpandedId, setTimelineExpandedId] = useState<string | null>(
     null,
   );
+  // PR-NEXT-6.1 (closes PR-NEXT-6 §D.4) — delivery-proof disclosure.
+  // Same one-card-at-a-time semantics as overrideExpandedId +
+  // timelineExpandedId. DeliveryProofViewer fetches its own signed-read
+  // URL on mount; collapse + re-expand re-mints (acceptable — the 15-min
+  // validity means most pilot-scale interactions land within one mint).
+  // Trigger row only renders when the order actually has a proof on it
+  // (partners can deliver without one — photo is optional by design).
+  const [proofExpandedId, setProofExpandedId] = useState<string | null>(null);
   // PR 2 — payment hardening (Phase B). Refund modal target. We track
   // the entire order rather than just the id so the modal can show
   // the amount in its title without an extra lookup.
@@ -313,6 +329,20 @@ export default function AdminOrdersScreen() {
               <Text style={styles.phone}>
                 📞 {item.deliveryAddress?.phone || '—'}
               </Text>
+              {/* PR-NEXT-6.1 — explicit "Paid via …" line so admins see
+                  the authoritative settlement (cash / online up-front /
+                  COD converted online) on every card, not just the
+                  error-state alerts that PaymentStatusBanner handles.
+                  Same helper the shop + customer order-detail screens
+                  use, so all three audiences see consistent copy. */}
+              <Text style={styles.paidVia}>
+                Paid via{' '}
+                {formatPaymentMethod({
+                  paymentMethod: item.paymentMethod,
+                  paidMethod: item.paidMethod,
+                  paymentStatus: item.paymentStatus,
+                })}
+              </Text>
               <PaymentStatusBanner
                 paymentStatus={item.paymentStatus}
                 onRetryRefund={
@@ -452,6 +482,45 @@ export default function AdminOrdersScreen() {
                   <OrderTimeline entries={item.statusHistory ?? []} />
                 )}
               </View>
+
+              {/* PR-NEXT-6.1 — Delivery proof disclosure. Only show the
+                  trigger when the order actually has a proof stamped;
+                  partners can deliver without one (photo is optional in
+                  PR-NEXT-6 by design) and we don't want a dead
+                  disclosure row on those cards. Auth + signed-read URL
+                  handled inside DeliveryProofViewer. Independent of
+                  override + timeline disclosures so an admin can keep
+                  the timeline open while reviewing the photo — exactly
+                  the cross-reference flow dispute resolution needs. */}
+              {item.deliveryProofStoragePath && (
+                <View style={styles.proofSection}>
+                  <Pressable
+                    onPress={() =>
+                      setProofExpandedId(
+                        proofExpandedId === item.id ? null : item.id,
+                      )
+                    }
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      proofExpandedId === item.id
+                        ? 'Hide delivery proof photo'
+                        : 'Show delivery proof photo'
+                    }
+                    style={styles.disclosureRow}
+                  >
+                    <Text style={styles.disclosureText}>
+                      {proofExpandedId === item.id ? '▾' : '▸'}{'  '}
+                      📸 Delivery proof
+                    </Text>
+                  </Pressable>
+                  {proofExpandedId === item.id && (
+                    <DeliveryProofViewer
+                      orderId={item.id}
+                      hasProof={!!item.deliveryProofStoragePath}
+                    />
+                  )}
+                </View>
+              )}
             </View>
           );
         }}
@@ -550,6 +619,9 @@ const styles = StyleSheet.create({
   },
   meta: { ...typography.body, marginTop: spacing.xs },
   phone: { ...typography.caption, color: colors.textSecondary, marginTop: spacing.xs },
+  // PR-NEXT-6.1 — "Paid via …" line. Same visual weight as the phone
+  // row so the two meta lines stack as a single block.
+  paidVia: { ...typography.caption, color: colors.textSecondary, marginTop: 2 },
   actions: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -585,6 +657,14 @@ const styles = StyleSheet.create({
   },
   overrideSection: {
     marginTop: spacing.md,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  // PR-NEXT-6.1 — mirrors timelineSection so the three disclosures
+  // (override / timeline / proof) stack with consistent rules.
+  proofSection: {
+    marginTop: spacing.sm,
     paddingTop: spacing.sm,
     borderTopWidth: 1,
     borderTopColor: colors.border,

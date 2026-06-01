@@ -40,7 +40,10 @@ export type DeliveryProofUploadAuthInput = {
     | undefined;
   order: {
     deliveryPersonId?: string | null;
-    pickedUpAt?: number | null;
+    // PR-NEXT-HOTFIX-1 — accept either millis (test fixtures) or
+    // Firestore Timestamp-like (production reads). The validator
+    // narrows internally via .toMillis().
+    pickedUpAt?: number | { toMillis(): number } | null;
   } | null;
 };
 
@@ -87,7 +90,27 @@ export function validateDeliveryProofUploadAuth(
       message: 'Not the assigned delivery partner',
     };
   }
-  if (typeof order.pickedUpAt !== 'number' || order.pickedUpAt <= 0) {
+  // PR-NEXT-HOTFIX-1 — Firestore `serverTimestamp()` is stored as a
+  // `Timestamp` object on read (not millis). The original
+  // `typeof order.pickedUpAt !== 'number'` check always failed in
+  // production because the Admin SDK hands the raw Timestamp back to
+  // us. Accept both shapes: plain millis numbers (test fixtures + any
+  // caller that pre-normalises) AND Timestamp-likes (everything from
+  // a real Firestore read). Anything else (null / undefined / wrong
+  // shape / NaN / Infinity / 0) still fails the precondition.
+  const rawPickedUpAt: unknown = order.pickedUpAt;
+  const pickedUpAtMillis: number | null =
+    typeof rawPickedUpAt === 'number'
+      ? rawPickedUpAt
+      : typeof (rawPickedUpAt as { toMillis?: unknown })?.toMillis ===
+          'function'
+        ? (rawPickedUpAt as { toMillis: () => number }).toMillis()
+        : null;
+  if (
+    pickedUpAtMillis === null ||
+    !Number.isFinite(pickedUpAtMillis) ||
+    pickedUpAtMillis <= 0
+  ) {
     return {
       ok: false,
       code: 'failed-precondition',
