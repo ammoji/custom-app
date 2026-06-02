@@ -104,6 +104,16 @@ export type Shop = {
   registrationData?: ShopRegistrationData;
   approvedAt?: number;
   approvedBy?: string;
+  // PR-NEXT-SHOP-LOCATION-REQUIRED — audit trail of admin location
+  // verification at approval time. Both optional + nullable so
+  // legacy approved-pre-PR shops that never ran through the new
+  // `validateShopLocationForApproval` gate stay back-compat (they
+  // simply lack the stamp). Set together inside the `approveShop`
+  // callable's `shopRef.update` block; never set independently.
+  // `locationVerifiedAt` is `Date.now()` (epoch ms) at approval
+  // time; `locationVerifiedBy` is the admin's `auth.uid`.
+  locationVerifiedAt?: number;
+  locationVerifiedBy?: string;
   rejectedAt?: number;
   rejectedReason?: string;
   // Phase 12a-v2-i-bis: admin can suspend an active shop. Customer
@@ -541,6 +551,25 @@ export type Order = {
   // claim time. If the partner later renames themselves, this snapshot
   // stays — order documents are historical records.
   deliveryPersonName?: string;
+  // PR-NEXT-PARTNER-CARD.2 — partner trust signals, denormalized
+  // alongside `deliveryPersonName` at claim time. Drive the WHO line
+  // ("⭐ 4.8 · 142 deliveries") and vehicle glyph (🛵 / 🚲 / 🚶 / 🚗)
+  // in `PartnerDetailsSheet` without a per-open `users/{partnerUid}`
+  // lookup. All three are optional (legacy orders claimed pre-this-PR
+  // omit them) AND nullable (a partial partner doc — no rating yet,
+  // no vehicleType set — still claims successfully and the sheet
+  // falls back to the "New partner · welcome them!" / 🛵 default
+  // copy via `formatPartnerTrust`). Numbers are server-validated by
+  // `denormalizePartnerTrust` so the client can trust the types
+  // without re-checking `Number.isFinite`.
+  deliveryPersonRating?: number | null;
+  deliveryPersonDeliveriesCount?: number | null;
+  deliveryPersonVehicleType?:
+    | 'motorbike'
+    | 'bicycle'
+    | 'on_foot'
+    | 'car'
+    | null;
   pickedUpAt: number | null;
   deliveredAt: number | null;
   // Audit trail of every status change. Server (Cloud Functions) is

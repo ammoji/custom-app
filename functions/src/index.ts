@@ -202,11 +202,22 @@ import {
   validateMarkDeliveredCodGate,
   validatePayCodOrderPreconditions,
 } from './codPaymentHelpers';
+// PR-NEXT-PARTNER-CARD.1 — DO NOT REMOVE. Used by the new
+// `getDeliveryPartnerContact` callable to gate customer-side
+// phone reveal of the assigned delivery partner.
+import { getDeliveryPartnerContactPure } from './partnerContactHelpers';
+// PR-NEXT-PARTNER-CARD.2 — DO NOT REMOVE. Backs the new
+// `getLivePartnerEta` callable (30s-poll customer surface). Pure
+// helper; pinned by tests/functions/getLivePartnerEtaHelpers.test.ts.
+import { getLivePartnerEtaPure } from './livePartnerEtaHelpers';
 // PR-NEXT-13a — DO NOT REMOVE. Used by `claimDelivery` to denormalize
 // the partner's `displayName` onto the order doc after the atomic
 // transaction succeeds. Pure helper; unit-pinned in
 // `tests/functions/claimDeliveryHelpers.test.ts`.
-import { pickPartnerDisplayName } from './claimDeliveryHelpers';
+import {
+  denormalizePartnerTrust,
+  pickPartnerDisplayName,
+} from './claimDeliveryHelpers';
 // PR 6 — DO NOT REMOVE. Auto-formatter has stripped this import twice
 // already during PR 6 development. Used by addCustomMenuItem +
 // updateMenuItem to validate that imageUrl points to our Storage
@@ -249,6 +260,10 @@ import {
 import {
   pickStorefrontPath,
   buildFirebaseStorageDownloadUrl,
+  // PR-NEXT-SHOP-LOCATION-REQUIRED — DO NOT REMOVE. Defense layer 2
+  // of 3 (RegisterShop client gate is layer 1, customer-side filter
+  // is layer 3). Refuses to approve a shop without a finite GPS pin.
+  validateShopLocationForApproval,
 } from './approveShopHelpers';
 // PR 45 — DO NOT REMOVE. Used by registerPushToken / unregisterPushToken
 // callables (input validation) and sendOrderStatusPush trigger
@@ -3600,6 +3615,12 @@ export const claimDelivery = onCall<{ orderId: string }>(
     // second Firestore read.
     let customerUid: string | undefined;
     let orderShopName: string | undefined;
+    // PR-NEXT-NOTIFY-EXTEND (Case 5) — capture shopId in the
+    // transaction so the post-transaction shop-owner + admin push
+    // blocks below can read it without a second order fetch. Same
+    // rationale as the existing `customerUid` / `orderShopName`
+    // captures.
+    let orderShopId: string | undefined;
     await db.runTransaction(async tx => {
       const snap = await tx.get(ref);
       if (!snap.exists) {
@@ -3610,6 +3631,7 @@ export const claimDelivery = onCall<{ orderId: string }>(
         deliveryPersonId: string | null;
         customerUid?: string;
         shopName?: string;
+        shopId?: string;
       };
       if (order.status !== 'ready_for_pickup') {
         throw new HttpsError(
@@ -3637,6 +3659,8 @@ export const claimDelivery = onCall<{ orderId: string }>(
         typeof order.customerUid === 'string' ? order.customerUid : undefined;
       orderShopName =
         typeof order.shopName === 'string' ? order.shopName : undefined;
+      orderShopId =
+        typeof order.shopId === 'string' ? order.shopId : undefined;
     });
 
     // PR-NEXT-13a — denormalize partner displayName onto the order
@@ -3652,18 +3676,33 @@ export const claimDelivery = onCall<{ orderId: string }>(
     let partnerDisplayName: string | null = null;
     try {
       const partnerSnap = await db.doc(`users/${uid}`).get();
-      partnerDisplayName = pickPartnerDisplayName(
-        partnerSnap.data()?.displayName,
-      );
+      const partnerData = partnerSnap.data();
+      partnerDisplayName = pickPartnerDisplayName(partnerData?.displayName);
+      // PR-NEXT-PARTNER-CARD.2 — denormalize trust signals
+      // (rating + count + vehicleType) alongside the existing
+      // displayName denormalization. Customer's `PartnerDetailsSheet`
+      // reads these straight off the order doc, avoiding a per-open
+      // `users/{partnerUid}` lookup (which would also leak
+      // server-internal fields like `currentLocation` / `fcmTokens`).
+      // Pure helper handles all the null / out-of-whitelist cases.
+      const trust = denormalizePartnerTrust(partnerData);
+      const patch: Record<string, unknown> = {
+        updatedAt: FieldValue.serverTimestamp(),
+        // Always stamp the three trust fields, even when null, so
+        // the order shape is stable for the watcher / sheet. The
+        // sheet's `formatPartnerTrust` interprets null as "new
+        // partner · welcome them!" copy.
+        deliveryPersonRating: trust.rating,
+        deliveryPersonDeliveriesCount: trust.deliveriesCount,
+        deliveryPersonVehicleType: trust.vehicleType,
+      };
       if (partnerDisplayName) {
-        await ref.update({
-          deliveryPersonName: partnerDisplayName,
-          updatedAt: FieldValue.serverTimestamp(),
-        });
+        patch.deliveryPersonName = partnerDisplayName;
       }
+      await ref.update(patch);
     } catch (e) {
       console.warn(
-        '[claimDelivery] partner-name denormalization failed (non-fatal):',
+        '[claimDelivery] partner denormalization failed (non-fatal):',
         e,
       );
     }
@@ -3695,6 +3734,64 @@ export const claimDelivery = onCall<{ orderId: string }>(
         console.warn('[claimDelivery] pushToUser failed:', e),
       );
     }
+
+    // PR-NEXT-NOTIFY-EXTEND (Case 5) — shop owner notification on
+    // partner claim. Pre-PR the shop owner only learned a partner
+    // had accepted by watching their dashboard. Now we fire an
+    // explicit push mirroring `markDelivered`'s shop-owner pattern.
+    // Best-effort (.catch) — failure must NOT roll back the
+    // successful claim transaction above. Type name pinned in
+    // three places — keep in sync:
+    //   1. here (server emit)
+    //   2. `src/components/AuthBootstrap.tsx` deep-link routing
+    //   3. acceptance checklist in
+    //      `docs/pr-next-notify-extend-windsurf-prompt.md`
+    if (orderShopId) {
+      try {
+        const shopSnap = await db.doc(`shops/${orderShopId}`).get();
+        const ownerUid = shopSnap.data()?.ownerUid as string | undefined;
+        if (ownerUid) {
+          const namePart = partnerDisplayName ?? 'A delivery partner';
+          pushToOwner(
+            ownerUid,
+            '🛵 Pickup partner assigned',
+            `${namePart} will pick up order #${orderId.slice(0, 6)}`,
+            {
+              orderId,
+              shopId: orderShopId,
+              type: 'order_partner_assigned',
+            },
+          ).catch(e =>
+            console.warn('[claimDelivery] pushToOwner failed (non-fatal):', e),
+          );
+        }
+      } catch (e) {
+        console.warn(
+          '[claimDelivery] shop-owner lookup failed (non-fatal):',
+          e,
+        );
+      }
+    }
+
+    // PR-NEXT-NOTIFY-EXTEND (Case 5) — admin notification. Same
+    // best-effort posture; admin sees the assignment for cross-
+    // pilot oversight. `shopId` may be empty string when the order
+    // doc has no shopId (shouldn't happen, but defensive — admins
+    // can still tap and see AdminOrders without a deep-link
+    // anchor).
+    pushToAdmins(
+      '🛵 Pickup partner assigned',
+      `Order #${orderId.slice(0, 6)} claimed by ${
+        partnerDisplayName ?? 'a partner'
+      }`,
+      {
+        orderId,
+        shopId: orderShopId ?? '',
+        type: 'order_partner_assigned',
+      },
+    ).catch(e =>
+      console.warn('[claimDelivery] pushToAdmins failed (non-fatal):', e),
+    );
 
     return { ok: true };
   },
@@ -3783,6 +3880,57 @@ export const markPickedUp = onCall<{ orderId: string }>(
         console.warn('[markPickedUp] pushToUser failed:', e),
       );
     }
+
+    // PR-NEXT-NOTIFY-EXTEND (Case 7) — shop owner + admin
+    // notifications on pickup. Pre-PR only the customer learned
+    // about pickup. Now we also notify the shop (so they can mark
+    // inventory off / close the loop) and admin (cross-pilot
+    // oversight). Reuses the EXISTING `order_picked_up` push type
+    // — AuthBootstrap's routing is now audience-aware (shopOwner
+    // → ShopOrderDetail, admin → AdminOrders, customer →
+    // OrderDetail). Best-effort: failed pushes must NOT fail the
+    // pickup write the partner just made.
+    const pickupShopId =
+      typeof (snap.data() as { shopId?: unknown }).shopId === 'string'
+        ? ((snap.data() as { shopId: string }).shopId)
+        : null;
+    if (pickupShopId) {
+      try {
+        const shopSnap = await db.doc(`shops/${pickupShopId}`).get();
+        const ownerUid = shopSnap.data()?.ownerUid as string | undefined;
+        if (ownerUid) {
+          pushToOwner(
+            ownerUid,
+            '📦 Order picked up',
+            `Order #${orderId.slice(0, 6)} is on the way to the customer`,
+            {
+              orderId,
+              shopId: pickupShopId,
+              type: 'order_picked_up',
+            },
+          ).catch(e =>
+            console.warn('[markPickedUp] pushToOwner failed (non-fatal):', e),
+          );
+        }
+      } catch (e) {
+        console.warn(
+          '[markPickedUp] shop-owner lookup failed (non-fatal):',
+          e,
+        );
+      }
+    }
+    pushToAdmins(
+      '📦 Order picked up',
+      `Order #${orderId.slice(0, 6)} picked up by partner`,
+      {
+        orderId,
+        shopId: pickupShopId ?? '',
+        type: 'order_picked_up',
+      },
+    ).catch(e =>
+      console.warn('[markPickedUp] pushToAdmins failed (non-fatal):', e),
+    );
+
     return { ok: true };
   },
 );
@@ -4117,6 +4265,134 @@ export const confirmCodPayment = onCall<{
       }),
     });
     return { ok: true as const, alreadyPaid: false as const };
+  },
+);
+
+// ────────────────────────────────────────────────────────────────────
+// PR-NEXT-PARTNER-CARD.1 (Case 6 retest) — customer-side phone
+// reveal for the assigned delivery partner.
+//
+// Auth: any signed-in user; the gate inside `getDeliveryPartnerContactPure`
+// verifies the caller IS this order's `customerUid`. Anonymous-token
+// callers fail the strict-equality check (no `customerUid` match)
+// without us having to special-case here. (PR-NEXT-PARTNER-CARD.2 —
+// PARTNER-CARD.1 shipped this comparing against `customerId`, which
+// is not a real order field. Every customer reveal failed silently.)
+//
+// Returns `{ phone }` only — no name, no rating, no location, no
+// partner uid. Privacy posture: phone is never denormalized onto the
+// order doc; the only way to obtain it is this explicit pull, gated
+// by pickup completion (`order.pickedUpAt != null`). Pre-pickup
+// always errors with `failed-precondition` so the client can render
+// the muted "shared after pickup" copy.
+//
+// Audit: function-scoped `console.info` is enough for pilot; a
+// dedicated reveal-audit collection can come later if abuse signal
+// shows up.
+// ────────────────────────────────────────────────────────────────────
+export const getDeliveryPartnerContact = onCall<{ orderId: string }>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const callerUid = request.auth?.uid;
+    if (typeof callerUid !== 'string' || callerUid.length === 0) {
+      throw new HttpsError('unauthenticated', 'Sign in required.');
+    }
+    const orderId = String((request.data as { orderId?: unknown })?.orderId ?? '');
+    if (orderId.length === 0) {
+      throw new HttpsError('invalid-argument', 'orderId required.');
+    }
+    const result = await getDeliveryPartnerContactPure({
+      orderId,
+      callerUid,
+      db,
+      auth: getAuth(),
+    });
+    if (!result.ok) {
+      switch (result.code) {
+        case 'order_not_found':
+          throw new HttpsError('not-found', 'Order not found.');
+        case 'not_customer':
+          throw new HttpsError('permission-denied', 'Not your order.');
+        case 'no_partner':
+        case 'not_picked_up':
+          // Combined into one customer-facing message — pre-pickup
+          // and not-yet-claimed are the same UX from the customer's
+          // POV ("phone shared after pickup"). The distinct codes
+          // exist for the unit tests + future analytics.
+          throw new HttpsError(
+            'failed-precondition',
+            'Partner phone is shared once the order is picked up.',
+          );
+        case 'no_phone_on_partner':
+          throw new HttpsError(
+            'not-found',
+            'Partner has no phone number on file. Please contact support.',
+          );
+      }
+    }
+    console.info(
+      `[getDeliveryPartnerContact] reveal: orderId=${orderId} customer=${callerUid}`,
+    );
+    return { phone: result.phone };
+  },
+);
+
+// ────────────────────────────────────────────────────────────────────
+// PR-NEXT-PARTNER-CARD.2 — live distance + ETA reveal for the
+// partner sheet. Customer-only; the 30s polling lifecycle is owned
+// by the client (`useLivePartnerEta`) so this callable stays pure
+// "given (order, caller, now), return distance + eta + stale flag."
+//
+// Pre-pickup leg targets `shopLocation`; post-pickup leg targets
+// `deliveryLocation`. Haversine + AVG_URBAN_KMH (20 km/h) is the
+// pilot pragma — Distance Matrix at order-placement time still
+// stamps the authoritative `deliveryDistanceKm` / `deliveryDurationMin`
+// (PR 46) which the client uses as static fallback when this
+// callable rejects.
+//
+// Returns 'failed-precondition' for "no partner location yet" /
+// "no target location" so the client maps both to a graceful
+// fallback (static estimate + ~ estimated suffix) without an
+// alert. 'not_customer' / 'order_not_found' stay hard errors —
+// those signal an actual abuse / programmer error.
+// ────────────────────────────────────────────────────────────────────
+export const getLivePartnerEta = onCall<{ orderId: string }>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const callerUid = request.auth?.uid;
+    if (typeof callerUid !== 'string' || callerUid.length === 0) {
+      throw new HttpsError('unauthenticated', 'Sign in required.');
+    }
+    const orderId = String(
+      (request.data as { orderId?: unknown })?.orderId ?? '',
+    );
+    if (orderId.length === 0) {
+      throw new HttpsError('invalid-argument', 'orderId required.');
+    }
+    const result = await getLivePartnerEtaPure({
+      orderId,
+      callerUid,
+      db,
+    });
+    if (!result.ok) {
+      switch (result.code) {
+        case 'order_not_found':
+          throw new HttpsError('not-found', 'Order not found.');
+        case 'not_customer':
+          throw new HttpsError('permission-denied', 'Not your order.');
+        case 'no_partner':
+        case 'no_partner_location':
+        case 'no_target_location':
+          // All three collapse to "live tracking not available; use
+          // the static estimate." The distinct codes survive in
+          // helper for analytics and tests.
+          throw new HttpsError(
+            'failed-precondition',
+            'Live tracking is not available; showing the at-order estimate.',
+          );
+      }
+    }
+    return result.value;
   },
 );
 
@@ -4652,6 +4928,33 @@ export const approveShop = onCall<{ shopId: string }>(
       );
     }
 
+    // PR-NEXT-SHOP-LOCATION-REQUIRED — defense layer 2. Refuse to
+    // approve a shop that has no GPS pin (or a malformed one). The
+    // customer-side `filterShopsByServiceRadius` would hide it
+    // anyway (layer 3), but rejecting here forces the admin to
+    // coordinate with the owner to capture the location BEFORE
+    // approval — prevents wasted "I see Approved but customers
+    // can't find me" support cycles. The pure helper lives in
+    // `approveShopHelpers.ts` so the discriminated-union failure
+    // codes are unit-testable.
+    const locValidation = validateShopLocationForApproval(
+      shop as { location?: { lat?: unknown; lng?: unknown } | null },
+    );
+    if (!locValidation.ok) {
+      const reason =
+        locValidation.code === 'no_location'
+          ? 'no GPS location captured'
+          : locValidation.code === 'lat_out_of_range' ||
+              locValidation.code === 'lng_out_of_range'
+            ? 'GPS coordinates out of valid earth range'
+            : 'GPS coordinates malformed (not finite numbers)';
+      throw new HttpsError(
+        'failed-precondition',
+        `Cannot approve shop: ${reason}. Ask the shop owner to ` +
+          're-open RegisterShop and capture their location, then retry approval.',
+      );
+    }
+
     // PR 42 — Wire the storefront photo from the KYC upload into the
     // customer-facing `shop.imageUrl`. The storage path was captured
     // during RegisterShop step 2 (PR 31, via `recordShopKycUpload`)
@@ -4753,6 +5056,15 @@ export const approveShop = onCall<{ shopId: string }>(
       status: 'active',
       approvedAt: now,
       approvedBy: auth.uid,
+      // PR-NEXT-SHOP-LOCATION-REQUIRED — audit trail of admin
+      // verification. `locationVerifiedAt` is the server-stamp of
+      // when this approval gate (validateShopLocationForApproval)
+      // last passed; `locationVerifiedBy` records WHICH admin uid
+      // approved. Both optional + nullable on the Shop type so
+      // legacy approved-pre-PR shops that never went through this
+      // gate stay back-compat — they simply lack the stamp.
+      locationVerifiedAt: now,
+      locationVerifiedBy: auth.uid,
       // PR 42 — only stamp imageUrl when we actually minted one.
       // FieldValue.delete() would be wrong (it'd erase a re-approval's
       // older URL on signing failure); skipping the field on failure
@@ -6886,7 +7198,15 @@ export const listShopsPublic = onCall<{ userLocation?: LatLng }>(
     // carries its own `serviceRadiusKm` (or falls back to the helper's
     // default). The flag is the cross-city testing override.
     const showAll = await readShowAllShopsFlag();
-    const visible = filterShopsByServiceRadius(shops, { showAll });
+    // PR-NEXT-SHOP-LOCATION-REQUIRED — pass `customerHasLocation` so
+    // the helper can split the missing-distance branch: customer-
+    // side gap (no GPS granted) → keep all shops uniformly; shop-
+    // side gap (shop has no `location`) → drop that shop. Defense
+    // layer 3 of 3.
+    const visible = filterShopsByServiceRadius(shops, {
+      showAll,
+      customerHasLocation: !!userLocation,
+    });
     return { shops: visible };
   },
 );

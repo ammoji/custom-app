@@ -18,6 +18,12 @@ import { colors, radii, shadow, spacing, typography } from '../../constants/them
 import type { RootStackParamList } from '../../navigation/AppNavigator';
 import { useAuthStore } from '../../store/useAuthStore';
 import { formatOrderTime, formatRupees } from '../../utils/format';
+// PR-NEXT-COD-UX (Case 8) — DO NOT REMOVE. Hides the Delivered
+// CTA when the server's COD gate would reject it, so the partner
+// never gets the dead-tap-then-error UX. Mirror of the server's
+// `validateMarkDeliveredCodGate`; same matrix as the dashboard
+// card's `needsCodConfirmation` derivation.
+import { canShowDeliveredButton } from '../../utils/codDeliveryGate';
 import { useDeliveryOrderDetail } from './DeliveryOrderDetailScreen.useDeliveryOrderDetail';
 
 /**
@@ -60,6 +66,7 @@ export default function DeliveryOrderDetailScreen() {
     handleClaim,
     handlePickedUp,
     handleDelivered,
+    handleConfirmCodPayment,
     retry,
   } = useDeliveryOrderDetail(orderId, uid, !!isDelivery);
 
@@ -99,6 +106,25 @@ export default function DeliveryOrderDetailScreen() {
   const onDelivered = async () => {
     const result = await handleDelivered();
     if (!result.ok) Alert.alert('Update failed', result.error);
+  };
+
+  // PR-NEXT-COD-UX (Case 8) — Cash/UPI pill handler. Surfaces the
+  // friendly "customer paid online" alert for the same `alreadyPaid`
+  // race the dashboard's `handleConfirmCodPayment` already handles
+  // (a parallel `payCodOrder` conversion landing between the
+  // optimistic flip and the server response).
+  const onConfirmCodPayment = async (paidMethod: 'cash' | 'online') => {
+    const result = await handleConfirmCodPayment(paidMethod);
+    if (!result.ok) {
+      Alert.alert('Could not confirm payment', result.error);
+      return;
+    }
+    if (result.alreadyPaid) {
+      Alert.alert(
+        'Customer paid online',
+        'No cash to collect — the customer paid online while you were on the way.',
+      );
+    }
   };
 
   if (!isDelivery) {
@@ -333,7 +359,24 @@ export default function DeliveryOrderDetailScreen() {
 
         {isAssigned && !isDelivered && (
           <View style={{ marginTop: spacing.md }}>
-            {isPickedUp ? (
+            {/* PR-NEXT-COD-UX (Case 8) — three-way action ladder
+                mirrors the dashboard's `ActiveDeliveryCard`:
+                  1. Pre-pickup            → "I've picked it up"
+                  2. Picked up + COD-unpaid → Cash / UPI pills
+                  3. Picked up + paid       → "Delivered"
+                The gate is `canShowDeliveredButton(order)` — same
+                matrix as the server's `validateMarkDeliveredCodGate`,
+                so the partner never sees the dead-tap-then-error UX
+                Sudhir reported. */}
+            {!isPickedUp ? (
+              <Button
+                title="I've picked it up"
+                onPress={onPickedUp}
+                loading={pendingAction === 'pickedUp'}
+                disabled={pendingAction !== null}
+                size="lg"
+              />
+            ) : canShowDeliveredButton(order) ? (
               <Button
                 title="Delivered"
                 onPress={onDelivered}
@@ -342,13 +385,45 @@ export default function DeliveryOrderDetailScreen() {
                 size="lg"
               />
             ) : (
-              <Button
-                title="I've picked it up"
-                onPress={onPickedUp}
-                loading={pendingAction === 'pickedUp'}
-                disabled={pendingAction !== null}
-                size="lg"
-              />
+              // COD unpaid — show the same Cash/UPI selector as
+              // the dashboard. Visually mirrors `codConfirmLabel /
+              // codConfirmSub / codPillRow / codPill` from
+              // `DeliveryDashboardScreen` so the partner reads the
+              // same affordance on either surface.
+              <View>
+                <Text style={styles.codConfirmLabel}>
+                  Payment: Cash on Delivery — {formatRupees(order.total)}
+                </Text>
+                <Text style={styles.codConfirmSub}>
+                  Confirm payment received:
+                </Text>
+                <View style={styles.codPillRow}>
+                  <Pressable
+                    style={[
+                      styles.codPill,
+                      pendingAction !== null && styles.codPillDisabled,
+                    ]}
+                    onPress={() => onConfirmCodPayment('cash')}
+                    disabled={pendingAction !== null}
+                    accessibilityRole="button"
+                    accessibilityLabel="Mark cash received"
+                  >
+                    <Text style={styles.codPillText}>💵 Cash received</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[
+                      styles.codPill,
+                      pendingAction !== null && styles.codPillDisabled,
+                    ]}
+                    onPress={() => onConfirmCodPayment('online')}
+                    disabled={pendingAction !== null}
+                    accessibilityRole="button"
+                    accessibilityLabel="Mark UPI received"
+                  >
+                    <Text style={styles.codPillText}>📱 UPI received</Text>
+                  </Pressable>
+                </View>
+              </View>
             )}
           </View>
         )}
@@ -505,5 +580,41 @@ const styles = StyleSheet.create({
   dropInstructionsValue: {
     ...typography.body,
     color: colors.textPrimary,
+  },
+  // PR-NEXT-COD-UX (Case 8) — COD payment selector. Visual tokens
+  // mirror the dashboard's `ActiveDeliveryCard` (same names from
+  // `DeliveryDashboardScreen.tsx`: `codConfirmLabel` / `codConfirmSub`
+  // / `codPillRow` / `codPill` / `codPillDisabled` / `codPillText`)
+  // so the partner reads the same affordance on either surface.
+  codConfirmLabel: {
+    ...typography.bodyBold,
+    color: colors.textPrimary,
+    marginBottom: spacing.xs,
+  },
+  codConfirmSub: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginBottom: spacing.sm,
+  },
+  codPillRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  codPill: {
+    flex: 1,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    backgroundColor: colors.primaryLight,
+    alignItems: 'center',
+  },
+  codPillDisabled: {
+    opacity: 0.5,
+  },
+  codPillText: {
+    ...typography.bodyBold,
+    color: colors.primary,
   },
 });

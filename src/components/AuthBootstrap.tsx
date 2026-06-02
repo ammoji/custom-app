@@ -326,9 +326,39 @@ export default function AuthBootstrap() {
           return;
         }
         if (type === 'order_picked_up') {
-          // Only ever sent to the customer (markPickedUp emits
-          // pushToUser(customerUid)).
+          // PR-NEXT-1 emitted only to customer.
+          // PR-NEXT-NOTIFY-EXTEND (Case 7) also emits to shop
+          // owner + admin. Audience precedence: shopOwner-of-this-
+          // shop > admin > customer (mirrors `order_cancelled` /
+          // `order_delivered`).
+          if (auth.isShopOwner && pushShopId && pushShopId === auth.shopId) {
+            safeNavigate('ShopOrderDetail', { orderId });
+            return;
+          }
+          if (auth.isAdmin) {
+            safeNavigate('AdminOrders');
+            return;
+          }
           safeNavigate('OrderDetail', { orderId });
+          return;
+        }
+        // PR-NEXT-NOTIFY-EXTEND (Case 5) — partner-assigned push.
+        // Audience: shop owner + admin. Customer doesn't receive
+        // this type — they get the parallel `order_partner_accepted`
+        // push from PR-NEXT-13a, routed below in its own branch.
+        if (type === 'order_partner_assigned') {
+          if (auth.isShopOwner && pushShopId && pushShopId === auth.shopId) {
+            safeNavigate('ShopOrderDetail', { orderId });
+            return;
+          }
+          if (auth.isAdmin) {
+            safeNavigate('AdminOrders');
+            return;
+          }
+          // Defensive — if a non-shop-owner / non-admin somehow
+          // received this push (token still registered against an
+          // older role), don't fall through to a misleading
+          // customer screen.
           return;
         }
         // PR-NEXT-13a — partner-claim push. Only ever sent to the

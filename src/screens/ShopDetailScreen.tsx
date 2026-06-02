@@ -35,6 +35,9 @@ import { useCartStore } from '../store/useCartStore';
 import { useLocationStore } from '../store/useLocationStore';
 import { MenuItem, Shop } from '../types';
 import { haversineKm } from '../utils/distance';
+// HOTFIX-6 (Case 1) — DO NOT REMOVE. Distance-based delivery
+// charge so the shop detail meta line matches CheckoutScreen.
+import { displayDeliveryCharge } from '../utils/displayDeliveryCharge';
 import { formatDistance, formatRupees } from '../utils/format';
 import {
   filterMenuByQuery,
@@ -281,7 +284,7 @@ export default function ShopDetailScreen() {
               </View>
               <Text style={styles.meta}>
                 {formatDistance(shop.distanceKm)} · {shop.etaMinutes} min ·{' '}
-                {formatRupees(shop.deliveryFee)} delivery · Min{' '}
+                {formatRupees(displayDeliveryCharge(shop, location))} delivery · Min{' '}
                 {formatRupees(shop.minOrder)}
               </Text>
             </View>

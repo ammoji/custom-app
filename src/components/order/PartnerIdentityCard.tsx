@@ -15,7 +15,7 @@
  * transit). Both states are derived from the order's `pickedUpAt`.
  */
 import React from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { colors, radii, spacing, typography } from '../../constants/theme';
 // PR-NEXT-13a — DO NOT REMOVE. `initialsFor` lives in its own pure
 // file so `tests/components/partnerIdentityCard.initials.test.ts`
@@ -28,9 +28,15 @@ export { initialsFor };
 export default function PartnerIdentityCard({
   name,
   pickedUpAt,
+  onPress,
 }: {
   name?: string | null;
   pickedUpAt: number | null;
+  // PR-NEXT-PARTNER-CARD (Case 6) — optional tap handler. When
+  // omitted the card renders as a static read-only treatment with
+  // no chevron and no press affordance, preserving back-compat for
+  // any future caller that wants the static behavior.
+  onPress?: () => void;
 }) {
   const displayName =
     typeof name === 'string' && name.trim().length > 0
@@ -43,7 +49,18 @@ export default function PartnerIdentityCard({
       : '📦 Heading to the shop';
 
   return (
-    <View style={styles.card}>
+    <Pressable
+      onPress={onPress}
+      disabled={!onPress}
+      accessibilityRole={onPress ? 'button' : undefined}
+      accessibilityLabel={
+        onPress ? `Open details for ${displayName}` : undefined
+      }
+      style={({ pressed }) => [
+        styles.card,
+        pressed && onPress ? { opacity: 0.85 } : null,
+      ]}
+    >
       <View style={styles.avatar}>
         <Text style={styles.avatarText}>{initials}</Text>
       </View>
@@ -55,7 +72,8 @@ export default function PartnerIdentityCard({
           {subtitle}
         </Text>
       </View>
-    </View>
+      {onPress && <Text style={styles.chevron}>›</Text>}
+    </Pressable>
   );
 }
 
@@ -92,5 +110,13 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.textSecondary,
     marginTop: 2,
+  },
+  // PR-NEXT-PARTNER-CARD (Case 6) — disclosure chevron when the
+  // card is tappable. Only rendered when `onPress` is supplied so
+  // static usages stay visually unchanged.
+  chevron: {
+    ...typography.h2,
+    color: colors.textSecondary,
+    paddingLeft: spacing.sm,
   },
 });

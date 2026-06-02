@@ -1150,6 +1150,17 @@ function AvailablePickupCard({
       </Text>
       <RideDistanceLine legs={legs} />
       <DeliveryLocationLabel order={order} />
+      {/* PR-NEXT-PARTNER-VIS (Case 4) — pre-claim earnings
+          visibility. `order.deliveryFee` is stamped at placeOrder
+          time from the distance-based tier (PR 47). Showing it
+          here lets the partner accept based on a known
+          compensation, not a guess. Guard hides the line on
+          legacy / malformed orders rather than displaying ₹0. */}
+      {typeof order.deliveryFee === 'number' && order.deliveryFee > 0 && (
+        <Text style={styles.earningsLine}>
+          💰 Earn {formatRupees(order.deliveryFee)}
+        </Text>
+      )}
       <Text style={styles.meta}>
         {itemCount} item{itemCount > 1 ? 's' : ''} ·{' '}
         {formatRupees(order.total)} · {formatOrderTime(order.createdAt)}
@@ -1370,6 +1381,14 @@ function ActiveDeliveryCard({
       </Text>
       <RideDistanceLine legs={legs} />
       <DeliveryLocationLabel order={order} />
+      {/* PR-NEXT-PARTNER-VIS (Case 4) — same earnings line as
+          the available card. Reduces "wait, what was this?"
+          thrash on multi-pickup days. */}
+      {typeof order.deliveryFee === 'number' && order.deliveryFee > 0 && (
+        <Text style={styles.earningsLine}>
+          💰 Earn {formatRupees(order.deliveryFee)}
+        </Text>
+      )}
       <Text style={styles.meta}>
         {itemCount} item{itemCount > 1 ? 's' : ''} ·{' '}
         {formatRupees(order.total)}
@@ -1587,6 +1606,15 @@ const styles = StyleSheet.create({
   // Slightly tighter color than `meta` so the eye picks them out
   // without screaming, and a tad more spacing above so they don't
   // crowd the address line.
+  // PR-NEXT-PARTNER-VIS (Case 4) — pre-claim earnings line on
+  // both `AvailablePickupCard` and `ActiveDeliveryCard`. Same
+  // visual weight as `rideLine` (bold + primaryDark) so the
+  // distance + earnings read as a paired headline.
+  earningsLine: {
+    ...typography.bodyBold,
+    color: colors.primaryDark,
+    marginTop: spacing.xs,
+  },
   rideLine: {
     ...typography.bodyBold,
     color: colors.primaryDark,

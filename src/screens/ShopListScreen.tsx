@@ -172,6 +172,7 @@ export default function ShopListScreen() {
             <ShopCard
               shop={item}
               onPress={() => nav.navigate('ShopDetail', { shopId: item.id })}
+              customerLocation={location}
             />
           )}
           ListEmptyComponent={

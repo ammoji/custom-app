@@ -78,6 +78,17 @@ export default function ShopRegistrationDetailScreen() {
   // shop has no docs yet. `zoomedUrl` drives the full-screen viewer.
   const [kycUrls, setKycUrls] = useState<Record<string, string> | null>(null);
   const [zoomedUrl, setZoomedUrl] = useState<string | null>(null);
+  // PR-NEXT-SHOP-LOCATION-REQUIRED — admin-side location verification
+  // checkbox. Forces the admin to consciously eyeball the GPS pin
+  // (via the Verify-on-map deeplink rendered alongside) before the
+  // Approve CTA enables. Local state only — the durable record is
+  // `locationVerifiedAt` + `locationVerifiedBy` written server-side
+  // by `approveShop` via `validateShopLocationForApproval`.
+  // Sits with the other top-level useStates above any conditional
+  // return (Rule 2). Reset on shop swap inside the load effect so a
+  // back-nav-and-reopen doesn't carry the prior shop's check over.
+  const [locationVerifiedChecked, setLocationVerifiedChecked] =
+    useState(false);
 
   useEffect(() => {
     if (!isAdmin) {
@@ -154,6 +165,29 @@ export default function ShopRegistrationDetailScreen() {
       cancelled = true;
     };
   }, [shop, isAdmin]);
+
+  // PR-NEXT-SHOP-LOCATION-REQUIRED — derived flag mirroring the
+  // server-side `validateShopLocationForApproval` gate. Sits above
+  // any conditional return so the hooks order stays stable across
+  // pending/loaded states (Rule 2). The server will refuse with
+  // `failed-precondition` if `lat`/`lng` are missing or out of
+  // earth-range — surfacing the same check client-side prevents the
+  // admin from ever seeing that error and gives them an actionable
+  // banner instead.
+  const shopHasValidLocation = (() => {
+    const loc = shop?.location;
+    if (!loc) return false;
+    if (typeof loc.lat !== 'number' || !Number.isFinite(loc.lat)) return false;
+    if (loc.lat < -90 || loc.lat > 90) return false;
+    if (typeof loc.lng !== 'number' || !Number.isFinite(loc.lng)) return false;
+    if (loc.lng < -180 || loc.lng > 180) return false;
+    return true;
+  })();
+  // Approve enables only when (a) the shop has a valid pin AND
+  // (b) the admin has explicitly checked the verification box.
+  // `actionPending !== null` keeps the existing double-tap guard.
+  const canApprove =
+    actionPending === null && shopHasValidLocation && locationVerifiedChecked;
 
   const handleApprove = async () => {
     if (!shop) return;
@@ -371,11 +405,52 @@ export default function ShopRegistrationDetailScreen() {
         </View>
 
         <View style={styles.actions}>
+          {/* PR-NEXT-SHOP-LOCATION-REQUIRED — defense layer 2.5 (UI).
+              Surfaces the server-side `validateShopLocationForApproval`
+              precondition BEFORE the admin taps Approve. Two render
+              paths:
+                - Shop has no / invalid GPS pin → red banner +
+                  hard-disabled Approve. The checkbox is hidden
+                  because no amount of human verification fixes a
+                  missing lat/lng.
+                - Shop has a valid pin → green-ish "Verify on map"
+                  affordance + a checkbox the admin must tick.
+                  Approve stays disabled until both `shopHasValidLocation`
+                  AND `locationVerifiedChecked` are true. */}
+          {!shopHasValidLocation ? (
+            <View style={styles.locationBanner}>
+              <Text style={styles.locationBannerText}>
+                ⚠️ No GPS location captured (or out of valid earth
+                range). Cannot approve until the owner re-opens
+                RegisterShop and captures a valid pin.
+              </Text>
+            </View>
+          ) : (
+            <Pressable
+              accessibilityRole="checkbox"
+              accessibilityState={{ checked: locationVerifiedChecked }}
+              onPress={() => setLocationVerifiedChecked(v => !v)}
+              style={styles.verifyRow}
+              hitSlop={6}
+            >
+              <Text style={styles.verifyCheckbox}>
+                {locationVerifiedChecked ? '☑' : '☐'}
+              </Text>
+              <Text style={styles.verifyLabel}>
+                I verified this shop’s location on the map. (Tap the
+                📍 coords above to open Google Maps.)
+              </Text>
+            </Pressable>
+          )}
           <Button
             title={actionPending === 'approve' ? 'Approving…' : '✅ Approve'}
             onPress={handleApprove}
             loading={actionPending === 'approve'}
-            disabled={actionPending !== null}
+            // PR-NEXT-SHOP-LOCATION-REQUIRED — gate on `canApprove`
+            // (no pending action + valid pin + admin checkbox ticked).
+            // Server-side `validateShopLocationForApproval` is the
+            // structural lock; this is the UI affordance.
+            disabled={!canApprove}
             size="lg"
           />
           <View style={{ height: spacing.md }} />
@@ -546,6 +621,41 @@ const styles = StyleSheet.create({
   },
   daysBannerTextStale: { color: colors.warning ?? '#B35400' },
   actions: { marginTop: spacing.md },
+  // PR-NEXT-SHOP-LOCATION-REQUIRED — DO NOT REMOVE. Red banner +
+  // verify-checkbox styles for the location-gating affordance above
+  // the Approve CTA.
+  locationBanner: {
+    backgroundColor: '#FEE2E2',
+    borderColor: colors.danger,
+    borderWidth: 1,
+    borderRadius: radii.md,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  locationBannerText: {
+    ...typography.body,
+    color: colors.danger,
+  },
+  verifyRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    marginBottom: spacing.sm,
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+  },
+  verifyCheckbox: {
+    fontSize: 22,
+    lineHeight: 22,
+    color: colors.primary,
+    marginRight: spacing.sm,
+  },
+  verifyLabel: {
+    ...typography.body,
+    color: colors.textPrimary,
+    flex: 1,
+  },
   // Keyboard handling pattern — see CancelAndRefundModal.
   kavRoot: {
     flex: 1,

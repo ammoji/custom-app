@@ -21,7 +21,7 @@ type RadiusFilterable = {
 
 export function filterShopsByServiceRadius<T extends RadiusFilterable>(
   shops: T[],
-  opts: { showAll: boolean },
+  opts: { showAll: boolean; customerHasLocation: boolean },
 ): T[] {
   if (opts.showAll) return shops.slice();
   return shops.filter(s => {
@@ -29,7 +29,13 @@ export function filterShopsByServiceRadius<T extends RadiusFilterable>(
       typeof s.distanceKm !== 'number' ||
       !Number.isFinite(s.distanceKm)
     ) {
-      return true; // fail-open: can't measure → don't hide
+      // PR-NEXT-SHOP-LOCATION-REQUIRED — mirror of server-side fail
+      // posture split. Customer-side gap → keep (fail-open; don't
+      // strand a customer without GPS). Shop-side gap → drop (the
+      // shop is misconfigured; defense layer 3 of 3). Server's
+      // `geoVisibilityHelpers.ts` is the source of truth — KEEP THE
+      // BRANCHES IDENTICAL.
+      return opts.customerHasLocation === false;
     }
     const radius =
       typeof s.serviceRadiusKm === 'number' &&

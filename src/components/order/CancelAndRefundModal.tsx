@@ -2,10 +2,6 @@ import React, { useState } from 'react';
 import {
     Alert,
     Keyboard,
-    KeyboardAvoidingView,
-    Modal,
-    Platform,
-    Pressable,
     StyleSheet,
     Text,
     TextInput,
@@ -14,6 +10,11 @@ import {
 import { colors, radii, spacing, typography } from '../../constants/theme';
 import { orderService } from '../../services/orderService';
 import { formatRupees } from '../../utils/format';
+// PR-NEXT-HOTFIX-7 — DO NOT REMOVE. Shared bottom-sheet chrome
+// (Modal + backdrop + safe-area-aware paddingBottom). `onBackdropPress`
+// is overridden to dismiss only the keyboard — the half-typed-reason
+// preservation posture documented in the migration comment below.
+import BottomSheet from '../common/BottomSheet';
 import Button from '../common/Button';
 
 /**
@@ -90,105 +91,76 @@ export default function CancelAndRefundModal(props: CancelAndRefundModalProps) {
   };
 
   return (
-    <Modal
+    // PR-NEXT-HOTFIX-7 — chrome migrated to `BottomSheet`.
+    // `onBackdropPress` overrides the default "tap-backdrop-to-
+    // close" behaviour to dismiss the KEYBOARD only. Closing while
+    // the user has typed a reason would wipe their input with no
+    // warning — same posture as pre-PR. Hardware-back still fires
+    // `onClose` via `Modal.onRequestClose`, gated on `!pending` so
+    // an in-flight refund can't be interrupted by accident.
+    // `showHandle={false}` because the explicit "Keep order"
+    // button at the bottom is the canonical dismissal affordance
+    // for this sheet — the drag-handle would imply swipe-down
+    // dismissal which we deliberately don't want here.
+    <BottomSheet
       visible={props.visible}
-      animationType="slide"
-      transparent
-      onRequestClose={() => {
+      onClose={() => {
         if (!pending) props.onClose();
       }}
+      onBackdropPress={() => Keyboard.dismiss()}
+      showHandle={false}
     >
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={styles.kavRoot}
-      >
-        {/*
-          Backdrop tap dismisses the KEYBOARD only — it does NOT close
-          the modal. Closing while the user has typed a reason would
-          wipe their input with no warning. Use the explicit "Keep
-          order" button to dismiss. (Also: backdrop is a View wrapping
-          a Pressable region rather than a single backdrop-Pressable
-          so taps on the card body don't propagate up — Pressable in
-          React Native doesn't reliably stop propagation when
-          onPress={() => {}}.)
-        */}
-        <Pressable
-          style={styles.backdropTapZone}
-          onPress={() => Keyboard.dismiss()}
-          accessibilityLabel="Dismiss keyboard"
-        />
-        <View style={styles.card}>
-          <Text style={styles.title}>
-            Cancel and refund {formatRupees(props.orderTotal)}?
-          </Text>
-          <Text style={styles.body}>
-            The customer will be refunded via Razorpay (5-7 business days).
-            This cannot be undone.
-          </Text>
-          <Text style={styles.label}>Reason for cancellation</Text>
-          <TextInput
-            value={reason}
-            onChangeText={setReason}
-            placeholder="e.g. Out of stock, customer requested"
-            placeholderTextColor={colors.textSecondary}
-            style={styles.input}
-            multiline
-            numberOfLines={3}
-            editable={!pending}
-            maxLength={280}
-          />
-          <View style={{ height: spacing.md }} />
-          <Button
-            title={pending ? 'Refunding…' : 'Cancel and refund'}
-            onPress={handleConfirm}
-            loading={pending}
-            disabled={pending}
-            // Button only has primary/secondary/ghost; we tint via
-            // an inline override so the destructive intent is clear
-            // without forking the design-system Button.
-            variant="primary"
-            size="lg"
-            style={{ backgroundColor: colors.danger }}
-          />
-          <View style={{ height: spacing.sm }} />
-          <Button
-            title="Keep order"
-            variant="ghost"
-            onPress={() => {
-              if (!pending) props.onClose();
-            }}
-            disabled={pending}
-          />
-        </View>
-      </KeyboardAvoidingView>
-    </Modal>
+      <Text style={styles.title}>
+        Cancel and refund {formatRupees(props.orderTotal)}?
+      </Text>
+      <Text style={styles.body}>
+        The customer will be refunded via Razorpay (5-7 business days).
+        This cannot be undone.
+      </Text>
+      <Text style={styles.label}>Reason for cancellation</Text>
+      <TextInput
+        value={reason}
+        onChangeText={setReason}
+        placeholder="e.g. Out of stock, customer requested"
+        placeholderTextColor={colors.textSecondary}
+        style={styles.input}
+        multiline
+        numberOfLines={3}
+        editable={!pending}
+        maxLength={280}
+      />
+      <View style={{ height: spacing.md }} />
+      <Button
+        title={pending ? 'Refunding…' : 'Cancel and refund'}
+        onPress={handleConfirm}
+        loading={pending}
+        disabled={pending}
+        // Button only has primary/secondary/ghost; we tint via
+        // an inline override so the destructive intent is clear
+        // without forking the design-system Button.
+        variant="primary"
+        size="lg"
+        style={{ backgroundColor: colors.danger }}
+      />
+      <View style={{ height: spacing.sm }} />
+      <Button
+        title="Keep order"
+        variant="ghost"
+        onPress={() => {
+          if (!pending) props.onClose();
+        }}
+        disabled={pending}
+      />
+    </BottomSheet>
   );
 }
 
 const styles = StyleSheet.create({
-  // KeyboardAvoidingView root: takes the full modal area and column-
-  // stacks the backdrop tap-zone (flex: 1) above the card (intrinsic
-  // height). When the keyboard opens, the KAV shrinks the root, the
-  // tap-zone collapses, and the card stays above the keyboard.
-  kavRoot: {
-    flex: 1,
-    justifyContent: 'flex-end',
-    backgroundColor: 'rgba(0,0,0,0.5)',
-  },
-  // Dedicated tap area above the card. Tapping here only dismisses
-  // the keyboard — NOT the modal. The modal closes only via the
-  // explicit "Keep order" button so a half-typed reason can't be
-  // wiped by an accidental backdrop tap.
-  backdropTapZone: {
-    flex: 1,
-  },
-  card: {
-    backgroundColor: colors.bg,
-    borderTopLeftRadius: radii.lg,
-    borderTopRightRadius: radii.lg,
-    padding: spacing.lg,
-    paddingBottom: spacing.xxl,
-  },
+  // PR-NEXT-HOTFIX-7 — `kavRoot` / `backdropTapZone` / `card` styles
+  // removed; shared `BottomSheet` owns Modal + backdrop + card
+  // chrome (with safe-area-aware `paddingBottom` from
+  // `useSafeAreaInsets`). Keyboard-dismiss-on-backdrop semantics
+  // are preserved via the `onBackdropPress` prop override above.
   title: { ...typography.h2, marginBottom: spacing.xs },
   body: {
     ...typography.body,

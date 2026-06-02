@@ -357,6 +357,55 @@ have the timestamp set. Client-side UI (which gets RNFB's
 flattened-millis serialization) shows the field correctly; only
 the Admin-SDK server path mis-types it.
 
+## Rule 13 — bottom-anchored modals use `BottomSheet`
+
+Any modal that anchors to the bottom of the screen (slide-up
+"sheet" pattern, where the outer container has
+`justifyContent: 'flex-end'` on the backdrop) MUST be built via
+`src/components/common/BottomSheet.tsx` or, if it can't be (rare),
+MUST use `useSafeAreaInsets().bottom` for its bottom padding.
+
+Hardcoded `paddingBottom: spacing.xl` / `spacing.xxl` does NOT
+clear Android gesture-nav pills on tall-pill devices. The CTA at
+the bottom of the sheet gets clipped. This bug class shipped in
+PR-NEXT-HOTFIX-3 (`CartScreen`, fixed locally with
+`edges={['top','bottom']}`), PR-NEXT-PARTNER-CARD (sheet survived
+because no CTA at the very bottom), and PR-NEXT-ADDRESS-UX.1
+(visibly broken per Sudhir's June 1 retest screenshot — Save
+button clipped). Fixed structurally in PR-NEXT-HOTFIX-7. Sudhir's
+words on why this rule exists: *"Whenever we add anything new in
+the app, this issue always comes. Can we make sure fix is applied
+at first place instead of applying a fix. It wasted so much time."*
+
+**Audit-grep before any PR that adds a bottom-anchored Modal:**
+
+```
+grep -r "justifyContent: 'flex-end'" src
+```
+
+Every result must either be the shared `BottomSheet` itself or a
+caller of it (or one of the four admin screens flagged for a
+future migration: `DeliveryRequestDetailScreen`,
+`ShopDetailManagementScreen`, `ShopRegistrationDetailScreen`,
+`UserDetailScreen`).
+
+**Acceptance checklist addition for any PR that adds a
+bottom-anchored modal:** *"Verified on an Android device with
+3-button mode AND gesture-nav mode that the bottom-most CTA /
+interactive element is fully tappable (not clipped by system
+bars)."*
+
+**`BottomSheet` API:**
+
+| Prop | Default | Purpose |
+|---|---|---|
+| `visible` | required | Controls modal visibility. |
+| `onClose` | required | Backdrop tap + hardware-back handler. |
+| `children` | required | Sheet content. |
+| `keyboardAvoid` | `true` | Wraps body in `KeyboardAvoidingView`; set `false` for sheets without text inputs. |
+| `showHandle` | `true` | Renders the centered drag-handle bar. Set `false` when the sheet has its own dismissal affordance and the handle would mislead. |
+| `onBackdropPress` | `onClose` | Override for sheets that should NOT dismiss on backdrop tap (e.g. `CancelAndRefundModal` uses this to dismiss only the keyboard, preserving half-typed reasons). |
+
 ## Quick reference
 
 | Layer | What it does | When it fires |
@@ -368,6 +417,7 @@ the Admin-SDK server path mis-types it.
 | Rule 10 | Firestore tx: all reads before any writes | During edits / review |
 | Rule 11 | "Register-once" gates keyed to identity, not a bool | During edits / review |
 | Rule 12 | Firestore Timestamp reads need `.toMillis()`-narrowing | During edits / review |
+| Rule 13 | Bottom-anchored modals use `BottomSheet` (safe-area-aware) | During edits / review |
 | `.vscode/settings.json` | Disables organize-imports on save | On IDE save |
 | `npm run audit` | Grep for stripped DO-NOT-REMOVE imports | Before deploy |
 | `tsc --noEmit` | Compile check | Before deploy |

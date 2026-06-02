@@ -1,5 +1,5 @@
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../components/common/Button';
@@ -32,6 +32,30 @@ import { deriveCheckoutEmail } from '../utils/checkoutEmail';
 import { formatRupees } from '../utils/format';
 import { openRazorpayCheckout } from '../utils/razorpay';
 import { usePressGuard } from '../hooks/usePressGuard';
+// PR-NEXT-ADDRESS-UX.1 (Case 10 retest) — DO NOT REMOVE. Post-order
+// modal that asks the customer to NAME the current-location pin so
+// it becomes a reusable saved address (Sudhir wanted "Office",
+// "Uncle's house", "Sector 10 Home" etc. instead of one-off pins).
+import SaveCurrentLocationModal from '../components/address/SaveCurrentLocationModal';
+// PR-NEXT-HOTFIX-10 — DO NOT REMOVE. Pure helper that intercepts
+// the current-location save flow when an existing saved address
+// already pins within 25m of the GPS reading. Skips the modal
+// entirely + lets the caller fire a toast confirming which address
+// matched. Closes Sudhir's June 2 dedupe gap ("saved exact 2
+// addresses in the profile" from same-spot orders).
+import { findAddressNearby } from '../utils/findAddressNearby';
+// PR-NEXT-HOTFIX-10 — DO NOT REMOVE. Bare-minimum toast primitive
+// used by the address-dedupe silent-skip path. Renders
+// absolute-positioned above the safe-area inset (Rule 13).
+import Toast from '../components/common/Toast';
+// PR-NEXT-ADDRESS-UX.1 — DO NOT REMOVE. Best-effort reverse-geocode
+// of the GPS pin to (label, line1, city, pincode) suggestions for
+// the modal's pre-filled defaults. Failure is non-fatal — helper
+// returns sensible empty defaults.
+import {
+  reverseGeocodeLabel,
+  type GeocodeSuggestion,
+} from '../utils/reverseGeocodeLabel';
 
 type Errors = Partial<Record<'name' | 'line1' | 'city' | 'pincode' | 'phone', string>>;
 
@@ -149,6 +173,35 @@ export default function CheckoutScreen() {
   } | null>(null);
   const [liveCoordsError, setLiveCoordsError] = useState<string | null>(null);
   const [capturingLive, setCapturingLive] = useState(false);
+  // PR-NEXT-ADDRESS-UX.1 (Case 10 retest) — state for the post-
+  // order "Save this location?" modal. Mounted unconditionally
+  // (Rule 2: above any conditional return); `visible` gate keeps
+  // the tree zero-cost when closed. `pendingSaveCoords` carries
+  // the lat/lng + (name, phone) snapshot from the just-placed
+  // order so the save round-trip doesn't depend on still-mounted
+  // form state. `geocodeSuggestion` is the reverse-geocode result;
+  // null until we have one (modal not opened yet).
+  const [saveLocationModalVisible, setSaveLocationModalVisible] =
+    useState(false);
+  const [geocodeSuggestion, setGeocodeSuggestion] =
+    useState<GeocodeSuggestion | null>(null);
+  const [pendingSaveCoords, setPendingSaveCoords] = useState<
+    { lat: number; lng: number; phone: string; name: string } | null
+  >(null);
+  // PR-NEXT-HOTFIX-10 — DO NOT REMOVE. Toast state for the address-
+  // dedupe silent-skip path. Above any conditional return (Rule 2)
+  // so React's hook ordering stays stable across renders. Mounted
+  // unconditionally at the SafeAreaView root with `visible` gating.
+  const [toastVisible, setToastVisible] = useState(false);
+  const [toastMessage, setToastMessage] = useState('');
+  // PR-NEXT-ADDRESS-UX.1 — resolver for the promise that
+  // `maybeSaveAddressAfterOrder` awaits while the modal is up.
+  // Without this the function would resolve immediately (opening the
+  // modal is just a `setState`) and the post-await `nav.replace
+  // ('OrderConfirmation', …)` would unmount CheckoutScreen — taking
+  // the modal with it — before the customer could Save or Skip.
+  // Cleared whenever the modal dismisses (either path).
+  const saveLocationPromiseRef = useRef<(() => void) | null>(null);
   // Estimate preview returned by getDeliveryEstimate — cleared
   // whenever the target changes, recomputed when target + coords
   // resolve. `null` means "haven't computed yet"; an explicit
@@ -376,6 +429,30 @@ export default function CheckoutScreen() {
     return !hasCoords;
   })();
 
+  // PR-NEXT-HOTFIX-9 — DO NOT REMOVE. Gate Place Order during the
+  // GPS-capture race window. HOTFIX-8 relaxed validate() in
+  // current-location mode so the form-stale-fields don't block
+  // submit, but that exposed a window where the customer can submit
+  // BEFORE `liveCoords` arrives. The submitted order would then have
+  // no `deliveryLocation` (resolveDeliveryLocation returns null when
+  // liveCoords missing) AND the reverse-geocode branch in placeOrder
+  // skips (it requires liveCoords) → the order falls through to the
+  // legacy `applySavedToForm` form-stale path → Bug 2 returns. This
+  // flag locks the CTA until the GPS fix arrives OR the customer
+  // switches back to a saved address.
+  //
+  //   - mode='current' + capturingLive          → block (in flight)
+  //   - mode='current' + liveCoords == null     → block (never captured
+  //                                                or error)
+  //   - mode='saved' (any state)                → allow (saved branch
+  //                                                already validated)
+  //   - mode=null (initial)                     → allow (form-mode
+  //                                                customer; validate()
+  //                                                rejects empty fields)
+  const blockingOnCurrentCapture =
+    deliveryTargetMode === 'current' && (capturingLive || !liveCoords);
+  const canPlaceOrder = !placing && !blockingOnCurrentCapture;
+
   // Auto-capture live coords once when a coordless saved address
   // is picked. Idempotent — guarded on capturingLive + liveCoords
   // so re-renders don't spam GPS. The customer can re-trigger by
@@ -451,28 +528,118 @@ export default function CheckoutScreen() {
   const validate = (): Errors => {
     const e: Errors = {};
     if (!name.trim()) e.name = 'Required';
-    if (!line1.trim()) e.line1 = 'Required';
-    if (!city.trim()) e.city = 'Required';
-    if (!/^\d{6}$/.test(pincode)) e.pincode = '6-digit pincode';
     if (!/^\+?\d{10,13}$/.test(phone.replace(/\s/g, ''))) e.phone = 'Valid phone required';
+    // PR-NEXT-HOTFIX-8 (bug 2) — line1 / city / pincode are only
+    // required for saved-address / form modes. In current-location
+    // mode the address text is rebuilt from reverse-geocode +
+    // coords sentinels inside `placeOrder`, so the form's stale
+    // values (typically the auto-selected default's Home fields)
+    // would only block the order pointlessly. Recipient name +
+    // phone still required — those are contact details the
+    // shopkeeper actually uses.
+    if (deliveryTargetMode !== 'current') {
+      if (!line1.trim()) e.line1 = 'Required';
+      if (!city.trim()) e.city = 'Required';
+      if (!/^\d{6}$/.test(pincode)) e.pincode = '6-digit pincode';
+    }
     return e;
   };
 
   /**
    * After a successful order:
    *   - If the address came from the saved book, do nothing.
-   *   - If the user has 0 prior saved addresses, auto-save silently
-   *     (becomes their default).
+   *   - PR-NEXT-ADDRESS-UX (Case 10) — if the customer used
+   *     "Deliver to my current location", DO NOT auto-save. Sudhir's
+   *     repro: customer picks Home as default → order screen pre-
+   *     fills form fields from Home → customer switches to current-
+   *     location for THIS order → places order. The form state is
+   *     still the Home fields (not the customer's actual current
+   *     location), so the silent auto-save below was creating a
+   *     duplicate saved address with no label and Home's address
+   *     details. Current-location mode is a one-shot; if the
+   *     customer wants their current location saved, they should
+   *     use AddressEditScreen's explicit "📍 Use my current
+   *     location" button (which only stamps coords onto a form
+   *     they're actively typing — no copy-from-Home bug).
+   *   - If the user has 0 prior saved addresses AND used form
+   *     mode, auto-save silently (becomes their default). Stamp a
+   *     contextual default label so the customer can distinguish
+   *     it from any future entry rather than seeing the bare
+   *     "Address" fallback.
    *   - Otherwise prompt "Save this address?". Crude window.confirm /
    *     Alert.alert because we don't want a custom modal in the
    *     OrderConfirmation flow.
    */
   const maybeSaveAddressAfterOrder = async (addr: Address) => {
     if (selectedAddressId) return;
+    // PR-NEXT-ADDRESS-UX (Case 10) — original posture: skip silent
+    // auto-save on current-location orders so the customer doesn't
+    // end up with duplicate unlabelled "Address" rows that copied
+    // stale Home fields. PR-NEXT-ADDRESS-UX.1 layers on top: instead
+    // of completely silent, open the "Save this location?" modal so
+    // the customer can OPT IN with a meaningful name (Sudhir's
+    // retest intent — building a reusable address library from
+    // current-location orders). Skip-on-Cancel preserves the pre-PR
+    // behaviour (no save).
+    if (deliveryTargetMode === 'current') {
+      if (!liveCoords) return;
+      // PR-NEXT-HOTFIX-10 — dedupe gate. Skip the modal entirely
+      // when the customer already has an address pin within 25m of
+      // the current GPS reading. Toast confirms which existing
+      // address matched, so the customer feels acknowledged rather
+      // than wondering whether their save fired silently. Threshold
+      // tuned to typical urban GPS accuracy (5-20m outdoor /
+      // 30-50m indoor) — see `findAddressNearby` for rationale.
+      const existing = findAddressNearby(profile?.addresses ?? [], {
+        lat: liveCoords.lat,
+        lng: liveCoords.lng,
+      });
+      if (existing) {
+        const labelForToast = existing.label?.trim() || 'an existing address';
+        setToastMessage(
+          `Saved as ${labelForToast} (already in your address book)`,
+        );
+        setToastVisible(true);
+        return; // skip modal entirely
+      }
+      // Snapshot the (lat, lng, phone, name) tuple BEFORE the
+      // modal opens so the persist round-trip doesn't depend on
+      // CheckoutScreen still being mounted — the user is about to
+      // navigate to OrderConfirmation once we resolve.
+      const coordsForSave = {
+        lat: liveCoords.lat,
+        lng: liveCoords.lng,
+        phone: addr.phone,
+        name: addr.name,
+      };
+      setPendingSaveCoords(coordsForSave);
+      // Reverse-geocode is best-effort; the helper falls back to
+      // "Current location" + empty fields if it throws (no Google
+      // Play Services, no network, permission revoke mid-flow).
+      const suggestion = await reverseGeocodeLabel({
+        lat: liveCoords.lat,
+        lng: liveCoords.lng,
+      });
+      setGeocodeSuggestion(suggestion);
+      // Open the modal AND wait for the customer to dismiss it
+      // (Save or Skip both resolve via `saveLocationPromiseRef`).
+      // Caller (`placeOrder`) awaits this whole function before
+      // `nav.replace('OrderConfirmation', …)` runs, so the modal
+      // sits on top of CheckoutScreen until the user is done.
+      await new Promise<void>(resolve => {
+        saveLocationPromiseRef.current = resolve;
+        setSaveLocationModalVisible(true);
+      });
+      return;
+    }
     const priorCount = profile?.addresses.length ?? 0;
-    const persist = async () => {
+    const persist = async (label?: string) => {
       try {
         await profileService.saveAddress({
+          // PR-NEXT-ADDRESS-UX — pass an explicit label when the
+          // caller wants the auto-saved row distinguishable. Server
+          // accepts an empty/undefined label too (back-compat).
+          ...(label ? { label } : {}),
           name: addr.name,
           phone: addr.phone,
           line1: addr.line1,
@@ -487,7 +654,14 @@ export default function CheckoutScreen() {
       }
     };
     if (priorCount === 0) {
-      await persist();
+      // PR-NEXT-ADDRESS-UX — first-address auto-save. The customer
+      // never got a chance to label this; pick a sensible default
+      // (their entered city or "Home") so the address book doesn't
+      // start with a blank-label entry rendering as the generic
+      // "Address" fallback. Customer can rename via the address
+      // book later.
+      const defaultLabel = addr.city.trim() || 'Home';
+      await persist(defaultLabel);
       return;
     }
     const ok = await new Promise<boolean>(resolve => {
@@ -538,6 +712,21 @@ export default function CheckoutScreen() {
       return;
     }
 
+    // PR-NEXT-HOTFIX-9 — defensive guard (belt + suspenders). The
+    // CTA is disabled via `canPlaceOrder` so this branch shouldn't
+    // be reachable from the UI, but a stale ref-fired tap (e.g.
+    // usePressGuard releasing right as state flips) or a future
+    // refactor that loosens the disable could re-expose Bug 2. Cost
+    // of the in-function check is zero and it locks the structural
+    // invariant. Rule 1 spirit: button-disable is the user-facing
+    // fix, this is the lock so a regression can't ship Bug 2 again.
+    if (deliveryTargetMode === 'current' && (!liveCoords || capturingLive)) {
+      console.warn(
+        '[Checkout] placeOrder fired during GPS capture; ignoring.',
+      );
+      return;
+    }
+
     Analytics.begin_checkout({ value: total, item_count: items.length });
     const e = validate();
     setErrors(e);
@@ -573,19 +762,88 @@ export default function CheckoutScreen() {
       );
     }
 
-    const address: Address = {
-      name: name.trim(),
-      line1: line1.trim(),
-      line2: line2.trim() || undefined,
-      city: city.trim(),
-      pincode: pincode.trim(),
-      phone: phone.trim(),
-      // PR 22 — instructions snapshot for this order. Empty /
-      // whitespace-only → undefined so the server omits the field
-      // (instead of persisting a blank string). The saved-address
-      // book row is NOT updated; this is per-order only.
-      deliveryInstructions: orderInstructions.trim() || undefined,
-    };
+    // PR-NEXT-HOTFIX-8 (bug 2 root cause) — when the customer
+    // picked "Deliver to current location" we MUST NOT ship the
+    // stale form fields as the address text. Repro: customer has a
+    // default Home saved → screen pre-fills form via
+    // `applySavedToForm(def)` → customer taps "current location" →
+    // places order → `deliveryLocation` is the correct GPS pin BUT
+    // `deliveryAddress.{line1,city,pincode}` is still Home. The
+    // shopkeeper's order detail (which only reads `deliveryAddress`)
+    // shows the WRONG ADDRESS while the GPS pin tells a different
+    // story. Sudhir's June 1 retest: *"on shopkeeper side, on order
+    // detail, Delivery address is showed as one of my saved dummy
+    // address. That is for sure wrong."*
+    //
+    // Fix: reverse-geocode the live coords NOW and use the result.
+    // Cached in `geocodeSuggestion` so the post-order modal reuses
+    // it without a second round-trip. Fallback ladder for each
+    // field is documented inline so a future reader knows the
+    // server-validation reasoning behind each choice.
+    let address: Address;
+    if (deliveryTargetMode === 'current' && liveCoords) {
+      const geocode = await reverseGeocodeLabel({
+        lat: liveCoords.lat,
+        lng: liveCoords.lng,
+      });
+      // Pre-stash for the post-order "Save this location?" modal.
+      setGeocodeSuggestion(geocode);
+      const coordsMarker = `(${liveCoords.lat.toFixed(5)}, ${liveCoords.lng.toFixed(5)})`;
+      const geocodedLine1 = geocode.line1.trim();
+      const geocodedCity = geocode.city.trim();
+      const geocodedPincode = geocode.pincode.trim();
+      address = {
+        // Recipient name/phone are still the customer's contact
+        // details — those are pre-filled from profile/form and stay
+        // accurate (they don't change with location choice).
+        name: name.trim() || 'Customer',
+        phone: phone.trim(),
+        // `line1`: geocoded street if we got one, otherwise an
+        // explicit "at GPS pin" marker. Either way the leading 📍
+        // tells the shopkeeper this is a live-pin order, not a
+        // typed address.
+        line1:
+          geocodedLine1.length > 0
+            ? `📍 ${geocodedLine1}`
+            : `📍 At GPS pin ${coordsMarker}`,
+        // `line2`: always carry the raw coords so the shopkeeper can
+        // tap into maps if the geocoded street is generic. If the
+        // form had a line2 (rare in current-location mode) it gets
+        // overridden — the coords are more useful than stale text.
+        line2: coordsMarker,
+        // `city`: prefer geocoded city; never fall back to the form's
+        // city because that's the source of the original bug (Home's
+        // city stamped onto a different-city pin). Sentinel "—"
+        // satisfies the non-empty server check while clearly
+        // signalling "no city resolved" to the shopkeeper.
+        city: geocodedCity.length > 0 ? geocodedCity : '—',
+        // `pincode`: prefer geocoded 6-digit; sentinel "000000"
+        // otherwise (still 6 digits → passes the server's
+        // `/^\d{6}$/` validator, clearly a placeholder visually).
+        // Form pincode is intentionally NOT used as fallback for
+        // the same wrong-city reason as `city`.
+        pincode: /^\d{6}$/.test(geocodedPincode)
+          ? geocodedPincode
+          : '000000',
+        // PR 22 — instructions still come from the order form
+        // regardless of address source.
+        deliveryInstructions: orderInstructions.trim() || undefined,
+      };
+    } else {
+      address = {
+        name: name.trim(),
+        line1: line1.trim(),
+        line2: line2.trim() || undefined,
+        city: city.trim(),
+        pincode: pincode.trim(),
+        phone: phone.trim(),
+        // PR 22 — instructions snapshot for this order. Empty /
+        // whitespace-only → undefined so the server omits the field
+        // (instead of persisting a blank string). The saved-address
+        // book row is NOT updated; this is per-order only.
+        deliveryInstructions: orderInstructions.trim() || undefined,
+      };
+    }
 
     // PR 46 — resolve the locked delivery location. May be null if
     // the user opened checkout, never picked a saved address, never
@@ -1137,6 +1395,20 @@ export default function CheckoutScreen() {
         </ScrollView>
 
         <View style={styles.ctaWrap}>
+          {/* PR-NEXT-HOTFIX-9 — capture-state hint above the CTA.
+              Only renders while `blockingOnCurrentCapture` is true
+              (mode='current' + GPS not yet resolved) so it's
+              invisible in saved/form modes. The error variant nudges
+              the customer to re-tap the radio (we intentionally do
+              NOT auto-retry — auto-retry can mask permission denials
+              and feels invisible to the customer). */}
+          {blockingOnCurrentCapture && (
+            <Text style={styles.captureHint}>
+              {liveCoordsError
+                ? '⚠️ Couldn’t get your location. Tap "Deliver to current location" again to retry.'
+                : '📍 Capturing your location…'}
+            </Text>
+          )}
           <Button
             title={
               placing
@@ -1147,10 +1419,87 @@ export default function CheckoutScreen() {
             }
             onPress={guardedPlaceOrder}
             loading={placing}
+            disabled={!canPlaceOrder}
             fullWidth
           />
         </View>
       </KeyboardAvoidingView>
+      {/* PR-NEXT-ADDRESS-UX.1 (Case 10 retest) — post-order "Save
+          this location?" modal. Mounted at the SafeAreaView root
+          (outside the KeyboardAvoidingView's main scroll) so the
+          slide-up animation isn't clipped. `Modal`'s own `visible`
+          gate keeps the tree zero-cost when closed. Pre-fill
+          defaults come from `geocodeSuggestion`; `pendingSaveCoords`
+          carries the lat/lng + (name, phone) tuple captured BEFORE
+          the modal opened so the persist call is independent of
+          any still-mounted form state.
+
+          Save → fires `profileService.saveAddress` with the live
+          coords + chosen label + fields, then resolves the awaited
+          promise so `placeOrder` can navigate to OrderConfirmation.
+          Skip → resolves the promise without saving (same posture
+          as the pre-modal silent-skip behaviour). */}
+      {pendingSaveCoords != null && geocodeSuggestion != null && (
+        <SaveCurrentLocationModal
+          visible={saveLocationModalVisible}
+          defaultLabel={geocodeSuggestion.label}
+          defaultLine1={geocodeSuggestion.line1}
+          defaultCity={geocodeSuggestion.city}
+          defaultPincode={geocodeSuggestion.pincode}
+          onSkip={() => {
+            setSaveLocationModalVisible(false);
+            setPendingSaveCoords(null);
+            setGeocodeSuggestion(null);
+            const resolve = saveLocationPromiseRef.current;
+            saveLocationPromiseRef.current = null;
+            resolve?.();
+          }}
+          onSave={async input => {
+            try {
+              await profileService.saveAddress({
+                label: input.label,
+                name: pendingSaveCoords.name,
+                phone: pendingSaveCoords.phone,
+                line1: input.line1,
+                city: input.city,
+                pincode: input.pincode,
+                lat: pendingSaveCoords.lat,
+                lng: pendingSaveCoords.lng,
+              });
+            } catch (e) {
+              // Same posture as the existing
+              // `maybeSaveAddressAfterOrder` persist catch — order
+              // is already placed; a missing saved-address sync
+              // isn't worth a hard alert in the OrderConfirmation
+              // flow. Surfaces in Sentry / console for diagnostics.
+              console.warn(
+                '[Checkout] saveAddress (current location) failed:',
+                e,
+              );
+            } finally {
+              setSaveLocationModalVisible(false);
+              setPendingSaveCoords(null);
+              setGeocodeSuggestion(null);
+              const resolve = saveLocationPromiseRef.current;
+              saveLocationPromiseRef.current = null;
+              resolve?.();
+            }
+          }}
+        />
+      )}
+      {/* PR-NEXT-HOTFIX-10 — address-dedupe toast. Mounted at the
+          SafeAreaView root so it floats above the entire screen
+          (including the CTA + the SaveCurrentLocationModal slot
+          when that's closed). `pointerEvents="none"` inside the
+          Toast component prevents it from intercepting taps on
+          anything below. Auto-dismisses after 3s; the dismiss
+          callback flips `toastVisible` so subsequent dedupe hits
+          re-mount the animation cleanly. */}
+      <Toast
+        visible={toastVisible}
+        message={toastMessage}
+        onDismiss={() => setToastVisible(false)}
+      />
     </SafeAreaView>
   );
 }
@@ -1235,6 +1584,15 @@ const styles = StyleSheet.create({
     height: 10,
     borderRadius: 5,
     backgroundColor: colors.primary,
+  },
+  // PR-NEXT-HOTFIX-9 — DO NOT REMOVE. Style for the capture-state
+  // hint rendered above the Place Order / Pay CTA while the
+  // current-location GPS fix is in flight (or errored out).
+  captureHint: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    marginBottom: spacing.sm,
   },
   ctaWrap: {
     padding: spacing.lg,

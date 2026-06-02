@@ -16,6 +16,9 @@ import OrderStatusChip from '../components/order/OrderStatusChip';
 // moment they claim the pickup (not waiting for actual pickup).
 // Auto-formatter risk per code-discipline Rule 1.
 import PartnerIdentityCard from '../components/order/PartnerIdentityCard';
+// PR-NEXT-PARTNER-CARD (Case 6) — DO NOT REMOVE. Bottom-sheet
+// modal triggered by the now-tappable PartnerIdentityCard.
+import PartnerDetailsSheet from '../components/order/PartnerDetailsSheet';
 import RateOrderCard from '../components/order/RateOrderCard';
 import { colors, radii, spacing, typography } from '../constants/theme';
 import { Analytics } from '../services/analytics';
@@ -24,6 +27,11 @@ import { Sentry } from '../services/sentry';
 import { shopService } from '../services/shopService';
 import type { Order, Shop } from '../types';
 import { usePressGuard } from '../hooks/usePressGuard';
+// PR-NEXT-PARTNER-CARD.2 — DO NOT REMOVE. 30s-polling hook that
+// feeds `PartnerDetailsSheet`'s WHEN + Distance rows. Auto-pauses
+// when the sheet is closed (passes `enabled=false`) so we don't
+// burn callable invocations or battery while not visible.
+import { useLivePartnerEta } from '../hooks/useLivePartnerEta';
 import { formatOrderTime, formatRupees } from '../utils/format';
 // PR-NEXT-6 (finding #16d) — DO NOT REMOVE. Surfaces the actual
 // settlement method (cod-paid-online, cod-paid-cash, online, …).
@@ -118,6 +126,23 @@ export default function OrderDetailScreen() {
   const [shop, setShop] = useState<Shop | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshNonce, setRefreshNonce] = useState(0);
+  // PR-NEXT-PARTNER-CARD (Case 6) — controls the partner-details
+  // bottom sheet triggered by tapping `PartnerIdentityCard`.
+  const [partnerSheetOpen, setPartnerSheetOpen] = useState(false);
+  // PR-NEXT-PARTNER-CARD.1 (Case 6 retest) — phone-reveal state for
+  // `PartnerDetailsSheet`. Phone is NEVER on the order doc; we fetch
+  // it on-demand via `getDeliveryPartnerContact` and cache here for
+  // the lifetime of this screen instance. `revealingPhone` gates the
+  // CTA spinner so re-taps are no-ops during the round-trip.
+  const [partnerPhone, setPartnerPhone] = useState<string | null>(null);
+  const [revealingPhone, setRevealingPhone] = useState(false);
+  // PR-NEXT-PARTNER-CARD.2 — live-ETA polling hook. The `enabled`
+  // arg is `partnerSheetOpen` so polling only runs while the sheet
+  // is visible. Hook returns `{ distanceKm, etaMin, stale, loading }`
+  // and the sheet picks the static `order.deliveryDistanceKm` /
+  // `deliveryDurationMin` fallback when the live fields are null
+  // (server rejected with `failed-precondition`).
+  const livePartnerEta = useLivePartnerEta(orderId, partnerSheetOpen);
 
   // PR 20 — local optimistic rating state. Once the customer
   // submits a rating, we want the UI to flip immediately to a
@@ -232,6 +257,42 @@ export default function OrderDetailScreen() {
     setRefreshing(true);
     setRefreshNonce(n => n + 1);
   }, []);
+
+  // PR-NEXT-PARTNER-CARD.1 (Case 6 retest) — invalidate the cached
+  // partner phone whenever the orderId changes (e.g. user navigated
+  // back and opened a different order). Without this a stale phone
+  // from order A would leak into the sheet for order B until the
+  // user explicitly tapped "Show partner phone" again. Closing the
+  // sheet does NOT clear the phone — the customer often closes and
+  // re-opens the sheet during a delivery and the cached number lets
+  // them re-tap-to-call without a second round-trip.
+  useEffect(() => {
+    setPartnerPhone(null);
+    setRevealingPhone(false);
+  }, [orderId]);
+
+  // PR-NEXT-PARTNER-CARD.1 (Case 6 retest) — phone-reveal handler.
+  // Calls the server-gated `getDeliveryPartnerContact` callable and
+  // caches the returned number in screen state. Server enforces the
+  // (customer, has-partner, picked-up) gate; client surfaces the
+  // friendly error verbatim — the canonical pre-pickup message is
+  // "Partner phone is shared once the order is picked up." which
+  // matches the muted copy already visible in the sheet pre-pickup.
+  const onRevealPartnerPhone = useCallback(async () => {
+    if (!order) return;
+    setRevealingPhone(true);
+    try {
+      const { phone } = await orderService.getDeliveryPartnerContact(order.id);
+      setPartnerPhone(phone);
+    } catch (e: any) {
+      showAlert(
+        'Could not load phone',
+        e?.message ?? 'Please try again in a moment.',
+      );
+    } finally {
+      setRevealingPhone(false);
+    }
+  }, [order]);
 
   // PR 17 — customer-side "Call shop" handler. Mirror of the
   // shopkeeper's `onCallCustomer` flow on ShopOrderDetailScreen
@@ -426,6 +487,7 @@ export default function OrderDetailScreen() {
               pickedUpAt={
                 typeof order.pickedUpAt === 'number' ? order.pickedUpAt : null
               }
+              onPress={() => setPartnerSheetOpen(true)}
             />
           )}
 
@@ -869,6 +931,57 @@ export default function OrderDetailScreen() {
             );
           })()}
       </ScrollView>
+      {/* PR-NEXT-PARTNER-CARD (Case 6) — partner-details bottom
+          sheet. Mounts at the SafeAreaView root (outside the
+          ScrollView) so the slide-up animation covers the whole
+          screen and isn't clipped by the scroll viewport. Modal's
+          own `visible` gate keeps the tree zero-cost when closed. */}
+      <PartnerDetailsSheet
+        visible={partnerSheetOpen}
+        onClose={() => setPartnerSheetOpen(false)}
+        partnerName={order.deliveryPersonName}
+        pickedUpAt={
+          typeof order.pickedUpAt === 'number' ? order.pickedUpAt : null
+        }
+        shopName={order.shopName}
+        // PR-NEXT-PARTNER-CARD.1 (Case 6 retest) — richer rows.
+        // `orderShortId` is the trailing 8 chars uppercased; matches
+        // the readable handle the customer already sees on the
+        // OrderConfirmation toast.
+        orderShortId={order.id.slice(-8).toUpperCase()}
+        deliveryDistanceKm={
+          typeof order.deliveryDistanceKm === 'number'
+            ? order.deliveryDistanceKm
+            : null
+        }
+        deliveryDurationMin={
+          typeof order.deliveryDurationMin === 'number'
+            ? order.deliveryDurationMin
+            : null
+        }
+        // PR-NEXT-PARTNER-CARD.2 — denormalized trust signals
+        // (claim-time snapshot). Optional/nullable on the order
+        // doc; the formatter falls back to "New partner" copy +
+        // motorbike default glyph when any are missing.
+        partnerRating={
+          typeof order.deliveryPersonRating === 'number'
+            ? order.deliveryPersonRating
+            : null
+        }
+        partnerDeliveriesCount={
+          typeof order.deliveryPersonDeliveriesCount === 'number'
+            ? order.deliveryPersonDeliveriesCount
+            : null
+        }
+        partnerVehicleType={order.deliveryPersonVehicleType ?? null}
+        partnerPhone={partnerPhone}
+        revealing={revealingPhone}
+        onRevealPhone={onRevealPartnerPhone}
+        // PR-NEXT-PARTNER-CARD.2 — live-ETA polling state. Hook
+        // auto-pauses when `partnerSheetOpen` is false so the 30s
+        // interval doesn't fire while the sheet is closed.
+        live={livePartnerEta}
+      />
     </SafeAreaView>
   );
 

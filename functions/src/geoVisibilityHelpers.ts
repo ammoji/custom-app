@@ -10,12 +10,25 @@
  * Inputs are already-ranked shops (`rankShopsByDistance` has stamped
  * `distanceKm` + sorted). This helper ONLY decides inclusion.
  *
- * Fail-OPEN posture: when we cannot measure a distance (no customer
- * location, no shop location, non-finite haversine) we KEEP the
- * shop. The alternative (hide on missing data) would silently strand
- * customers — worse UX than over-including a few shops. Real
- * over-inclusion is bounded because `rankShopsByDistance` only feeds
- * us active shops anyway.
+ * Mixed-fail posture (PR-NEXT-SHOP-LOCATION-REQUIRED): the missing-
+ * distance branch now distinguishes WHICH side is missing.
+ *   - Customer-side gap (customer hasn't granted location) → fail-
+ *     OPEN: keep all shops uniformly. The alternative (hide on
+ *     missing customer location) would silently strand a customer
+ *     who hasn't enabled GPS yet.
+ *   - Shop-side gap (shop has no `location` so `distanceKm` came back
+ *     undefined despite a present customer location) → fail-CLOSED:
+ *     drop that shop. This is defense layer 3 of 3 closing Sudhir's
+ *     June 2 finding *"Shop current location is optional so how can
+ *     we calculate shop distance?"* — RegisterShop's client gate +
+ *     approveShop's server gate are layers 1 and 2; this is the
+ *     last-resort hide if a misconfigured shop somehow lands in the
+ *     active set (legacy data, manual Firestore edit, future refactor
+ *     regression).
+ *
+ * Pre-PR posture (commented out for the historical record): a single
+ * fail-OPEN branch on missing `distanceKm` regardless of cause —
+ * which produced shops without `location` being globally visible.
  */
 
 export const DEFAULT_SERVICE_RADIUS_KM = 5;
@@ -31,7 +44,12 @@ type RadiusFilterable = {
  * Rules:
  *   - `showAll === true`         → keep every shop (testing override).
  *   - `distanceKm` undefined /
- *     non-finite                 → KEEP (fail-open; can't measure).
+ *     non-finite                 → branch on `customerHasLocation`:
+ *                                    • false → KEEP (customer-side gap;
+ *                                      fail-open so we don't strand)
+ *                                    • true  → DROP (shop-side gap;
+ *                                      shop has no `location` pin —
+ *                                      defense layer 3)
  *   - `serviceRadiusKm` missing /
  *     zero / negative / NaN      → fall back to
  *                                  `DEFAULT_SERVICE_RADIUS_KM`.
@@ -45,7 +63,7 @@ type RadiusFilterable = {
  */
 export function filterShopsByServiceRadius<T extends RadiusFilterable>(
   shops: T[],
-  opts: { showAll: boolean },
+  opts: { showAll: boolean; customerHasLocation: boolean },
 ): T[] {
   if (opts.showAll) return shops.slice();
   return shops.filter(s => {
@@ -53,7 +71,12 @@ export function filterShopsByServiceRadius<T extends RadiusFilterable>(
       typeof s.distanceKm !== 'number' ||
       !Number.isFinite(s.distanceKm)
     ) {
-      return true; // fail-open: can't measure → don't hide
+      // PR-NEXT-SHOP-LOCATION-REQUIRED — split the missing-distance
+      // branch. Customer-side gap → keep (fail-open; don't strand
+      // a customer without GPS). Shop-side gap → drop (the shop is
+      // misconfigured; defense layer 3 of 3 — RegisterShop client
+      // gate + approveShop server gate are layers 1 and 2).
+      return opts.customerHasLocation === false;
     }
     const radius =
       typeof s.serviceRadiusKm === 'number' &&

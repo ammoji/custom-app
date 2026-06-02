@@ -171,6 +171,20 @@ export default function RegisterShopScreen() {
     if (!hhmm.test(openTime) || !hhmm.test(closeTime)) {
       return 'Hours must be in HH:mm format (e.g. 09:00)';
     }
+    // PR-NEXT-SHOP-LOCATION-REQUIRED — defense layer 1 of 3.
+    // Without a captured GPS pin the customer-side distance filter
+    // can't measure this shop, the server's `approveShop` callable
+    // will reject (layer 2), and even if it somehow approves, the
+    // customer-side `filterShopsByServiceRadius` shop-side-gap
+    // branch hides it (layer 3). Block submit here so the owner
+    // gets a clear actionable error instead of the cascade.
+    if (!location) {
+      return (
+        'Please capture your shop\'s GPS location before submitting. ' +
+        'Use the "📍 Use my current location" button below — customers ' +
+        'won\'t see your shop in their nearby list without it.'
+      );
+    }
     return null;
   };
 
@@ -684,12 +698,29 @@ export default function RegisterShopScreen() {
             aiFilled={aiFilledFields.has('fssaiLicense')}
           />
 
+          {/* PR-NEXT-SHOP-LOCATION-REQUIRED — defense layer 1 of 3.
+              Surfaces the missing-GPS-pin precondition above the
+              Continue CTA so the owner sees WHY the button is dim
+              before they tap it. The "Use my current location"
+              affordance referenced in the copy is the existing GPS-
+              capture row rendered earlier in the form (search for
+              `📍 GPS captured` for the success-state hint). */}
+          {!location && (
+            <Text style={styles.captureHint}>
+              📍 Capture your shop’s GPS location before continuing —
+              customers won’t see your shop without it.
+            </Text>
+          )}
           <View style={{ marginTop: spacing.lg }}>
             <Button
               title={submitting ? 'Saving…' : 'Continue to documents'}
               onPress={handleContinue}
               loading={submitting}
-              disabled={submitting}
+              // PR-NEXT-SHOP-LOCATION-REQUIRED — gate the CTA on a
+              // captured GPS pin. `validate()` would also reject
+              // submit on its own (defense in depth) but disabling
+              // the button is the primary user-facing affordance.
+              disabled={submitting || !location}
               size="lg"
             />
           </View>
@@ -946,6 +977,16 @@ const styles = StyleSheet.create({
     minHeight: 84,
     textAlignVertical: 'top',
     paddingTop: spacing.sm,
+  },
+  // PR-NEXT-SHOP-LOCATION-REQUIRED — DO NOT REMOVE. Hint above the
+  // Continue CTA when the GPS pin hasn't been captured yet. Mirrors
+  // the HOTFIX-9 `captureHint` style on CheckoutScreen so the
+  // capture-required affordance feels consistent across the app.
+  captureHint: {
+    ...typography.caption,
+    color: colors.warning,
+    textAlign: 'center',
+    marginTop: spacing.md,
   },
   helper: {
     ...typography.caption,

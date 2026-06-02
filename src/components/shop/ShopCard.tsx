@@ -1,7 +1,10 @@
 import React from 'react';
 import { View, Image, Text, Pressable, StyleSheet } from 'react-native';
-import { Shop } from '../../types';
+import { GeoPoint, Shop } from '../../types';
 import { colors, spacing, radii, typography, shadow } from '../../constants/theme';
+// HOTFIX-6 (Case 1) — DO NOT REMOVE. Distance-based delivery
+// charge so the shop card matches CheckoutScreen's number.
+import { displayDeliveryCharge } from '../../utils/displayDeliveryCharge';
 import { formatDistance, formatRupees } from '../../utils/format';
 import Badge from '../common/Badge';
 import ShopRatingBadge from './ShopRatingBadge';
@@ -9,9 +12,13 @@ import ShopRatingBadge from './ShopRatingBadge';
 type Props = {
   shop: Shop;
   onPress: () => void;
+  // HOTFIX-6 — optional customer GPS for the freshest distance.
+  // Falls back to `shop.distanceKm` (server-stamped) inside the
+  // helper, then to `shop.deliveryFee` if neither is available.
+  customerLocation?: GeoPoint | null;
 };
 
-export default function ShopCard({ shop, onPress }: Props) {
+export default function ShopCard({ shop, onPress, customerLocation }: Props) {
   return (
     <Pressable
       onPress={onPress}
@@ -54,7 +61,9 @@ export default function ShopCard({ shop, onPress }: Props) {
           <Text style={styles.dot}>·</Text>
           <Text style={styles.meta}>{shop.etaMinutes} min</Text>
           <Text style={styles.dot}>·</Text>
-          <Text style={styles.meta}>{formatRupees(shop.deliveryFee)} delivery</Text>
+          <Text style={styles.meta}>
+            {formatRupees(displayDeliveryCharge(shop, customerLocation))} delivery
+          </Text>
         </View>
       </View>
     </Pressable>

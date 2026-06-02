@@ -7,6 +7,7 @@
 import {
   buildFirebaseStorageDownloadUrl,
   pickStorefrontPath,
+  validateShopLocationForApproval,
   type ShopDocLike,
 } from '../../functions/src/approveShopHelpers';
 
@@ -137,5 +138,113 @@ describe('PR 42.0.1 — buildFirebaseStorageDownloadUrl', () => {
       'tok',
     );
     expect(url).toContain('/b/grocery-mvp-dev.appspot.com/o/');
+  });
+});
+
+describe('PR-NEXT-SHOP-LOCATION-REQUIRED — validateShopLocationForApproval', () => {
+  test('happy path — Delhi GPS pin → ok', () => {
+    const r = validateShopLocationForApproval({
+      location: { lat: 28.6139, lng: 77.209 },
+    });
+    expect(r).toEqual({ ok: true });
+  });
+
+  test('null location → no_location', () => {
+    expect(validateShopLocationForApproval({ location: null })).toEqual({
+      ok: false,
+      code: 'no_location',
+    });
+  });
+
+  test('missing location field → no_location', () => {
+    expect(validateShopLocationForApproval({})).toEqual({
+      ok: false,
+      code: 'no_location',
+    });
+  });
+
+  test('lat undefined → lat_invalid', () => {
+    expect(
+      validateShopLocationForApproval({
+        location: { lng: 77.209 } as { lat?: unknown; lng?: unknown },
+      }),
+    ).toEqual({ ok: false, code: 'lat_invalid' });
+  });
+
+  test('lat NaN → lat_invalid', () => {
+    expect(
+      validateShopLocationForApproval({
+        location: { lat: Number.NaN, lng: 77.209 },
+      }),
+    ).toEqual({ ok: false, code: 'lat_invalid' });
+  });
+
+  test('lat string → lat_invalid (unknown payload, defensive)', () => {
+    expect(
+      validateShopLocationForApproval({
+        location: { lat: '28.6' as unknown as number, lng: 77.209 },
+      }),
+    ).toEqual({ ok: false, code: 'lat_invalid' });
+  });
+
+  test('lat 91 → lat_out_of_range (catches swapped lat/lng)', () => {
+    // Real bug shape: a future client refactor swaps lat/lng so
+    // Delhi's lat=28.6, lng=77.2 ships as lat=77.2, lng=28.6.
+    // 77.2 is a valid Number and Finite, so the only thing that
+    // catches it is the [-90, 90] range check.
+    expect(
+      validateShopLocationForApproval({
+        location: { lat: 91, lng: 28.6 },
+      }),
+    ).toEqual({ ok: false, code: 'lat_out_of_range' });
+  });
+
+  test('lat -91 → lat_out_of_range', () => {
+    expect(
+      validateShopLocationForApproval({
+        location: { lat: -91, lng: 0 },
+      }),
+    ).toEqual({ ok: false, code: 'lat_out_of_range' });
+  });
+
+  test('lng Infinity → lng_invalid', () => {
+    expect(
+      validateShopLocationForApproval({
+        location: { lat: 28.6, lng: Number.POSITIVE_INFINITY },
+      }),
+    ).toEqual({ ok: false, code: 'lng_invalid' });
+  });
+
+  test('lng 181 → lng_out_of_range', () => {
+    expect(
+      validateShopLocationForApproval({
+        location: { lat: 28.6, lng: 181 },
+      }),
+    ).toEqual({ ok: false, code: 'lng_out_of_range' });
+  });
+
+  test('boundary lat 90, lng 180 → ok (inclusive)', () => {
+    expect(
+      validateShopLocationForApproval({
+        location: { lat: 90, lng: 180 },
+      }),
+    ).toEqual({ ok: true });
+    expect(
+      validateShopLocationForApproval({
+        location: { lat: -90, lng: -180 },
+      }),
+    ).toEqual({ ok: true });
+  });
+
+  test('0/0 pin → ok (technically valid; admin UI surfaces the suspicious value)', () => {
+    // The pure helper accepts (0, 0). It's a real point on earth
+    // (Gulf of Guinea); rejecting here would also reject a future
+    // shop legitimately near 0/0. Admin-side UI's map deeplink
+    // catches the placeholder shape via human review.
+    expect(
+      validateShopLocationForApproval({
+        location: { lat: 0, lng: 0 },
+      }),
+    ).toEqual({ ok: true });
   });
 });

@@ -293,6 +293,42 @@ export default function ShopOrderDetailScreen() {
 
         {/* Delivery address */}
         <Text style={styles.sectionTitle}>Delivery address</Text>
+        {/* PR-NEXT-HOTFIX-8 (bug 2 — defense in depth) — when the
+            customer ordered with "Deliver to current location" the
+            locked `deliveryLocation` is the source of truth, not
+            the address text fields. Render a prominent GPS-pin
+            banner with the coords + a one-tap maps deeplink so the
+            shopkeeper sees the live pin even on legacy buggy
+            orders (placed before HOTFIX-8's placeOrder fix) where
+            `deliveryAddress` may still carry the customer's stale
+            default-Home fields. On modern orders the address text
+            is already a reverse-geocoded `📍`-prefixed line, so
+            the banner reinforces rather than contradicts. */}
+        {order.deliveryLocation?.type === 'current_location' && (
+          <Pressable
+            onPress={() => {
+              const { lat, lng } = order.deliveryLocation!;
+              const url = Platform.select({
+                ios: `maps:0,0?q=${lat},${lng}`,
+                android: `geo:0,0?q=${lat},${lng}(Delivery%20pin)`,
+                default: `https://maps.google.com/?q=${lat},${lng}`,
+              });
+              Linking.openURL(url!).catch(() => {});
+            }}
+            style={styles.gpsPinCard}
+            accessibilityRole="button"
+            accessibilityLabel="Open delivery GPS pin in Maps"
+          >
+            <Text style={styles.gpsPinTitle}>
+              📍 Customer at GPS pin
+            </Text>
+            <Text style={styles.gpsPinCoords}>
+              {order.deliveryLocation.lat.toFixed(5)},{' '}
+              {order.deliveryLocation.lng.toFixed(5)}
+            </Text>
+            <Text style={styles.gpsPinHint}>Tap to open in Maps</Text>
+          </Pressable>
+        )}
         <View style={styles.card}>
           <Text style={styles.addressLine}>{order.deliveryAddress.line1}</Text>
           {!!order.deliveryAddress.line2 && (
@@ -615,6 +651,28 @@ const styles = StyleSheet.create({
   },
   callText: { ...typography.bodyBold, color: colors.primary },
   callHint: { ...typography.caption, color: colors.textSecondary },
+  // PR-NEXT-HOTFIX-8 (bug 2) — GPS-pin banner shown above the
+  // address card when the customer ordered with "current location".
+  // Uses `primaryLight` background so it reads as a distinct
+  // affordance (tap to open maps) rather than blending into the
+  // surface-colored address card below.
+  gpsPinCard: {
+    backgroundColor: colors.primaryLight,
+    borderRadius: radii.md,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  gpsPinTitle: { ...typography.bodyBold, color: colors.primaryDark },
+  gpsPinCoords: {
+    ...typography.body,
+    color: colors.primaryDark,
+    marginTop: 2,
+  },
+  gpsPinHint: {
+    ...typography.caption,
+    color: colors.primaryDark,
+    marginTop: 2,
+  },
   addressLine: {
     ...typography.body,
     color: colors.textSecondary,

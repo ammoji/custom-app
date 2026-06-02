@@ -34,7 +34,11 @@ import {
   Text,
   View,
 } from 'react-native';
-import { TEST_ACCOUNTS, type TestAccount } from '../../constants/testAccounts';
+import {
+  TEST_ACCOUNTS,
+  formatTestAccountPhone,
+  type TestAccount,
+} from '../../constants/testAccounts';
 import { colors, radii, spacing, typography } from '../../constants/theme';
 import { authService } from '../../services/authService';
 import { pushService } from '../../services/pushService';
@@ -77,9 +81,11 @@ export default function QuickSwitchModal({ visible, onClose }: Props) {
       //    invisible reCAPTCHA fires. The Firebase Console test
       //    list short-circuits the actual SMS — that's why the
       //    canned OTP works.
-      const confirmation = await authService.startPhoneAuth(
-        `+91${account.phone}`,
-      );
+      //
+      // 2026-06-02 — account.phone is now full E.164 (was 10-digit
+      // pre-PR). The hardcoded `+91` prefix is gone so US (+1) test
+      // accounts work alongside India (+91) — see testAccounts.ts.
+      const confirmation = await authService.startPhoneAuth(account.phone);
 
       // 3. Submit the canned OTP. confirmOtp force-refreshes the
       //    ID token internally, so the resulting AuthUser already
@@ -136,7 +142,9 @@ export default function QuickSwitchModal({ visible, onClose }: Props) {
               >
                 <View style={{ flex: 1 }}>
                   <Text style={styles.itemLabel}>{account.label}</Text>
-                  <Text style={styles.itemPhone}>+91 {account.phone}</Text>
+                  <Text style={styles.itemPhone}>
+                    {formatTestAccountPhone(account.phone)}
+                  </Text>
                 </View>
                 {busy === account.phone && (
                   <ActivityIndicator color={colors.primary} />

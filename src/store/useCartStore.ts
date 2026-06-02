@@ -20,6 +20,17 @@ type CartState = {
   // pre-PR-47 build (the checkout screen falls back to the flat
   // `deliveryFee` in that case).
   deliveryChargeTiers: DeliveryChargeTier[] | null;
+  // PR-NEXT-HOTFIX-6.1 (Case 1 retest) — snapshot the shop's geo
+  // pin at add-to-cart time so `CartScreen`'s Bill Details can
+  // call `displayDeliveryCharge(snapshot, customerLocation)` and
+  // match what `ShopCard` / `ShopDetailScreen` show. Without this
+  // field the cart had no distance reference and fell through to
+  // the flat `deliveryFee`, producing the ₹25 → ₹100 mismatch
+  // Sudhir caught on retest. Optional / nullable so legacy carts
+  // persisted from a pre-PR build hydrate cleanly — in that case
+  // `displayDeliveryCharge` returns the flat fallback (same as
+  // today's display).
+  shopLocation: { lat: number; lng: number } | null;
   items: CartItem[];
 
   // Legacy product-based add (still used by SearchScreen, which reads
@@ -53,6 +64,9 @@ type CartState = {
       // PR 47 — optional so legacy callers (no tier table) keep
       // compiling; null at this entry point clears the snapshot.
       deliveryChargeTiers?: DeliveryChargeTier[] | null;
+      // PR-NEXT-HOTFIX-6.1 — optional geo pin snapshot for the
+      // reorder path. Same nullable treatment as the tier table.
+      location?: { lat: number; lng: number } | null;
     },
   ) => void;
 
@@ -89,6 +103,9 @@ export const useCartStore = create<CartState>()(
   shopName: null,
   deliveryFee: 0,
   deliveryChargeTiers: null,
+  // PR-NEXT-HOTFIX-6.1 — mirrors the other shop-scoped fields'
+  // initial null so an empty cart has no stale geo reference.
+  shopLocation: null,
   items: [],
 
   addItem: (product, shop) => {
@@ -149,6 +166,11 @@ export const useCartStore = create<CartState>()(
         // PR 47 — snapshot the tier table so checkout can show
         // the tiered preview without re-fetching.
         deliveryChargeTiers: shop.deliveryChargeTiers ?? null,
+        // PR-NEXT-HOTFIX-6.1 — snapshot geo pin so CartScreen can
+        // call `displayDeliveryCharge` with a haversine distance.
+        // `shop.location` may be undefined on legacy Shop docs;
+        // null-coalesce keeps the field shape stable.
+        shopLocation: shop.location ?? null,
       };
     });
     Analytics.add_to_cart({
@@ -202,6 +224,8 @@ export const useCartStore = create<CartState>()(
         // PR 47 — snapshot the tier table so checkout can show
         // the tiered preview without re-fetching.
         deliveryChargeTiers: shop.deliveryChargeTiers ?? null,
+        // PR-NEXT-HOTFIX-6.1 — see forceAddItem branch above.
+        shopLocation: shop.location ?? null,
       };
     });
     Analytics.add_to_cart({
@@ -235,6 +259,8 @@ export const useCartStore = create<CartState>()(
             shopName: null,
             deliveryFee: 0,
             deliveryChargeTiers: null,
+            // PR-NEXT-HOTFIX-6.1 — clear geo snapshot on empty-out.
+            shopLocation: null,
           }
         : { items: next };
     }),
@@ -249,6 +275,8 @@ export const useCartStore = create<CartState>()(
             shopName: null,
             deliveryFee: 0,
             deliveryChargeTiers: null,
+            // PR-NEXT-HOTFIX-6.1 — clear geo snapshot on empty-out.
+            shopLocation: null,
           }
         : { items: next };
     });
@@ -262,6 +290,8 @@ export const useCartStore = create<CartState>()(
       shopName: null,
       deliveryFee: 0,
       deliveryChargeTiers: null,
+      // PR-NEXT-HOTFIX-6.1 — clear geo snapshot on explicit clear.
+      shopLocation: null,
     }),
 
   // PR 13 — repeat order. Atomic clear-and-replace so the reorder
@@ -282,6 +312,12 @@ export const useCartStore = create<CartState>()(
       // too. May be undefined when the caller built the shop
       // object from a legacy source; null clears the snapshot.
       deliveryChargeTiers: shop.deliveryChargeTiers ?? null,
+      // PR-NEXT-HOTFIX-6.1 — carry the geo snapshot through reorder
+      // too. The reorder caller (`planToCartItems` consumer) may
+      // not have the shop's location handy on a legacy reorder
+      // path — null fallback there leaves the cart on the flat-fee
+      // branch, same as a legacy persisted cart.
+      shopLocation: shop.location ?? null,
     });
     // One synthetic add_to_cart event for the whole bundle. Using
     // product_id: 'reorder' to distinguish reorder-driven adds in
@@ -317,6 +353,12 @@ export const useCartStore = create<CartState>()(
         // PR 47 — persist the tier snapshot too so a relaunch
         // mid-checkout still renders the tiered preview.
         deliveryChargeTiers: state.deliveryChargeTiers,
+        // PR-NEXT-HOTFIX-6.1 — persist the geo snapshot. Legacy
+        // persisted carts (pre-this-PR) hydrate with `undefined` here
+        // which Zustand merges as missing; the initial-state `null`
+        // wins and `displayDeliveryCharge` falls through to the flat
+        // fee — same display as today's broken behaviour, no crash.
+        shopLocation: state.shopLocation,
         items: state.items,
       }),
     }

@@ -112,3 +112,73 @@ export function buildFirebaseStorageDownloadUrl(
   const encodedPath = encodeURIComponent(objectPath);
   return `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodedPath}?alt=media&token=${token}`;
 }
+
+/**
+ * PR-NEXT-SHOP-LOCATION-REQUIRED — defense layer 2 of 3.
+ *
+ * Validates that a pending shop has a finite GPS pin within real
+ * earth coordinates BEFORE `approveShop` flips it to `active`. The
+ * client gate (RegisterShop submit-disable) is layer 1 and the
+ * customer-side filter (`filterShopsByServiceRadius` shop-side gap
+ * branch) is layer 3. This is the middle defense — refuses to
+ * approve a misconfigured shop even when the admin tries via a
+ * direct callable invocation that bypasses the UI.
+ *
+ * Returns `{ ok: true }` on a valid pin, `{ ok: false, code }` on
+ * any rejection. Caller maps the `code` to an `HttpsError` with the
+ * customer-facing message.
+ *
+ * Strict validation:
+ *   - `location` must exist and be an object.
+ *   - `lat` must be a finite number in [-90, 90].
+ *   - `lng` must be a finite number in [-180, 180].
+ *
+ * The earth-coordinate range checks catch real bugs we've seen:
+ * a swapped lat/lng pair (Delhi's 28.6/77.2 fails the lat<=90
+ * check when accidentally written as 77.2/28.6 → 77.2 > 90), a
+ * 0/0 pin at the Gulf of Guinea (passes range but is almost
+ * certainly placeholder data — NOT rejected here because it's
+ * technically valid; admin-side UI surfaces this with the map
+ * deeplink so the admin spots it before approving).
+ *
+ * Pure; pinned by `tests/functions/approveShopHelpers.test.ts`.
+ */
+export type ShopLocationLike = {
+  location?: { lat?: unknown; lng?: unknown } | null;
+};
+
+export type ShopLocationValidation =
+  | { ok: true }
+  | {
+      ok: false;
+      code:
+        | 'no_location'
+        | 'lat_invalid'
+        | 'lat_out_of_range'
+        | 'lng_invalid'
+        | 'lng_out_of_range';
+    };
+
+export function validateShopLocationForApproval(
+  shop: ShopLocationLike,
+): ShopLocationValidation {
+  const loc = shop?.location;
+  if (!loc || typeof loc !== 'object') {
+    return { ok: false, code: 'no_location' };
+  }
+  const lat = (loc as { lat?: unknown }).lat;
+  const lng = (loc as { lng?: unknown }).lng;
+  if (typeof lat !== 'number' || !Number.isFinite(lat)) {
+    return { ok: false, code: 'lat_invalid' };
+  }
+  if (lat < -90 || lat > 90) {
+    return { ok: false, code: 'lat_out_of_range' };
+  }
+  if (typeof lng !== 'number' || !Number.isFinite(lng)) {
+    return { ok: false, code: 'lng_invalid' };
+  }
+  if (lng < -180 || lng > 180) {
+    return { ok: false, code: 'lng_out_of_range' };
+  }
+  return { ok: true };
+}

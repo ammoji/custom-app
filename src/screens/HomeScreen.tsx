@@ -113,8 +113,12 @@ export default function HomeScreen() {
   // test account, letting you switch back. A real customer's phone
   // wouldn't be in the list, so they never see the button —
   // automatic production safety without per-role gating.
+  //
+  // 2026-06-02 — TEST_ACCOUNTS.phone is now full E.164 (was 10-digit
+  // pre-PR). The hardcoded `+91` prefix is gone so US (+1) test
+  // accounts are recognised correctly. See testAccounts.ts.
   const isTestAccount = phoneNumber
-    ? TEST_ACCOUNTS.some(a => `+91${a.phone}` === phoneNumber)
+    ? TEST_ACCOUNTS.some(a => a.phone === phoneNumber)
     : false;
 
   // PR 19 — total favorite count across all shops. Drives both the

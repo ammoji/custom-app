@@ -1626,6 +1626,73 @@ export const orderService = {
     return result.data as { ok: true; alreadyPaid: boolean };
   },
 
+  // PR-NEXT-PARTNER-CARD.1 (Case 6 retest) — customer-side phone
+  // reveal for the assigned delivery partner. Gated server-side by
+  // `getDeliveryPartnerContactPure`: caller MUST be the order's
+  // `customerId`, order MUST have a `deliveryPersonId`, and
+  // `pickedUpAt` MUST be set. Pre-pickup callers see
+  // `failed-precondition` ("Partner phone is shared once the order
+  // is picked up.") — `PartnerDetailsSheet` surfaces that as an
+  // Alert via its `revealPhone` handler. No phone is ever
+  // denormalized onto the order doc; the only way to obtain it is
+  // through this explicit pull.
+  //
+  // PR-NEXT-PARTNER-CARD.2 — the server-side gate now checks the
+  // order's `customerUid` (not `customerId`, which never existed
+  // as an order field). Pre-fix, every customer's reveal failed
+  // silently with `not_customer`.
+  async getDeliveryPartnerContact(orderId: string): Promise<{ phone: string }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('getDeliveryPartnerContact');
+      const result = await fn({ orderId });
+      return result.data as { phone: string };
+    }
+    const fn = httpsCallable<{ orderId: string }, { phone: string }>(
+      functions,
+      'getDeliveryPartnerContact',
+    );
+    const result = await fn({ orderId });
+    return result.data;
+  },
+
+  // PR-NEXT-PARTNER-CARD.2 — live partner ETA reveal. Polled at 30s
+  // intervals by `useLivePartnerEta` while the sheet is open; auto-
+  // pauses on dismissal (the hook's effect cleanup clears the
+  // interval). Server gate mirrors `getDeliveryPartnerContact`:
+  // caller MUST be the order's `customerUid`, order MUST have a
+  // `deliveryPersonId`, AND the relevant target leg (shop pre-pickup,
+  // drop post-pickup) MUST have a `lat/lng`.
+  //
+  // Failure modes that the client maps to "static fallback":
+  //   - `no_partner_location` (partner hasn't reported GPS yet)
+  //   - `no_target_location` (legacy pre-PR-46/49 orders)
+  // Both surface as `failed-precondition` and the hook treats them
+  // as "use order.deliveryDistanceKm / deliveryDurationMin with the
+  // ~ estimated suffix" rather than alerting the customer.
+  async getLivePartnerEta(orderId: string): Promise<{
+    distanceKm: number;
+    etaMin: number;
+    stale: boolean;
+    lastUpdatedAtMs: number;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('getLivePartnerEta');
+      const result = await fn({ orderId });
+      return result.data as {
+        distanceKm: number;
+        etaMin: number;
+        stale: boolean;
+        lastUpdatedAtMs: number;
+      };
+    }
+    const fn = httpsCallable<
+      { orderId: string },
+      { distanceKm: number; etaMin: number; stale: boolean; lastUpdatedAtMs: number }
+    >(functions, 'getLivePartnerEta');
+    const result = await fn({ orderId });
+    return result.data;
+  },
+
   async setDeliveryStatus(input: {
     status: 'online' | 'offline';
   }): Promise<void> {

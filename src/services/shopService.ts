@@ -76,11 +76,30 @@ export const shopService = {
       const ranked = shops
         .map(s => ({
           ...s,
-          distanceKm: haversineKm(userLocation, s.location),
+          // PR-NEXT-SHOP-LOCATION-REQUIRED — defensive guard. If the
+          // shop doc has no `location` (legacy / misconfigured / data
+          // edit bypass), `haversineKm` would throw on `b.lat`.
+          // Stamp `distanceKm: undefined` instead so the downstream
+          // filter takes the shop-side-gap branch (drop).
+          distanceKm:
+            s.location &&
+            typeof s.location.lat === 'number' &&
+            typeof s.location.lng === 'number'
+              ? haversineKm(userLocation, s.location)
+              : undefined,
         }))
-        .sort((a, b) => (a.distanceKm ?? 0) - (b.distanceKm ?? 0));
+        .sort((a, b) => (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity));
       const showAll = await readShowAllShopsFlagWeb();
-      return filterShopsByServiceRadius(ranked, { showAll });
+      // PR-NEXT-SHOP-LOCATION-REQUIRED — `customerHasLocation: true`
+      // because `getNearbyShops` REQUIRES a `userLocation` arg (this
+      // branch is unreachable without one). Helper now uses the flag
+      // to drop shops without `location` (haversine returns NaN →
+      // distanceKm non-finite → previously fail-OPEN, now fail-CLOSED
+      // for shop-side gaps). Mirrors server-side `listShopsPublic`.
+      return filterShopsByServiceRadius(ranked, {
+        showAll,
+        customerHasLocation: true,
+      });
     }
     // Native: trust the server. `listShopsPublic` already applied
     // `rankShopsByDistance` + `filterShopsByServiceRadius` with the

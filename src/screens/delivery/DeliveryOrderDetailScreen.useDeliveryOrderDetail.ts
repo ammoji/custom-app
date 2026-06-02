@@ -202,23 +202,52 @@ export function applyOptimisticDelivered(
   return { ...order, status: 'delivered', deliveredAt: nowMs };
 }
 
+// PR-NEXT-COD-UX (Case 8) — `confirmCodPayment` callable injected
+// the same way as the other delivery actions so unit tests can stub
+// it without hitting Firebase. Returns `alreadyPaid` so the screen
+// can surface the friendly "customer paid online" alert that the
+// dashboard already shows.
+export type ConfirmCodPaymentFn = (input: {
+  orderId: string;
+  paidMethod: 'cash' | 'online';
+}) => Promise<{ ok: true; alreadyPaid: boolean }>;
+
 export type UseDeliveryOrderDetailDeps = {
   watchOrder?: typeof orderService.watchOrder;
   claimDelivery?: ClaimDeliveryFn;
   markPickedUp?: StatusActionFn;
   markDelivered?: StatusActionFn;
+  // PR-NEXT-COD-UX — injected for the new on-detail-screen Cash/UPI
+  // pills (Case 8). Default is the production callable.
+  confirmCodPayment?: ConfirmCodPaymentFn;
   now?: () => number;
 };
 
 export type UseDeliveryOrderDetailResult = DeliveryOrderDetailState &
   DeliveryFlags & {
-    pendingAction: 'claim' | 'pickedUp' | 'delivered' | null;
+    pendingAction:
+      | 'claim'
+      | 'pickedUp'
+      | 'delivered'
+      | 'confirmCod'
+      | null;
     handleClaim: () => Promise<{ ok: true } | { ok: false; error: string }>;
     handlePickedUp: () => Promise<
       { ok: true } | { ok: false; error: string }
     >;
     handleDelivered: () => Promise<
       { ok: true } | { ok: false; error: string }
+    >;
+    // PR-NEXT-COD-UX (Case 8) — Cash/UPI pill handler. Optimistically
+    // flips the local order to `paymentStatus: 'paid' + paidMethod`
+    // so the screen falls through to the Delivered button on the
+    // next render. Returns `alreadyPaid` so the screen can fire the
+    // dashboard-equivalent friendly alert.
+    handleConfirmCodPayment: (
+      paidMethod: 'cash' | 'online',
+    ) => Promise<
+      | { ok: true; alreadyPaid: boolean }
+      | { ok: false; error: string }
     >;
     retry: () => void;
   };
@@ -233,11 +262,18 @@ export function useDeliveryOrderDetail(
   const claim = deps.claimDelivery ?? orderService.claimDelivery;
   const pickedUp = deps.markPickedUp ?? orderService.markPickedUp;
   const delivered = deps.markDelivered ?? orderService.markDelivered;
+  // PR-NEXT-COD-UX (Case 8) — defaults to the production callable so
+  // the screen can fire the COD pill without threading orchestration
+  // through props.
+  const confirmCod =
+    deps.confirmCodPayment ?? orderService.confirmCodPayment;
   const now = deps.now ?? (() => Date.now());
 
   const [state, setState] = useState<DeliveryOrderDetailState>(INITIAL_STATE);
   const [pendingAction, setPendingAction] =
-    useState<'claim' | 'pickedUp' | 'delivered' | null>(null);
+    useState<'claim' | 'pickedUp' | 'delivered' | 'confirmCod' | null>(
+      null,
+    );
   const [retryNonce, setRetryNonce] = useState(0);
 
   useEffect(() => {
@@ -323,6 +359,58 @@ export function useDeliveryOrderDetail(
     return result;
   }, [delivered, state.order, now]);
 
+  // PR-NEXT-COD-UX (Case 8) — Cash/UPI pill handler. Mirrors the
+  // dashboard's `handleConfirmCodPayment` (in
+  // `DeliveryDashboardScreen.tsx`) — same optimistic flip,
+  // `alreadyPaid` surfacing, and revert-on-failure-unless-watcher-
+  // already-paid posture. Local revert checks `paymentStatus !==
+  // 'paid'` to avoid stomping a watcher tick that confirmed the
+  // customer's parallel `payCodOrder` conversion mid-flight.
+  const handleConfirmCodPayment = useCallback(
+    async (paidMethod: 'cash' | 'online') => {
+      if (!state.order)
+        return { ok: false as const, error: 'Order not loaded' };
+      const orderId = state.order.id;
+      const previousStatus = state.order.paymentStatus;
+      const previousPaidMethod = state.order.paidMethod;
+      setPendingAction('confirmCod');
+      setState(prev => ({
+        ...prev,
+        order: prev.order
+          ? { ...prev.order, paymentStatus: 'paid', paidMethod }
+          : prev.order,
+      }));
+      try {
+        const result = await confirmCod({ orderId, paidMethod });
+        setPendingAction(null);
+        return { ok: true as const, alreadyPaid: result.alreadyPaid };
+      } catch (e: any) {
+        setState(prev => {
+          if (!prev.order) return prev;
+          if (prev.order.paymentStatus === 'paid') {
+            // Watcher tick (or another fast handler) already paid
+            // it — leave the optimistic flip in place.
+            return prev;
+          }
+          return {
+            ...prev,
+            order: {
+              ...prev.order,
+              paymentStatus: previousStatus,
+              paidMethod: previousPaidMethod,
+            },
+          };
+        });
+        setPendingAction(null);
+        return {
+          ok: false as const,
+          error: e?.message || 'Could not confirm payment. Please try again.',
+        };
+      }
+    },
+    [confirmCod, state.order],
+  );
+
   const retry = useCallback(() => {
     setRetryNonce(n => n + 1);
   }, []);
@@ -336,6 +424,7 @@ export function useDeliveryOrderDetail(
     handleClaim,
     handlePickedUp,
     handleDelivered,
+    handleConfirmCodPayment,
     retry,
   };
 }
