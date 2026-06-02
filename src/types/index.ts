@@ -114,6 +114,25 @@ export type Shop = {
   // time; `locationVerifiedBy` is the admin's `auth.uid`.
   locationVerifiedAt?: number;
   locationVerifiedBy?: string;
+  // PR-NEXT-SHOP-LOCATION-EDIT — capture source of the live pin so
+  // the admin verification surface can render "Source: device GPS"
+  // vs "Source: typed address" alongside the reverse-geocoded
+  // address. Stamped at `registerShop` time and re-stamped when
+  // `approvePendingShopLocation` promotes a pending pin to live.
+  // Optional / nullable: legacy shops predate the field and the
+  // admin UI shows "Source: unknown" in that case.
+  locationSource?: 'gps' | 'geocoded' | null;
+  // PR-NEXT-SHOP-LOCATION-EDIT — owner's proposed location change,
+  // pending admin re-approval. All four fields are written together
+  // by `submitPendingShopLocation` and cleared together by
+  // approve / reject / cancel. Customers do NOT read these — the
+  // live `location` stays authoritative until approval flips it.
+  // Schema-additive: legacy active shops have no pending change and
+  // simply lack the fields.
+  pendingLocation?: { lat: number; lng: number } | null;
+  pendingLocationSource?: 'gps' | 'geocoded' | null;
+  pendingLocationSubmittedAt?: number | null;
+  pendingLocationStatus?: 'pending' | null;
   rejectedAt?: number;
   rejectedReason?: string;
   // Phase 12a-v2-i-bis: admin can suspend an active shop. Customer

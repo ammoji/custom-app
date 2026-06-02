@@ -26,7 +26,9 @@ import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
 import type { Shop, ShopKycDocKind, UserInfo } from '../../types';
 import { formatOrderTime } from '../../utils/format';
+import { formatResolvedAddress } from '../../utils/formatResolvedAddress';
 import { openMapsForCoords } from '../../utils/openMapsForCoords';
+import { reverseGeocodeLabel } from '../../utils/reverseGeocodeLabel';
 
 // PR 31 — Same labels the registration screen uses, kept here as a
 // local copy so admin doesn't import from a screen folder. Order
@@ -89,6 +91,17 @@ export default function ShopRegistrationDetailScreen() {
   // back-nav-and-reopen doesn't carry the prior shop's check over.
   const [locationVerifiedChecked, setLocationVerifiedChecked] =
     useState(false);
+  // PR-NEXT-SHOP-LOCATION-EDIT — reverse-geocoded resolution of the
+  // shop's pin, surfaced alongside the owner-typed `shop.address`
+  // so the admin can spot a mismatch (Ballwin MO typed; pin
+  // resolves to Faridabad → almost certainly the fallback-leak
+  // bug). Local state only — Firestore stores just lat/lng.
+  // `null` = not yet attempted; '' = attempted but reverse-geocode
+  // returned nothing meaningful (pure caption "Unknown location"
+  // is shown instead via `formatResolvedAddress`).
+  const [pinResolvedAddress, setPinResolvedAddress] = useState<string | null>(
+    null,
+  );
 
   useEffect(() => {
     if (!isAdmin) {
@@ -165,6 +178,41 @@ export default function ShopRegistrationDetailScreen() {
       cancelled = true;
     };
   }, [shop, isAdmin]);
+
+  // PR-NEXT-SHOP-LOCATION-EDIT — reverse-geocode the shop's pin so
+  // the admin can compare owner-typed address (top of the location
+  // card) vs resolved address (below). The visual mismatch is the
+  // primary catch for the fallback-leak class of bug. Best-effort:
+  // a network failure or no-Play-Services device collapses to
+  // "Unknown location" via `reverseGeocodeLabel`'s EMPTY fallback.
+  useEffect(() => {
+    if (!shop || !shop.location) {
+      setPinResolvedAddress(null);
+      return;
+    }
+    const { lat, lng } = shop.location;
+    if (
+      typeof lat !== 'number' ||
+      !Number.isFinite(lat) ||
+      typeof lng !== 'number' ||
+      !Number.isFinite(lng)
+    ) {
+      setPinResolvedAddress(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await reverseGeocodeLabel({ lat, lng });
+        if (!cancelled) setPinResolvedAddress(formatResolvedAddress(r));
+      } catch {
+        if (!cancelled) setPinResolvedAddress('Unknown location');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [shop]);
 
   // PR-NEXT-SHOP-LOCATION-REQUIRED — derived flag mirroring the
   // server-side `validateShopLocationForApproval` gate. Sits above
@@ -295,32 +343,65 @@ export default function ShopRegistrationDetailScreen() {
         <View style={styles.card}>
           <Text style={styles.label}>Shop</Text>
           <Text style={styles.value}>{shop.name}</Text>
-          <Text style={styles.address}>{shop.address}</Text>
+        </View>
+
+        {/* PR-NEXT-SHOP-LOCATION-EDIT — side-by-side location
+            verification surface. Owner-typed address is the truth
+            the owner SAID; reverse-geocoded resolution is what the
+            stored pin actually points at. Visual mismatch (Ballwin
+            MO typed; pin resolves to Faridabad) catches the
+            fallback-leak class of bug at a glance. */}
+        <View style={styles.card}>
+          <Text style={styles.label}>Shop location verification</Text>
+
+          <Text style={styles.locSubLabel}>
+            Owner typed (Shop address field)
+          </Text>
+          <Text style={styles.locValue}>
+            {shop.address?.trim() || '— address not provided —'}
+          </Text>
+
+          <View style={styles.locDivider} />
+
+          <Text style={styles.locSubLabel}>
+            Pin resolves to (reverse-geocoded)
+          </Text>
           {shop.location &&
           (shop.location.lat !== 0 || shop.location.lng !== 0) ? (
-            // PR 31.1 — tappable coords. Universal Google Maps URL
-            // opens the device's preferred maps handler (Apple
-            // Maps respects the link on iOS too). See
-            // `src/utils/openMapsForCoords.ts`.
-            <Pressable
-              onPress={() =>
-                openMapsForCoords(
-                  shop.location.lat,
-                  shop.location.lng,
-                  shop.name,
-                )
-              }
-              accessibilityRole="link"
-              accessibilityLabel={`Open ${shop.name} location in maps`}
-              hitSlop={8}
-            >
-              <Text style={[styles.helper, styles.mapLink]}>
-                📍 {shop.location.lat.toFixed(4)},{' '}
-                {shop.location.lng.toFixed(4)}
-                {'  '}
-                <Text style={styles.mapLinkArrow}>↗︎</Text>
+            <>
+              <Text style={styles.locValue}>
+                {pinResolvedAddress === null
+                  ? 'Resolving…'
+                  : pinResolvedAddress || 'Unknown location'}
               </Text>
-            </Pressable>
+              <Pressable
+                onPress={() =>
+                  openMapsForCoords(
+                    shop.location.lat,
+                    shop.location.lng,
+                    shop.name,
+                  )
+                }
+                accessibilityRole="link"
+                accessibilityLabel={`Open ${shop.name} location in maps`}
+                hitSlop={8}
+              >
+                <Text style={[styles.helper, styles.mapLink]}>
+                  📍 {shop.location.lat.toFixed(4)},{' '}
+                  {shop.location.lng.toFixed(4)}
+                  {'  '}
+                  <Text style={styles.mapLinkArrow}>↗︎</Text>
+                </Text>
+              </Pressable>
+              <Text style={styles.locSourceTag}>
+                Source:{' '}
+                {shop.locationSource === 'gps'
+                  ? 'device GPS'
+                  : shop.locationSource === 'geocoded'
+                    ? 'typed address'
+                    : 'unknown (legacy registration)'}
+              </Text>
+            </>
           ) : (
             <Text style={styles.helper}>
               📍 No GPS provided at registration.
@@ -742,5 +823,34 @@ const styles = StyleSheet.create({
   mapLinkArrow: {
     color: colors.primary,
     fontWeight: '600',
+  },
+  // PR-NEXT-SHOP-LOCATION-EDIT — location verification card styles.
+  // The owner-typed-address row and the reverse-geocoded resolution
+  // row share the same sub-label idiom so the side-by-side comparison
+  // is visually obvious.
+  locSubLabel: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginTop: spacing.xs,
+    marginBottom: spacing.xs,
+  },
+  locValue: {
+    ...typography.body,
+    color: colors.textPrimary,
+    marginBottom: spacing.xs,
+  },
+  locDivider: {
+    height: 1,
+    backgroundColor: colors.border,
+    marginVertical: spacing.sm,
+  },
+  locSourceTag: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    marginTop: spacing.xs,
+    fontStyle: 'italic',
   },
 });

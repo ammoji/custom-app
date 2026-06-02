@@ -24,10 +24,18 @@ import ScreenHeader from '../../components/common/ScreenHeader';
 // Phase A2 accessibility gap re-opens.
 import VoiceInputButton from '../../components/VoiceInputButton';
 import { colors, radii, spacing, typography } from '../../constants/theme';
+// PR-NEXT-SHOP-LOCATION-EDIT — DO NOT REMOVE. Replaces the previous
+// `useLocationStore` read with a screen-scoped dual-mode capture
+// hook (GPS or typed-address geocode). The customer-side
+// `useLocationStore` is conceptually the customer's location for
+// browse/checkout; reusing it for the SHOP's pin re-introduces the
+// fallback-leak class of bug + would conflate the geocode result
+// with the customer's saved address. Single source of truth for
+// the capture flow lives in `useCaptureShopLocation`.
+import { useCaptureShopLocation } from '../../hooks/useCaptureShopLocation';
 import type { RootStackParamList } from '../../navigation/AppNavigator';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
-import { useLocationStore } from '../../store/useLocationStore';
 import type {
     ParsedShopFields,
     ShopKycDocKind,
@@ -98,7 +106,22 @@ export default function RegisterShopScreen() {
 
   const isAnonymous = useAuthStore(s => s.isAnonymous);
   const phoneFromAuth = useAuthStore(s => s.phoneNumber);
-  const location = useLocationStore(s => s.location);
+  // PR-NEXT-SHOP-LOCATION-EDIT — dual-mode shop-pin capture. The
+  // hook embeds HOTFIX-FALLBACK-LEAK's posture (refuse the silent
+  // MOCK_USER_LOCATION) AND adds the typed-address geocode fallback
+  // (lets a remote owner register a shop without being physically
+  // at it). `captured` is null until the owner taps one of the two
+  // CTAs below the address field; submit gates on `!!captured`.
+  // Sits with the other top-level hooks above the conditional
+  // `if (isAnonymous)` return per Rule 2.
+  const {
+    captured: capturedShopLocation,
+    capturing: capturingShopLocation,
+    error: captureShopError,
+    captureGps: captureShopGps,
+    captureFromAddress: captureShopFromAddress,
+    reset: resetShopCapture,
+  } = useCaptureShopLocation();
 
   const [name, setName] = useState(prefill?.name ?? '');
   const [address, setAddress] = useState(prefill?.address ?? '');
@@ -171,18 +194,20 @@ export default function RegisterShopScreen() {
     if (!hhmm.test(openTime) || !hhmm.test(closeTime)) {
       return 'Hours must be in HH:mm format (e.g. 09:00)';
     }
-    // PR-NEXT-SHOP-LOCATION-REQUIRED — defense layer 1 of 3.
-    // Without a captured GPS pin the customer-side distance filter
-    // can't measure this shop, the server's `approveShop` callable
-    // will reject (layer 2), and even if it somehow approves, the
-    // customer-side `filterShopsByServiceRadius` shop-side-gap
-    // branch hides it (layer 3). Block submit here so the owner
-    // gets a clear actionable error instead of the cascade.
-    if (!location) {
+    // PR-NEXT-SHOP-LOCATION-EDIT — dual-mode capture gate. The
+    // shared `useCaptureShopLocation` hook already refuses the
+    // silent MOCK_USER_LOCATION fallback (HOTFIX-FALLBACK-LEAK
+    // posture) AND validates the geocode result before populating
+    // `captured`, so a non-null `capturedShopLocation` is
+    // guaranteed-good. This stays as defense-in-depth on the
+    // submit path: if any future refactor decouples the hook from
+    // the validate() call site, this check still blocks the
+    // SHOP-LOCATION-REQUIRED layer-1 gate.
+    if (!capturedShopLocation) {
       return (
-        'Please capture your shop\'s GPS location before submitting. ' +
-        'Use the "📍 Use my current location" button below — customers ' +
-        'won\'t see your shop in their nearby list without it.'
+        'Please capture your shop\'s location before submitting. ' +
+        'Tap "📍 Use my GPS" if you\'re at the shop, or ' +
+        '"🔍 Find from address" to resolve the address you typed above.'
       );
     }
     return null;
@@ -203,7 +228,17 @@ export default function RegisterShopScreen() {
       const result = await orderService.registerShop({
         name: name.trim(),
         address: address.trim(),
-        location: location ?? undefined,
+        // PR-NEXT-SHOP-LOCATION-EDIT — captured pin from the dual-
+        // mode hook. `validate()` above guarantees non-null on the
+        // submit path; `?? undefined` is a TS narrowing nicety, not
+        // a real fallback.
+        location: capturedShopLocation
+          ? {
+              lat: capturedShopLocation.lat,
+              lng: capturedShopLocation.lng,
+            }
+          : undefined,
+        locationSource: capturedShopLocation?.source,
         phone: phone.trim(),
         hours: { open: openTime, close: closeTime },
         gstNumber: gstNumber.trim() || undefined,
@@ -604,11 +639,84 @@ export default function RegisterShopScreen() {
                 ),
             }}
           />
-          {location && (
-            <Text style={styles.helper}>
-              📍 GPS captured: {location.lat.toFixed(4)},{' '}
-              {location.lng.toFixed(4)}. Used for delivery distance only.
-            </Text>
+          {/* PR-NEXT-SHOP-LOCATION-EDIT — dual-mode location capture.
+              Two CTAs (GPS / typed-address geocode). Renders a
+              success card when `captured` exists; an error caption
+              when the most recent capture attempt failed; nothing
+              when the slate is clean. The hook embeds HOTFIX-
+              FALLBACK-LEAK posture (refuses silent MOCK_USER_LOCATION)
+              so the bad-state warning the hotfix surfaced is now
+              IMPOSSIBLE to reach — the hook returns an explicit
+              error string that lands in `captureShopError` instead. */}
+          <Text style={styles.captureLabel}>Shop location *</Text>
+          {!capturedShopLocation && (
+            <View style={styles.captureCtaRow}>
+              <Pressable
+                onPress={captureShopGps}
+                disabled={capturingShopLocation}
+                style={({ pressed }) => [
+                  styles.captureCta,
+                  pressed && styles.captureCtaPressed,
+                  capturingShopLocation && styles.captureCtaDisabled,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Use my GPS to capture shop location"
+              >
+                <Text style={styles.captureCtaText}>📍 Use my GPS</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => captureShopFromAddress(address)}
+                disabled={capturingShopLocation}
+                style={({ pressed }) => [
+                  styles.captureCta,
+                  pressed && styles.captureCtaPressed,
+                  capturingShopLocation && styles.captureCtaDisabled,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Find shop location from typed address"
+              >
+                <Text style={styles.captureCtaText}>🔍 Find from address</Text>
+              </Pressable>
+            </View>
+          )}
+          {capturingShopLocation && (
+            <View style={styles.capturingRow}>
+              <ActivityIndicator size="small" color={colors.primary} />
+              <Text style={styles.capturingText}>Capturing location…</Text>
+            </View>
+          )}
+          {captureShopError && (
+            <Text style={styles.captureHintError}>⚠️ {captureShopError}</Text>
+          )}
+          {capturedShopLocation && (
+            <View style={styles.captureSuccessCard}>
+              <Text style={styles.captureSuccessTitle}>
+                ✅ Pin set (
+                {capturedShopLocation.source === 'gps'
+                  ? 'device GPS'
+                  : 'typed address'}
+                )
+              </Text>
+              <Text style={styles.captureSuccessLine}>
+                Resolves to: {capturedShopLocation.resolvedAddress}
+              </Text>
+              <Text style={styles.captureSuccessLine}>
+                📍 {capturedShopLocation.lat.toFixed(4)},{' '}
+                {capturedShopLocation.lng.toFixed(4)}
+              </Text>
+              <Pressable
+                onPress={resetShopCapture}
+                style={({ pressed }) => [
+                  styles.captureRecaptureBtn,
+                  pressed && styles.captureCtaPressed,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Re-capture shop location"
+                hitSlop={6}
+              >
+                <Text style={styles.captureRecaptureText}>↻ Re-capture</Text>
+              </Pressable>
+            </View>
           )}
           <Field
             label="Phone *"
@@ -698,17 +806,16 @@ export default function RegisterShopScreen() {
             aiFilled={aiFilledFields.has('fssaiLicense')}
           />
 
-          {/* PR-NEXT-SHOP-LOCATION-REQUIRED — defense layer 1 of 3.
-              Surfaces the missing-GPS-pin precondition above the
-              Continue CTA so the owner sees WHY the button is dim
-              before they tap it. The "Use my current location"
-              affordance referenced in the copy is the existing GPS-
-              capture row rendered earlier in the form (search for
-              `📍 GPS captured` for the success-state hint). */}
-          {!location && (
+          {/* PR-NEXT-SHOP-LOCATION-EDIT — Continue CTA helper.
+              Surfaces the missing-pin precondition above the button
+              so the owner sees WHY it's dim before tapping. The
+              capture affordance referenced in the copy is the
+              dual-mode CTA row rendered earlier in the form. */}
+          {!capturedShopLocation && (
             <Text style={styles.captureHint}>
-              📍 Capture your shop’s GPS location before continuing —
-              customers won’t see your shop without it.
+              📍 Capture your shop’s location (GPS or typed address)
+              before continuing — customers won’t see your shop
+              without it.
             </Text>
           )}
           <View style={{ marginTop: spacing.lg }}>
@@ -716,11 +823,11 @@ export default function RegisterShopScreen() {
               title={submitting ? 'Saving…' : 'Continue to documents'}
               onPress={handleContinue}
               loading={submitting}
-              // PR-NEXT-SHOP-LOCATION-REQUIRED — gate the CTA on a
-              // captured GPS pin. `validate()` would also reject
-              // submit on its own (defense in depth) but disabling
-              // the button is the primary user-facing affordance.
-              disabled={submitting || !location}
+              // PR-NEXT-SHOP-LOCATION-EDIT — gate on captured pin
+              // (either GPS or geocoded). The hook guarantees a
+              // non-fallback result so the HOTFIX-FALLBACK-LEAK
+              // posture is preserved without a separate check.
+              disabled={submitting || !capturedShopLocation}
               size="lg"
             />
           </View>
@@ -987,6 +1094,97 @@ const styles = StyleSheet.create({
     color: colors.warning,
     textAlign: 'center',
     marginTop: spacing.md,
+  },
+  // 2026-06-02 HOTFIX-FALLBACK-LEAK — DO NOT REMOVE. Inline warning
+  // shown when the shared `useCaptureShopLocation` hook returns an
+  // error (e.g. locationService falls back to MOCK_USER_LOCATION on
+  // permission denied / GPS off, or geocodeAsync returns no
+  // results). danger-colored, multi-line.
+  captureHintError: {
+    ...typography.caption,
+    color: colors.danger,
+    marginBottom: spacing.md,
+    marginTop: -spacing.xs,
+  },
+  // PR-NEXT-SHOP-LOCATION-EDIT — DO NOT REMOVE. Dual-mode capture
+  // UI styles. `captureLabel` is the section header; `captureCtaRow`
+  // sits the two CTAs side-by-side; `captureSuccessCard` renders
+  // after a successful capture with the resolved address + lat/lng.
+  captureLabel: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '700',
+    marginTop: spacing.sm,
+    marginBottom: spacing.xs,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  captureCtaRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  captureCta: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    backgroundColor: colors.bg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 44,
+  },
+  captureCtaPressed: { opacity: 0.6 },
+  captureCtaDisabled: { opacity: 0.4 },
+  captureCtaText: {
+    ...typography.body,
+    color: colors.primary,
+    fontWeight: '600',
+  },
+  capturingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  capturingText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+  },
+  captureSuccessCard: {
+    backgroundColor: '#ECFDF5',
+    borderColor: colors.success,
+    borderWidth: 1,
+    borderRadius: radii.md,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  captureSuccessTitle: {
+    ...typography.bodyBold,
+    color: colors.success,
+    marginBottom: spacing.xs,
+  },
+  captureSuccessLine: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    marginTop: spacing.xs,
+  },
+  captureRecaptureBtn: {
+    marginTop: spacing.sm,
+    alignSelf: 'flex-start',
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radii.sm,
+    backgroundColor: colors.bg,
+    borderWidth: 1,
+    borderColor: colors.success,
+  },
+  captureRecaptureText: {
+    ...typography.caption,
+    color: colors.success,
+    fontWeight: '600',
   },
   helper: {
     ...typography.caption,

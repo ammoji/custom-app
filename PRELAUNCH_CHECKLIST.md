@@ -10265,3 +10265,48 @@ After OTA + force-quit + fresh sign-in, count Sentry messages:
       ```
 
 - [ ] **Out of scope (deferred, §I).** Map-based location editor in RegisterShop (drag-pin). Periodic re-verification of shop location (quarterly etc.). Custom `serviceRadiusKm` at registration time (current default-then-edit-in-ShopSettings flow is enough). Bulk-fixing existing location-less shops via code (handled operationally per §E — let them disappear post-deploy, owners re-capture via a new RegisterShop pass). `[Post-launch / Phase B]`
+
+## HOTFIX-FALLBACK-LEAK + PR-NEXT-SHOP-LOCATION-EDIT (2026-06-02)
+
+**Trigger:** Sudhir's US friend registered a shop with `16663 Chesterfield Farms Drive, Ballwin MO 63005` typed in the Shop address field — but admin saw a Faridabad pin (`28.5605, 77.2065`) when opening ShopRegistrationDetail. Friend had no path to update the pin post-rejection — `ShopSettingsScreen` had zero location-editing surface.
+
+**Root cause:** Three bugs stacked.
+
+1. **Silent fallback location** — `locationService.getCurrentLocation()` returns `MOCK_USER_LOCATION = { lat: 28.5605, lng: 77.2065 }` (Faridabad center) on permission-denied / GPS-off / exception with `source: 'fallback'`. The `source` flag was set on the result but no downstream consumer checked it. PR-NEXT-SHOP-LOCATION-REQUIRED's three layers all validated lat/lng was finite + Earth-range — Faridabad coords pass all those gates. The whole defense-in-depth strategy was moot against a valid-but-wrong fallback.
+2. **No edit path** — `ShopSettingsScreen` had no Location section.
+3. **No remote-registration path** — capture assumed owner physically at shop with GPS available.
+
+**Two-PR resolution.**
+
+- [x] **HOTFIX-FALLBACK-LEAK** — immediate stopgap, direct Claude edit (no Windsurf), ~5 min. `@c:\Users\dahiy\grocery-mvp\src\screens\roles\RegisterShopScreen.tsx:101-110,181-217,634-654,750-762,1034-1047`. RegisterShop now reads `source` from `useLocationStore`. `validate()` refuses `source !== 'gps'` with actionable error pointing at phone settings. Continue button gates on `source === 'gps'`. Pre-hotfix the silent "📍 GPS captured: 28.56, 77.20" success hint fired for fallback too (Sudhir's friend saw it and assumed real GPS). Hotfix splits the hint: green success only when `source === 'gps'`, red `captureHintError` warning when `source === 'fallback'` explicitly calling out the fallback state. Pure client OTA. Stops new bad-pin registrations from happening while SHOP-LOCATION-EDIT lands.
+
+- [x] **PR-NEXT-SHOP-LOCATION-EDIT** — structural fix on top of the hotfix. Pre-design check up-front: locked picks were (1) Address-text + `Location.geocodeAsync` (free expo-location, no API key, no recurring cost — explicitly rejected `react-native-maps` because of native rebuild + ongoing API spend), (2) Edit requires admin re-approval before going live (`pendingLocation` two-step), (3) Reverse-geocode the pin + show owner-typed address side-by-side in admin UI. Three sections:
+
+      **§A RegisterShop dual-mode capture.** Local `capturedShopLocation` state replaces the prior `useLocationStore` reuse (which conceptually cross-contaminated customer's browse-side location with shop's persisted pin, and the geocode path would have made this worse). Two CTAs side-by-side under the Shop address field: `📍 Use my GPS` (existing locationService, refuses fallback per hotfix) and `🔍 Find from address` (calls `Location.geocodeAsync(address.trim())`, free expo-location built-in). After capture: success card with the source tag (`📍 Pin set (device GPS)` or `📍 Pin set (typed address)`) + reverse-geocoded resolved address (via reuse of `reverseGeocodeLabel` from ADDRESS-UX.1) + `lat.toFixed(4), lng.toFixed(4)` + a `↻ Re-capture` button. Geocode-failure handler shows actionable error: "Address not found. Try a more specific address (include city + state/zip), or use 📍 Use my GPS if you're at the shop." New `useCaptureShopLocation()` hook shared with §B as the single source of truth for the capture UX. Submit payload extended with `locationSource: 'gps' | 'geocoded'` for the audit trail. New `formatResolvedAddress` pure helper (+5 tests).
+
+      **§B ShopSettings Location section + edit-with-re-approval.** New Location card with two states. Stable state shows current pin + reverse-geocoded resolution + "✓ Verified by admin on Jun 2 2026" (from `Shop.locationVerifiedAt`), then dual-mode capture CTAs and a "Submit for admin review" button after a fresh capture. Pending state replaces the capture UI with current-pin (live, visible to customers) + proposed-pin (with source tag + submitted-at timestamp) + a "Cancel pending change" button. New callables `submitPendingShopLocation` (+6 tests, including `identical_to_current` rejection so an accidental no-op submit returns a clean error) and `cancelPendingShopLocation` (+3 tests, owner-side withdraw clears the four pending fields). pushToAdmins fires on submit so admin sees the queue item.
+
+      **§C Admin verification surfaces — pin reverse-geocoded for mismatch catch.** `ShopRegistrationDetailScreen` reverse-geocodes `shop.location` on mount and renders owner-typed address (from `shop.address`) above + reverse-geocoded resolution + lat/lng + "Source: typed address" / "Source: device GPS" tag below, both with the existing Verify-on-map deeplink. Mismatch case ("Ballwin MO" typed + Faridabad pin resolution) becomes visually obvious — admin's eye catches it without automated comparison. `ShopDetailManagementScreen` gains a "Pending location change" card when `pendingLocationStatus === 'pending'`: current-pin vs proposed-pin, both reverse-geocoded, source tag on the proposed pin, `distanceBetweenPins(current, proposed)` ("Same location" / "423 meters" / "1.2 km") via new pure helper (+5 tests), Verify-proposed-on-map deeplink, Approve / Reject buttons. Two new callables `approvePendingShopLocation` (+5 tests, atomic swap inside a transaction: `shop.location` ← `shop.pendingLocation`, clear pending fields, re-stamp `locationVerifiedAt`/`By`) and `rejectPendingShopLocation` (+3 tests, clears pending fields with optional reason). pushToOwner fires on both with the admin's decision.
+
+      **Schema additions (additive only).** Five new optional + nullable fields on `Shop` at `@c:\Users\dahiy\grocery-mvp\src\types\index.ts`: `locationSource: 'gps' | 'geocoded' | null`, `pendingLocation: { lat, lng } | null`, `pendingLocationSource: 'gps' | 'geocoded' | null`, `pendingLocationSubmittedAt: number | null`, `pendingLocationStatus: 'pending' | null`. Legacy shops render cleanly via "Source: unknown" + no pending change. Firestore rules update at `@c:\Users\dahiy\grocery-mvp\firestore.rules:85-91` documenting the `allow write: if false` posture (callables use Admin SDK; client direct writes to `pendingLocation*` stay denied as defense-in-depth).
+
+      **Suite at 1327 / 1327** (was 1299; +28, forecast +27 minimum). `tsc --noEmit` clean for both `src/` and `functions/`. Test fixture for `submitPendingShopLocation` uses `ownerUid` per the production schema (Rule 7 — verified via audit-grep, no `customerId`-style ship-it).
+
+- [ ] **Operational deploy.** Server-first per Rule 11 — 4 NEW + 2 modified callables. IAM verify all 6 (Cloud Run `allUsers` strip is the recurring hazard hit 5× now). Firestore rules update. Client OTA bundles SHOP-LOCATION-EDIT client surfaces + HOTFIX-FALLBACK-LEAK + the QuickSwitch / HomeScreen polish from earlier this session.
+
+      ```powershell
+      cd functions; npm run build; cd ..
+      firebase deploy --only "functions:registerShop,functions:approveShop,functions:submitPendingShopLocation,functions:cancelPendingShopLocation,functions:approvePendingShopLocation,functions:rejectPendingShopLocation"
+
+      foreach ($svc in 'registershop','approveshop','submitpendingshoplocation','cancelpendingshoplocation','approvependingshoplocation','rejectpendingshoplocation') {
+        gcloud run services get-iam-policy $svc --region=asia-south1 --project=grocery-mvp-dev
+      }
+
+      firebase deploy --only firestore:rules
+
+      eas update --branch production --message "SHOP-LOCATION-EDIT + HOTFIX-FALLBACK-LEAK + QuickSwitch/HomeScreen polish"
+      ```
+
+- [ ] **Out of scope (deferred).** Interactive map / draggable pin (`react-native-maps` + Google Maps API + native rebuild + recurring spend — defer until pilot signal demands sub-10m pin precision). Automated address-mismatch detection (admin's eye + side-by-side handles pilot scale). Backfill of legacy shops' `locationSource` field (admin UI renders "Source: unknown" honestly). Email notification on pending-location submit (push is enough for pilot). Multi-pending-edit queue (one pending change per shop at a time; new submit clears prior). `[Post-launch / Phase B]`
+
+- [x] **Rule 5 extension shipped via this PR.** `.windsurf/code-discipline.md`: *the schema audit-grep must ALSO cover behavior at call sites when the field is missing / null / nonconforming*. The MOCK_USER_LOCATION leak is the worked example — `source` existed in the type but no call site read it, so PR-NEXT-SHOP-LOCATION-REQUIRED silently accepted the degraded value.

@@ -411,6 +411,13 @@ export const orderService = {
     name: string;
     address: string;
     location?: { lat: number; lng: number };
+    // PR-NEXT-SHOP-LOCATION-EDIT — capture source of the registration
+    // pin. RegisterShop's dual-mode capture (`useCaptureShopLocation`
+    // hook) returns `'gps' | 'geocoded'`; the screen passes it
+    // through here so the server can stamp it onto the pending shop
+    // doc and the admin verification surface can render it. Optional
+    // for back-compat with any caller predating the dual-mode flow.
+    locationSource?: 'gps' | 'geocoded';
     phone: string;
     hours?: { open: string; close: string };
     gstNumber?: string;
@@ -446,6 +453,69 @@ export const orderService = {
       return;
     }
     const fn = httpsCallable(functions, 'rejectShop');
+    await fn(input);
+  },
+
+  // ──────────────────────────────────────────────────────────
+  // PR-NEXT-SHOP-LOCATION-EDIT — pending-location-change flow
+  // ──────────────────────────────────────────────────────────
+  // Owner-side: submit / cancel a pending pin. Admin-side: approve
+  // / reject. Server-side helpers in
+  // `functions/src/pendingShopLocationHelpers.ts` enforce the
+  // gates; these wrappers stay thin pass-throughs.
+
+  async submitPendingShopLocation(input: {
+    shopId: string;
+    newLocation: { lat: number; lng: number };
+    newLocationSource: 'gps' | 'geocoded';
+  }): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'submitPendingShopLocation',
+      );
+      await fn(input);
+      return;
+    }
+    const fn = httpsCallable(functions, 'submitPendingShopLocation');
+    await fn(input);
+  },
+
+  async cancelPendingShopLocation(input: { shopId: string }): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'cancelPendingShopLocation',
+      );
+      await fn(input);
+      return;
+    }
+    const fn = httpsCallable(functions, 'cancelPendingShopLocation');
+    await fn(input);
+  },
+
+  async approvePendingShopLocation(input: { shopId: string }): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'approvePendingShopLocation',
+      );
+      await fn(input);
+      return;
+    }
+    const fn = httpsCallable(functions, 'approvePendingShopLocation');
+    await fn(input);
+  },
+
+  async rejectPendingShopLocation(input: {
+    shopId: string;
+    reason?: string;
+  }): Promise<void> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'rejectPendingShopLocation',
+      );
+      await fn(input);
+      return;
+    }
+    const fn = httpsCallable(functions, 'rejectPendingShopLocation');
     await fn(input);
   },
 

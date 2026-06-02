@@ -10,6 +10,10 @@ import ReorderModal from '../components/order/ReorderModal';
 import { APP_NAME } from '../constants/branding';
 import { CATEGORIES } from '../constants/categories';
 import { TEST_ACCOUNTS } from '../constants/testAccounts';
+// 2026-06-02 — DO NOT REMOVE. Used by the HomeScreen greeting to
+// surface "Hello, <name> 👋" so testers (and real users) see at a
+// glance which account is signed in. Falls back to the test-account
+// label when profile.name is unset — useful during multi-role testing.
 import { colors, radii, spacing, typography } from '../constants/theme';
 import { usePendingCounts } from '../hooks/usePendingCounts';
 import { Analytics } from '../services/analytics';
@@ -133,6 +137,30 @@ export default function HomeScreen() {
     for (const ids of Object.values(fav)) n += ids.length;
     return n;
   });
+
+  // 2026-06-02 — greeting personalization. Resolution order:
+  //   1. profile.name (real customers / shop owners who completed
+  //      profile) → first name only ("Hello, Sudhir 👋" reads cleaner
+  //      than "Hello, Sudhir Davim 👋" at h1 size).
+  //   2. Test-account label match (e.g. "Customer 1 (India)") so
+  //      multi-role testing surfaces which account is signed in
+  //      directly on Home — same disambiguation as the Quick Switch
+  //      picker, no extra tap needed.
+  //   3. Null → falls back to plain "Hello 👋" (anonymous bootstrap,
+  //      profile still loading, or signed-in user with no name set).
+  //
+  // Above the conditional return at line ~165 per Rule 2.
+  const profileName = useProfileStore(s => s.profile?.name ?? null);
+  const greetingName = (() => {
+    if (typeof profileName === 'string' && profileName.trim().length > 0) {
+      return profileName.trim().split(/\s+/)[0];
+    }
+    if (phoneNumber) {
+      const match = TEST_ACCOUNTS.find(a => a.phone === phoneNumber);
+      if (match) return match.label;
+    }
+    return null;
+  })();
 
   useEffect(() => {
     // 60s cadence — matches the granularity of the "~N min"
@@ -307,7 +335,9 @@ export default function HomeScreen() {
           { paddingBottom: 120 + insets.bottom },
         ]}
       >
-        <Text style={[styles.greeting, { paddingHorizontal: spacing.lg }]}>Hello 👋</Text>
+        <Text style={[styles.greeting, { paddingHorizontal: spacing.lg }]} numberOfLines={1}>
+          {greetingName ? `Hello, ${greetingName} 👋` : 'Hello 👋'}
+        </Text>
         <Text style={[styles.location, { paddingHorizontal: spacing.lg }]}>{locationLabel}</Text>
         {source === 'fallback' && (
           <View style={styles.fallbackBanner}>

@@ -82,6 +82,13 @@ service cloud.firestore {
       // an EditShop screen post-MVP, enable a scoped update rule
       // pinning ownerUid + status so an owner can't escalate their
       // own shop back to active.
+      //
+      // PR-NEXT-SHOP-LOCATION-EDIT — owner-side edit of `location`
+      // routes through `submitPendingShopLocation` (Admin SDK,
+      // bypasses rules). Admin approve/reject likewise. Direct
+      // client writes to `pendingLocation*` stay denied here as
+      // defense-in-depth — a misbehaving client cannot mutate the
+      // queue or skip the admin re-approval gate.
       allow write: if false;
 
       // PR 1 — security hardening: gate menu reads on parent shop

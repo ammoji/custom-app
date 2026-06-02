@@ -1,6 +1,7 @@
 import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
   Platform,
@@ -17,6 +18,13 @@ import EmptyState from '../../components/common/EmptyState';
 import Loader from '../../components/common/Loader';
 import ScreenHeader from '../../components/common/ScreenHeader';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
+// PR-NEXT-SHOP-LOCATION-EDIT — DO NOT REMOVE. Shared dual-mode
+// (GPS / typed-address geocode) capture hook used by both
+// RegisterShopScreen and the ShopSettings edit surface below. Single
+// source of truth for the fallback-leak posture (HOTFIX-FALLBACK-
+// LEAK) — refusing the silent MOCK_USER_LOCATION pin lives inside
+// the hook so neither surface can drift.
+import { useCaptureShopLocation } from '../../hooks/useCaptureShopLocation';
 import type { RootStackParamList } from '../../navigation/AppNavigator';
 import { orderService } from '../../services/orderService';
 import type { DeliveryChargeTier, Shop } from '../../types';
@@ -24,6 +32,13 @@ import {
   DEFAULT_DELIVERY_CHARGE_TIERS,
   validateDeliveryChargeTiers,
 } from '../../utils/deliveryChargeHelpers';
+// PR-NEXT-SHOP-LOCATION-EDIT — DO NOT REMOVE. Reverse-geocodes the
+// current and pending pins so the owner sees a human-readable
+// "Resolves to: …" line under each lat/lng. Mirrors the admin
+// verification surface (`ShopRegistrationDetailScreen`) so the two
+// stay in lockstep.
+import { formatResolvedAddress } from '../../utils/formatResolvedAddress';
+import { reverseGeocodeLabel } from '../../utils/reverseGeocodeLabel';
 // PR 48 — service-radius default. Pre-fills the new "Service area"
 // field for legacy shops that haven't been re-approved post-PR-48
 // (and therefore have no `serviceRadiusKm` on their doc yet).
@@ -98,6 +113,43 @@ export default function ShopSettingsScreen() {
     serviceRadiusKm?: string;
   }>({});
 
+  // PR-NEXT-SHOP-LOCATION-EDIT — DO NOT REMOVE. Owner-facing edit
+  // surface for the shop's GPS pin. Captures via the shared
+  // `useCaptureShopLocation` hook (same fallback-leak posture as
+  // RegisterShop). On Save, the new pin lands in `pendingLocation*`
+  // server-side and the live `location` stays authoritative until
+  // an admin runs `approvePendingShopLocation`. Customers keep
+  // seeing the verified pin throughout review.
+  const {
+    captured: capturedShopLocation,
+    capturing: capturingShopLocation,
+    error: captureShopError,
+    captureGps: captureShopGps,
+    captureFromAddress: captureShopFromAddress,
+    reset: resetShopCapture,
+  } = useCaptureShopLocation();
+  // Reverse-geocoded labels for the live + pending pins so the
+  // section header reads "Resolves to: …" the same way the success
+  // card reads after a fresh capture. `null` while loading; '' if
+  // the lookup fell through to the empty fallback (rare —
+  // reverseGeocodeLabel never throws).
+  const [currentResolved, setCurrentResolved] = useState<string | null>(null);
+  const [pendingResolved, setPendingResolved] = useState<string | null>(null);
+  const [submittingLocation, setSubmittingLocation] = useState(false);
+  const [cancellingLocation, setCancellingLocation] = useState(false);
+
+  // Wrapped so post-submit and post-cancel can refetch through the
+  // same code path the initial load takes. Keeps `shop` in sync with
+  // the canonical server doc (handles the pending-status flip and
+  // re-clear without a manual screen reload).
+  const refetchShop = useCallback(async (): Promise<Shop | null> => {
+    if (isAdminPath) {
+      const allShops = await orderService.listAllShops();
+      return allShops.find(s => s.id === targetShopId) ?? null;
+    }
+    return await orderService.getShopForOwner();
+  }, [isAdminPath, targetShopId]);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -109,13 +161,7 @@ export default function ShopSettingsScreen() {
         //     ShopDetailManagementScreen which also do list+find.
         //   - Shop owner path: no param → use getShopForOwner which
         //     reads the caller's claim's shopId server-side.
-        let resolved: Shop | null = null;
-        if (isAdminPath) {
-          const allShops = await orderService.listAllShops();
-          resolved = allShops.find(s => s.id === targetShopId) ?? null;
-        } else {
-          resolved = await orderService.getShopForOwner();
-        }
+        const resolved: Shop | null = await refetchShop();
         if (cancelled) return;
         setShop(resolved);
         if (resolved) {
@@ -165,7 +211,119 @@ export default function ShopSettingsScreen() {
     return () => {
       cancelled = true;
     };
-  }, [isAdminPath, targetShopId]);
+  }, [isAdminPath, targetShopId, refetchShop]);
+
+  // PR-NEXT-SHOP-LOCATION-EDIT — reverse-geocode the live and
+  // pending pins so the location card can render "Resolves to: …"
+  // alongside lat/lng. Best-effort + non-fatal: failure collapses
+  // to '' (the fallback inside `reverseGeocodeLabel`) and the
+  // line just doesn't show.
+  useEffect(() => {
+    let cancelled = false;
+    if (!shop?.location) {
+      setCurrentResolved(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    const { lat, lng } = shop.location;
+    setCurrentResolved(null);
+    reverseGeocodeLabel({ lat, lng })
+      .then(g => {
+        if (!cancelled) setCurrentResolved(formatResolvedAddress(g));
+      })
+      .catch(() => {
+        if (!cancelled) setCurrentResolved('');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [shop?.location?.lat, shop?.location?.lng]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!shop?.pendingLocation) {
+      setPendingResolved(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    const { lat, lng } = shop.pendingLocation;
+    setPendingResolved(null);
+    reverseGeocodeLabel({ lat, lng })
+      .then(g => {
+        if (!cancelled) setPendingResolved(formatResolvedAddress(g));
+      })
+      .catch(() => {
+        if (!cancelled) setPendingResolved('');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [shop?.pendingLocation?.lat, shop?.pendingLocation?.lng]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // PR-NEXT-SHOP-LOCATION-EDIT — submit the captured pin as a
+  // pending change. Server enforces ownership + coord-range +
+  // identical-pin gates (see `pendingShopLocationHelpers.ts`); the
+  // client just surfaces the helper's user-friendly error message.
+  async function handleSubmitPendingLocation() {
+    if (!shop || !capturedShopLocation) return;
+    setSubmittingLocation(true);
+    try {
+      await orderService.submitPendingShopLocation({
+        shopId: shop.id,
+        newLocation: {
+          lat: capturedShopLocation.lat,
+          lng: capturedShopLocation.lng,
+        },
+        newLocationSource: capturedShopLocation.source,
+      });
+      const fresh = await refetchShop();
+      if (fresh) setShop(fresh);
+      resetShopCapture();
+      Alert.alert(
+        'Submitted for review',
+        'An admin will review your new pin shortly. Customers keep seeing your current pin until the change is approved.',
+      );
+    } catch (e: any) {
+      Alert.alert(
+        'Could not submit',
+        e?.message ?? 'Please try again. If the problem persists, contact support.',
+      );
+    } finally {
+      setSubmittingLocation(false);
+    }
+  }
+
+  async function handleCancelPendingLocation() {
+    if (!shop) return;
+    Alert.alert(
+      'Cancel pending change?',
+      'Your current verified pin stays live. You can submit a new change any time.',
+      [
+        { text: 'Keep pending change', style: 'cancel' },
+        {
+          text: 'Cancel change',
+          style: 'destructive',
+          onPress: async () => {
+            setCancellingLocation(true);
+            try {
+              await orderService.cancelPendingShopLocation({ shopId: shop.id });
+              const fresh = await refetchShop();
+              if (fresh) setShop(fresh);
+            } catch (e: any) {
+              Alert.alert(
+                'Could not cancel',
+                e?.message ?? 'Please try again.',
+              );
+            } finally {
+              setCancellingLocation(false);
+            }
+          },
+        },
+      ],
+    );
+  }
 
   // Build the changed-fields payload. Numbers parse with Number()
   // (rejects empty strings via NaN check below). Integer-only enforced
@@ -380,13 +538,7 @@ export default function ShopSettingsScreen() {
       // Refetch to confirm the write took (and to display the
       // canonical server value if any normalization happened). Use
       // the same path as the initial load.
-      let fresh: Shop | null = null;
-      if (isAdminPath) {
-        const allShops = await orderService.listAllShops();
-        fresh = allShops.find(s => s.id === targetShopId) ?? null;
-      } else {
-        fresh = await orderService.getShopForOwner();
-      }
+      const fresh = await refetchShop();
       if (fresh) {
         setShop(fresh);
         setMinOrderStr(String(fresh.minOrder ?? 0));
@@ -457,6 +609,203 @@ export default function ShopSettingsScreen() {
           <View style={styles.card}>
             <Text style={styles.shopName}>{shop.name}</Text>
             <Text style={styles.shopMeta}>{shop.address}</Text>
+          </View>
+
+          {/* PR-NEXT-SHOP-LOCATION-EDIT — Shop location card.
+              Two states:
+                1. STABLE — no `pendingLocation`. Show current pin +
+                   resolved address + verified-on date, then the
+                   dual-mode capture CTAs. Submitting flips to (2).
+                2. PENDING — `pendingLocationStatus === 'pending'`.
+                   Show current pin (still live to customers) AND
+                   the proposed pin awaiting admin review, plus a
+                   Cancel button. Capture CTAs hidden — only one
+                   pending change at a time per the spec.
+              The dual-mode CTAs come from `useCaptureShopLocation`,
+              same hook RegisterShop uses (single source of truth
+              for fallback-leak posture). */}
+          <View style={styles.card}>
+            <Text style={styles.locationTitle}>Shop location</Text>
+
+            {shop.location ? (
+              <View style={styles.locationCurrentBlock}>
+                <Text style={styles.locationSubLabel}>
+                  {shop.pendingLocationStatus === 'pending'
+                    ? 'Current pin (visible to customers)'
+                    : 'Current pin'}
+                </Text>
+                <Text style={styles.locationPinLine}>
+                  📍 {shop.location.lat.toFixed(4)},{' '}
+                  {shop.location.lng.toFixed(4)}
+                </Text>
+                {currentResolved && currentResolved.length > 0 && (
+                  <Text style={styles.locationResolvedLine}>
+                    Resolves to: {currentResolved}
+                  </Text>
+                )}
+                {typeof shop.locationVerifiedAt === 'number' && (
+                  <Text style={styles.locationVerifiedLine}>
+                    ✓ Verified by admin on{' '}
+                    {new Date(shop.locationVerifiedAt).toLocaleDateString()}
+                  </Text>
+                )}
+              </View>
+            ) : (
+              <Text style={styles.locationEmptyLine}>
+                No GPS pin on file. Capture one below.
+              </Text>
+            )}
+
+            {shop.pendingLocationStatus === 'pending' && shop.pendingLocation ? (
+              <>
+                <View style={styles.locationDivider} />
+                <View style={styles.locationPendingBlock}>
+                  <Text style={styles.locationPendingTitle}>
+                    ⏳ Pending admin approval
+                  </Text>
+                  <Text style={styles.locationSubLabel}>Proposed pin</Text>
+                  <Text style={styles.locationPinLine}>
+                    📍 {shop.pendingLocation.lat.toFixed(4)},{' '}
+                    {shop.pendingLocation.lng.toFixed(4)}
+                  </Text>
+                  {pendingResolved && pendingResolved.length > 0 && (
+                    <Text style={styles.locationResolvedLine}>
+                      Resolves to: {pendingResolved}
+                    </Text>
+                  )}
+                  {shop.pendingLocationSource && (
+                    <Text style={styles.locationResolvedLine}>
+                      Source:{' '}
+                      {shop.pendingLocationSource === 'gps'
+                        ? 'device GPS'
+                        : 'typed address'}
+                    </Text>
+                  )}
+                  {typeof shop.pendingLocationSubmittedAt === 'number' && (
+                    <Text style={styles.locationVerifiedLine}>
+                      Submitted{' '}
+                      {new Date(
+                        shop.pendingLocationSubmittedAt,
+                      ).toLocaleString()}
+                    </Text>
+                  )}
+                  <View style={{ height: spacing.sm }} />
+                  <Button
+                    title={
+                      cancellingLocation
+                        ? 'Cancelling…'
+                        : 'Cancel pending change'
+                    }
+                    variant="ghost"
+                    onPress={handleCancelPendingLocation}
+                    loading={cancellingLocation}
+                    disabled={cancellingLocation || submittingLocation}
+                  />
+                </View>
+              </>
+            ) : (
+              <>
+                <View style={styles.locationDivider} />
+                <Text style={styles.locationSubLabel}>Update location</Text>
+                {!capturedShopLocation && (
+                  <View style={styles.captureCtaRow}>
+                    <Pressable
+                      onPress={captureShopGps}
+                      disabled={capturingShopLocation || submittingLocation}
+                      style={({ pressed }) => [
+                        styles.captureCta,
+                        pressed && styles.captureCtaPressed,
+                        (capturingShopLocation || submittingLocation) &&
+                          styles.captureCtaDisabled,
+                      ]}
+                      accessibilityRole="button"
+                      accessibilityLabel="Use my GPS to capture shop location"
+                    >
+                      <Text style={styles.captureCtaText}>📍 Use my GPS</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => captureShopFromAddress(shop.address)}
+                      disabled={capturingShopLocation || submittingLocation}
+                      style={({ pressed }) => [
+                        styles.captureCta,
+                        pressed && styles.captureCtaPressed,
+                        (capturingShopLocation || submittingLocation) &&
+                          styles.captureCtaDisabled,
+                      ]}
+                      accessibilityRole="button"
+                      accessibilityLabel="Find shop location from typed address"
+                    >
+                      <Text style={styles.captureCtaText}>
+                        🔍 Find from address
+                      </Text>
+                    </Pressable>
+                  </View>
+                )}
+                {capturingShopLocation && (
+                  <View style={styles.capturingRow}>
+                    <ActivityIndicator size="small" color={colors.primary} />
+                    <Text style={styles.capturingText}>
+                      Capturing location…
+                    </Text>
+                  </View>
+                )}
+                {captureShopError && (
+                  <Text style={styles.captureHintError}>
+                    ⚠️ {captureShopError}
+                  </Text>
+                )}
+                {capturedShopLocation && (
+                  <View style={styles.captureSuccessCard}>
+                    <Text style={styles.captureSuccessTitle}>
+                      ✅ Pin set (
+                      {capturedShopLocation.source === 'gps'
+                        ? 'device GPS'
+                        : 'typed address'}
+                      )
+                    </Text>
+                    <Text style={styles.captureSuccessLine}>
+                      Resolves to: {capturedShopLocation.resolvedAddress}
+                    </Text>
+                    <Text style={styles.captureSuccessLine}>
+                      📍 {capturedShopLocation.lat.toFixed(4)},{' '}
+                      {capturedShopLocation.lng.toFixed(4)}
+                    </Text>
+                    <View style={styles.captureSuccessActions}>
+                      <Pressable
+                        onPress={resetShopCapture}
+                        disabled={submittingLocation}
+                        style={({ pressed }) => [
+                          styles.captureRecaptureBtn,
+                          pressed && styles.captureCtaPressed,
+                        ]}
+                        accessibilityRole="button"
+                        accessibilityLabel="Re-capture shop location"
+                        hitSlop={6}
+                      >
+                        <Text style={styles.captureRecaptureText}>
+                          ↻ Re-capture
+                        </Text>
+                      </Pressable>
+                    </View>
+                    <View style={{ height: spacing.sm }} />
+                    <Button
+                      title={
+                        submittingLocation
+                          ? 'Submitting…'
+                          : 'Submit for admin review'
+                      }
+                      onPress={handleSubmitPendingLocation}
+                      loading={submittingLocation}
+                      disabled={submittingLocation}
+                    />
+                  </View>
+                )}
+                <Text style={styles.locationHelpFootnote}>
+                  ⓘ Location changes need admin approval before going live.
+                  Customers keep seeing your current pin until then.
+                </Text>
+              </>
+            )}
           </View>
 
           <View style={styles.card}>
@@ -765,5 +1114,138 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.danger,
     marginTop: spacing.sm,
+  },
+  // PR-NEXT-SHOP-LOCATION-EDIT — location card styles. Mirrors the
+  // visual idiom used by RegisterShop's capture success card so the
+  // owner sees the same affordances before AND after registration.
+  locationTitle: {
+    ...typography.h3,
+    color: colors.textPrimary,
+    marginBottom: spacing.sm,
+  },
+  locationCurrentBlock: {
+    marginBottom: spacing.xs,
+  },
+  locationPendingBlock: {
+    marginTop: spacing.xs,
+  },
+  locationPendingTitle: {
+    ...typography.bodyBold,
+    color: colors.warning,
+    marginBottom: spacing.xs,
+  },
+  locationSubLabel: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: spacing.xs,
+  },
+  locationPinLine: {
+    ...typography.body,
+    color: colors.textPrimary,
+    marginBottom: 2,
+  },
+  locationResolvedLine: {
+    ...typography.caption,
+    color: colors.textSecondary,
+  },
+  locationVerifiedLine: {
+    ...typography.caption,
+    color: colors.success,
+    marginTop: 2,
+  },
+  locationEmptyLine: {
+    ...typography.body,
+    color: colors.textSecondary,
+    marginBottom: spacing.sm,
+  },
+  locationDivider: {
+    height: 1,
+    backgroundColor: colors.border,
+    marginVertical: spacing.md,
+  },
+  locationHelpFootnote: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginTop: spacing.sm,
+  },
+  // Capture-flow styles — mirror RegisterShopScreen so the success
+  // card and CTA row look identical across the two surfaces.
+  captureCtaRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  captureCta: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  captureCtaPressed: {
+    opacity: 0.7,
+  },
+  captureCtaDisabled: {
+    opacity: 0.4,
+  },
+  captureCtaText: {
+    ...typography.bodyBold,
+    color: colors.primary,
+  },
+  capturingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  capturingText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+  },
+  captureHintError: {
+    ...typography.caption,
+    color: colors.danger,
+    marginBottom: spacing.sm,
+  },
+  captureSuccessCard: {
+    backgroundColor: '#ECFDF5',
+    borderColor: colors.success,
+    borderWidth: 1,
+    borderRadius: radii.sm,
+    padding: spacing.md,
+    marginTop: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  captureSuccessTitle: {
+    ...typography.bodyBold,
+    color: colors.success,
+    marginBottom: spacing.xs,
+  },
+  captureSuccessLine: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    marginTop: 2,
+  },
+  captureSuccessActions: {
+    marginTop: spacing.sm,
+  },
+  captureRecaptureBtn: {
+    alignSelf: 'flex-start',
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: colors.primary,
+  },
+  captureRecaptureText: {
+    ...typography.caption,
+    color: colors.primary,
+    fontWeight: '700',
   },
 });

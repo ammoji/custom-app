@@ -26,8 +26,15 @@ import { Analytics } from '../../services/analytics';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
 import type { Shop, ShopKycDocKind } from '../../types';
+// PR-NEXT-SHOP-LOCATION-EDIT — DO NOT REMOVE. Pending-location
+// approval surface uses these helpers to render the side-by-side
+// current vs proposed pin comparison + the human-readable distance
+// label.
+import { distanceBetweenPins } from '../../utils/distanceBetweenPins';
 import { formatOrderTime } from '../../utils/format';
+import { formatResolvedAddress } from '../../utils/formatResolvedAddress';
 import { openMapsForCoords } from '../../utils/openMapsForCoords';
+import { reverseGeocodeLabel } from '../../utils/reverseGeocodeLabel';
 
 // PR 31.1 — mirror of the KYC slot ordering + labels from
 // `ShopRegistrationDetailScreen`. Kept inline (instead of a shared
@@ -64,8 +71,18 @@ export default function ShopDetailManagementScreen() {
   const [shop, setShop] = useState<Shop | null>(null);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState<
-    'suspend' | 'unsuspend' | 'regenerateImage' | null
+    | 'suspend'
+    | 'unsuspend'
+    | 'regenerateImage'
+    | 'approveLocation'
+    | 'rejectLocation'
+    | null
   >(null);
+  // PR-NEXT-SHOP-LOCATION-EDIT — reverse-geocoded labels for the
+  // current + proposed pins shown in the pending-location card. Same
+  // `null=loading / ''=unresolved` convention as ShopSettings.
+  const [currentResolved, setCurrentResolved] = useState<string | null>(null);
+  const [pendingResolved, setPendingResolved] = useState<string | null>(null);
   const [showSuspendModal, setShowSuspendModal] = useState(false);
   const [reason, setReason] = useState('');
   // PR 31.1 — KYC docs viewer state. Mirrors the pattern PR 31
@@ -134,6 +151,121 @@ export default function ShopDetailManagementScreen() {
       cancelled = true;
     };
   }, [isAdmin, shopId]);
+
+  // PR-NEXT-SHOP-LOCATION-EDIT — reverse-geocode the live + proposed
+  // pins so the admin sees a human-readable label alongside lat/lng
+  // (mirrors the side-by-side display in
+  // `ShopRegistrationDetailScreen`). Best-effort + non-fatal.
+  useEffect(() => {
+    let cancelled = false;
+    if (!shop?.location) {
+      setCurrentResolved(null);
+      return;
+    }
+    const { lat, lng } = shop.location;
+    setCurrentResolved(null);
+    reverseGeocodeLabel({ lat, lng })
+      .then(g => {
+        if (!cancelled) setCurrentResolved(formatResolvedAddress(g));
+      })
+      .catch(() => {
+        if (!cancelled) setCurrentResolved('');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [shop?.location?.lat, shop?.location?.lng]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!shop?.pendingLocation) {
+      setPendingResolved(null);
+      return;
+    }
+    const { lat, lng } = shop.pendingLocation;
+    setPendingResolved(null);
+    reverseGeocodeLabel({ lat, lng })
+      .then(g => {
+        if (!cancelled) setPendingResolved(formatResolvedAddress(g));
+      })
+      .catch(() => {
+        if (!cancelled) setPendingResolved('');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [shop?.pendingLocation?.lat, shop?.pendingLocation?.lng]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // PR-NEXT-SHOP-LOCATION-EDIT — admin approve/reject of a pending
+  // pin. Server is atomic: approve promotes `pendingLocation` to
+  // `location`, clears pending fields, and re-stamps
+  // `locationVerifiedAt/By`. Reject clears pending fields with an
+  // optional reason. Owner gets a push notification either way.
+  const handleApproveLocation = async () => {
+    if (!shop) return;
+    setPending('approveLocation');
+    try {
+      await orderService.approvePendingShopLocation({ shopId: shop.id });
+      Alert.alert(
+        'Location approved',
+        `${shop.name}'s new GPS pin is now live.`,
+        [
+          {
+            text: 'OK',
+            onPress: () => {
+              setLoading(true);
+              fetchShop();
+            },
+          },
+        ],
+      );
+    } catch (e: any) {
+      Alert.alert(
+        'Could not approve',
+        e?.message ?? 'Please try again.',
+      );
+    } finally {
+      setPending(null);
+    }
+  };
+  const handleRejectLocation = async () => {
+    if (!shop) return;
+    Alert.alert(
+      'Reject location change?',
+      `${shop.name}'s pending pin will be cleared. The owner will be notified and can re-submit.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Reject change',
+          style: 'destructive',
+          onPress: async () => {
+            setPending('rejectLocation');
+            try {
+              await orderService.rejectPendingShopLocation({
+                shopId: shop.id,
+              });
+              Alert.alert('Rejected', 'The owner has been notified.', [
+                {
+                  text: 'OK',
+                  onPress: () => {
+                    setLoading(true);
+                    fetchShop();
+                  },
+                },
+              ]);
+            } catch (e: any) {
+              Alert.alert(
+                'Could not reject',
+                e?.message ?? 'Please try again.',
+              );
+            } finally {
+              setPending(null);
+            }
+          },
+        },
+      ],
+    );
+  };
 
   // PR 42 followup — recovery action for shops approved with
   // `imageUrl: ''` because approveShop's storefront signing failed
@@ -423,6 +555,128 @@ export default function ShopDetailManagementScreen() {
             </View>
           )}
         </View>
+
+        {/* PR-NEXT-SHOP-LOCATION-EDIT — pending location change.
+            Surfaces only when the owner has submitted a pending pin
+            via `submitPendingShopLocation`. Admin sees side-by-side
+            current + proposed pin, both reverse-geocoded, plus the
+            distance between them and a Verify-on-map deeplink for
+            the proposed pin. Approve is atomic on the server (live
+            location ← pendingLocation, pending fields cleared,
+            verifiedAt/By re-stamped). Reject clears pending fields
+            and notifies the owner. */}
+        {shop.pendingLocationStatus === 'pending' && shop.pendingLocation ? (
+          <View style={[styles.card, styles.pendingLocationCard]}>
+            <Text style={styles.pendingLocationTitle}>
+              ⏳ Pending location change
+            </Text>
+
+            {shop.location ? (
+              <View style={styles.pendingLocationBlock}>
+                <Text style={styles.pendingLocationSubLabel}>
+                  Current pin (live)
+                </Text>
+                <Text style={styles.pendingLocationPinLine}>
+                  📍 {shop.location.lat.toFixed(4)},{' '}
+                  {shop.location.lng.toFixed(4)}
+                </Text>
+                {currentResolved && currentResolved.length > 0 && (
+                  <Text style={styles.pendingLocationResolvedLine}>
+                    Resolves to: {currentResolved}
+                  </Text>
+                )}
+                {typeof shop.locationVerifiedAt === 'number' && (
+                  <Text style={styles.pendingLocationMetaLine}>
+                    Verified {formatOrderTime(shop.locationVerifiedAt)}
+                    {shop.locationVerifiedBy
+                      ? ` by ${shop.locationVerifiedBy.slice(0, 6)}…`
+                      : ''}
+                  </Text>
+                )}
+              </View>
+            ) : null}
+
+            <View style={styles.pendingLocationDivider} />
+
+            <View style={styles.pendingLocationBlock}>
+              <Text style={styles.pendingLocationSubLabel}>Proposed pin</Text>
+              <Text style={styles.pendingLocationPinLine}>
+                📍 {shop.pendingLocation.lat.toFixed(4)},{' '}
+                {shop.pendingLocation.lng.toFixed(4)}
+              </Text>
+              {pendingResolved && pendingResolved.length > 0 && (
+                <Text style={styles.pendingLocationResolvedLine}>
+                  Resolves to: {pendingResolved}
+                </Text>
+              )}
+              {shop.pendingLocationSource && (
+                <Text style={styles.pendingLocationResolvedLine}>
+                  Source:{' '}
+                  {shop.pendingLocationSource === 'gps'
+                    ? 'device GPS'
+                    : 'typed address'}
+                </Text>
+              )}
+              {typeof shop.pendingLocationSubmittedAt === 'number' && (
+                <Text style={styles.pendingLocationMetaLine}>
+                  Submitted{' '}
+                  {formatOrderTime(shop.pendingLocationSubmittedAt)} by owner
+                </Text>
+              )}
+              <Pressable
+                onPress={() =>
+                  shop.pendingLocation &&
+                  openMapsForCoords(
+                    shop.pendingLocation.lat,
+                    shop.pendingLocation.lng,
+                    `${shop.name} (proposed)`,
+                  )
+                }
+                accessibilityRole="link"
+                accessibilityLabel="Verify proposed pin on map"
+                hitSlop={6}
+                style={{ marginTop: spacing.xs }}
+              >
+                <Text style={[styles.helper, styles.mapLink]}>
+                  Verify proposed on map ↗︎
+                </Text>
+              </Pressable>
+            </View>
+
+            {shop.location && (
+              <Text style={styles.pendingLocationDistance}>
+                Distance between pins:{' '}
+                {distanceBetweenPins(shop.location, shop.pendingLocation).label}
+              </Text>
+            )}
+
+            <View style={{ height: spacing.md }} />
+            <Button
+              title={
+                pending === 'approveLocation'
+                  ? 'Approving…'
+                  : 'Approve change'
+              }
+              onPress={handleApproveLocation}
+              loading={pending === 'approveLocation'}
+              disabled={pending !== null}
+              size="lg"
+            />
+            <View style={{ height: spacing.sm }} />
+            <Button
+              title={
+                pending === 'rejectLocation'
+                  ? 'Rejecting…'
+                  : 'Reject change'
+              }
+              variant="secondary"
+              onPress={handleRejectLocation}
+              loading={pending === 'rejectLocation'}
+              disabled={pending !== null}
+              size="lg"
+            />
+          </View>
+        ) : null}
 
         <View style={styles.actions}>
           {/*
@@ -777,5 +1031,52 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.textSecondary,
     marginTop: spacing.xs,
+  },
+  // PR-NEXT-SHOP-LOCATION-EDIT — pending location change card.
+  // Warning-tinted left-border to distinguish from the normal cards;
+  // matches the visual cue used by `warningCard` for suspensions.
+  pendingLocationCard: {
+    borderLeftWidth: 4,
+    borderLeftColor: colors.warning,
+  },
+  pendingLocationTitle: {
+    ...typography.h3,
+    color: colors.warning,
+    marginBottom: spacing.sm,
+  },
+  pendingLocationBlock: {
+    marginVertical: spacing.xs,
+  },
+  pendingLocationSubLabel: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: spacing.xs,
+  },
+  pendingLocationPinLine: {
+    ...typography.body,
+    color: colors.textPrimary,
+    marginBottom: 2,
+  },
+  pendingLocationResolvedLine: {
+    ...typography.caption,
+    color: colors.textSecondary,
+  },
+  pendingLocationMetaLine: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  pendingLocationDivider: {
+    height: 1,
+    backgroundColor: colors.border,
+    marginVertical: spacing.sm,
+  },
+  pendingLocationDistance: {
+    ...typography.bodyBold,
+    color: colors.textPrimary,
+    marginTop: spacing.sm,
   },
 });

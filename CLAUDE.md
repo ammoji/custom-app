@@ -191,7 +191,61 @@ file (currently PR 23 is the most recent), `docs/pr-N-<slug>-windsurf-prompt.md`
 6. Ask Sudhir what he wants to work on. Don't assume — even if context
    suggests an obvious next step, confirm before doing anything destructive.
 
-## Current state — 2026-05-27 (later) — Geo system PRs 46–49 shipped (4 of 5); pausing for full re-test + Android validation
+## Current state — 2026-06-02 — Major testing-findings wave + multi-region test fleet rebuilt + SHOP-LOCATION-EDIT shipped
+
+**Where we are:** dev-side pilot-readiness is one PR-39.2 lock + one Android FCM reinstall away from complete. The June 2 testing-findings wave (10 observations from Sudhir's end-to-end retest) is fully closed via four Windsurf PRs (HOTFIX-9 / HOTFIX-10 / SHOP-LOCATION-REQUIRED / SHOP-LOCATION-EDIT) + two direct Claude edits (HOTFIX-FALLBACK-LEAK + the QuickSwitch / HomeScreen polish) + one operational flip (`appConfig/shopVisibility.showAllShops` → false; IAM verify on `listShopsPublic`). Test suite trajectory across the wave: 1241 → 1282 → 1299 → 1327 (+86). `tsc --noEmit` clean on both `src/` and `functions/` throughout.
+
+**Recent wave (chronological):**
+
+- **HOTFIX-6.1** — CartScreen Bill Details delivery fee. Cart was still showing flat `deliveryFee` even after HOTFIX-6 patched ShopCard + ShopDetail. Snapshotted `shop.location` into the cart store + switched CartScreen to `displayDeliveryCharge(snapshot, customerLocation)`. Pure client OTA. +2 tests.
+- **HOTFIX-7** — Structural fix for Android gesture-nav clipping. New reusable `BottomSheet` component in `src/components/common/BottomSheet.tsx` using `useSafeAreaInsets().bottom + spacing.lg`. Migrated `SaveCurrentLocationModal`, `PartnerDetailsSheet`, `CancelAndRefundModal`. Rule 13 added to `.windsurf/code-discipline.md` with audit-grep + exception list (4 admin screens deferred to next admin-touching PR).
+- **HOTFIX-8** — Current-location order address truth. CheckoutScreen.placeOrder now reverse-geocodes live coords + builds the `deliveryAddress` from geocoded values (with sentinels `—` / `000000` + `📍 lat,lng` line2 fallback when geocode returns nothing). Plus a shop-side GPS-pin banner with maps deeplink on `ShopOrderDetailScreen` for defense-in-depth — even legacy pre-HOTFIX-8 orders display correctly.
+- **PARTNER-CARD.2** — Live ETA + trust signals + the `customerId` → `customerUid` fix from PARTNER-CARD.1 (self-confirming test fixture trapped the bug pre-this-PR). New `getLivePartnerEta` callable (30s polling on client, auto-pauses when sheet closes), `claimDelivery` now denormalizes `deliveryPersonRating` / `deliveryPersonDeliveriesCount` / `deliveryPersonVehicleType`. New `formatLivePartnerEta` + `formatPartnerTrust` pure helpers. Redesigned PartnerDetailsSheet on BottomSheet chrome with 3-tier fallback ladder (live → static → em-dash). Server-first deploy, IAM-verified all 3 callables. +33 tests, hit forecast exactly.
+- **HOTFIX-9** — Checkout race guard. Place Order disabled when `deliveryTargetMode === 'current' && (capturingLive || !liveCoords)` with inline "📍 Capturing your location…" hint. Plus a defensive in-`placeOrder` re-check (belt + suspenders) so a future loosening can't re-expose Bug 2.
+- **HOTFIX-10** — Address dedupe. `findAddressNearby(addresses, target, thresholdM = 25)` pure helper (+8 tests). New minimal `Toast` primitive (respects `useSafeAreaInsets` per Rule 13). Modal intercept in `maybeSaveAddressAfterOrder` — on match → toast "Saved as 'Home' (already in your address book)" + skip the save modal entirely. Schema-fix note from Windsurf: they corrected my `Address[]` type to `SavedAddress[]` via audit-grep — exactly the Rule 5 catch the discipline is for.
+- **Operational radius fix** — Firebase Console flip `appConfig/shopVisibility.showAllShops: true → false`. IAM verify on `listShopsPublic` per Rule 11. Resolved observations #2/#3/#4/#7 with zero code.
+- **SHOP-LOCATION-REQUIRED** — Defense in depth, 3 layers. (1) RegisterShop submit gated on `location` present; (2) `approveShop` rejects location-less or invalid lat/lng (range check catches swapped lat/lng); (3) `filterShopsByServiceRadius` gains `customerHasLocation` opt → fail-OPEN for customer-side gap, fail-CLOSED for shop-side gap. Plus `locationVerifiedAt/By` audit-trail on Shop. New `scripts/audit-shops-without-location.ts` pre-deploy diagnostic. +17 tests (forecast +10 minimum).
+- **Multi-region test setup** — Sudhir full reset (`reset-test-data` with admin protect). Rebuilt fleet: 6 India accounts (+91 8888888881–86, 2 customers / 2 shops / 2 delivery), 3 US accounts (+1 9999999991–93, 1 each role), admin preserved. Migrated `src/constants/testAccounts.ts` from "10-digit-no-prefix + hardcoded `+91`" to full E.164 strings — `phone: '+918888888881'`. Added `formatTestAccountPhone()` for picker display. QuickSwitchModal + HomeScreen visibility gate updated to drop the `+91` hardcoding. HomeScreen greeting now reads "Hello, {name} 👋" with `profile.name` → first-name → test-account label → null fallback ladder. All direct Claude edits, no Windsurf burn.
+- **New `scripts/reset-keep-catalog.ts`** — third reset mode (keeps shops + menus + products + users; wipes orders, deliveryRequests, pendingShopRequests, aiAuditLog/aiQuotas/auditLog/featureUsageLog/razorpayWebhookEvents/refunds; clears per-user addresses/favorites/currentLocation/deliveryRating, clears per-shop ratingAvg/ratingCount). Same safety pattern as `reset-pilot-data`: project allowlist, admin UID protect, dry-run default, typed DELETE confirm, audit log at `scripts/.cleanup-logs/`.
+- **HOTFIX-FALLBACK-LEAK** (direct Claude edit, no Windsurf) — Sudhir's US friend registered a shop with Ballwin MO address but admin saw Faridabad pin. Root cause: `locationService.getCurrentLocation()` falls back to `MOCK_USER_LOCATION = { lat: 28.5605, lng: 77.2065 }` on permission-denied / GPS-off / exception with `source: 'fallback'`, but no downstream consumer checked `source`. RegisterShop's `validate()` only checked location was non-null. Hotfix: read `source` from `useLocationStore`, refuse `source !== 'gps'` with red `captureHintError` warning + Continue hard-disabled. Pure client OTA, ~5 min edit.
+- **SHOP-LOCATION-EDIT** — Structural fix on top of HOTFIX-FALLBACK-LEAK. §A RegisterShop dual capture (📍 Use my GPS or 🔍 Find from address using `Location.geocodeAsync` — free, no API key, no recurring cost). §B ShopSettings Location section + `pendingLocation` two-step approval. §C Admin sees owner-typed address vs reverse-geocoded pin resolution side-by-side. New `useCaptureShopLocation` hook, `formatResolvedAddress` + `distanceBetweenPins` pure helpers. 4 new server callables (submitPending / cancelPending / approvePending / rejectPending). Schema-additive only (5 new optional fields on Shop). +28 tests. Rule 5 extension formalized: audit-grep must cover behavior at call sites when field is missing / null / nonconforming.
+
+**Pending Sudhir deploy:**
+
+```powershell
+# Server first — 6 new + modified callables
+cd functions; npm run build; cd ..
+firebase deploy --only "functions:registerShop,functions:approveShop,functions:submitPendingShopLocation,functions:cancelPendingShopLocation,functions:approvePendingShopLocation,functions:rejectPendingShopLocation"
+
+# IAM verify all 6 (Rule 11 — recurring strip)
+foreach ($svc in 'registershop','approveshop','submitpendingshoplocation','cancelpendingshoplocation','approvependingshoplocation','rejectpendingshoplocation') {
+  gcloud run services get-iam-policy $svc --region=asia-south1 --project=grocery-mvp-dev
+}
+
+# Firestore rules update
+firebase deploy --only firestore:rules
+
+# Client OTA bundling SHOP-LOCATION-EDIT + HOTFIX-FALLBACK-LEAK + QuickSwitch/HomeScreen polish
+eas update --branch production --message "SHOP-LOCATION-EDIT + HOTFIX-FALLBACK-LEAK + QuickSwitch/HomeScreen polish"
+```
+
+**Next priorities (no Windsurf needed today, save quota):**
+
+1. Deploy the bundled OTA + run end-to-end retest (multi-region accounts now exist; test the distance system properly).
+2. **PR 39.2 live-pilot guard** — pre-pilot must-do. Becomes critical the day shop #1 takes a real money order. Drafts can wait until pilot launch is imminent.
+3. **Diag log strips** (PR 45.1 push probes + PR 48 `[getMyShop] resolved via`) — 5-min OTA, can do without Windsurf.
+4. **HOTFIX-4 Android FCM** — operational (clear data + reinstall, rebuild if needed). Not Windsurf work.
+
+**Locked-in discipline rules (`.windsurf/code-discipline.md`):**
+
+- Rule 5 (schema audit-grep + call-site behavior check) — Mock_USER_LOCATION leak is the worked example
+- Rule 11 (Cloud Run `allUsers` IAM verify after every callable deploy)
+- Rule 13 (BottomSheet for any bottom-anchored modal — fail-fast via audit-grep)
+- Rule 14 (server-side validators return discriminated-union Results, not throws)
+
+**Prior state header (preserved below as historical reference):**
+
+## Prior state — 2026-05-27 (later) — Geo system PRs 46–49 shipped (4 of 5); pausing for full re-test + Android validation
 
 **The geo/distance system is 4 of 5 PRs done** (see
 `docs/GEO_DISTANCE_SYSTEM_DESIGN.md`). All Sudhir-tested on iOS +

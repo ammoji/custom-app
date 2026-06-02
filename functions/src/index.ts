@@ -265,6 +265,17 @@ import {
   // is layer 3). Refuses to approve a shop without a finite GPS pin.
   validateShopLocationForApproval,
 } from './approveShopHelpers';
+// PR-NEXT-SHOP-LOCATION-EDIT — DO NOT REMOVE. Pure validation gates
+// for the four pending-shop-location callables (submit / cancel /
+// approve / reject). Same Validator-Result posture as
+// `validateShopLocationForApproval` so the callables stay thin.
+import {
+  validateApprovePendingShopLocation,
+  validateCancelPendingShopLocation,
+  validateRejectPendingShopLocation,
+  validateSubmitPendingShopLocation,
+  type ShopForPendingGate,
+} from './pendingShopLocationHelpers';
 // PR 45 — DO NOT REMOVE. Used by registerPushToken / unregisterPushToken
 // callables (input validation) and sendOrderStatusPush trigger
 // (message-construction state machine). Auto-formatter risk per
@@ -4702,6 +4713,15 @@ type ShopRegistrationInput = {
   name?: string;
   address?: string;
   location?: { lat: number; lng: number };
+  // PR-NEXT-SHOP-LOCATION-EDIT — capture source of the registration
+  // pin: 'gps' (device GPS) vs 'geocoded' (typed address resolved
+  // via expo-location's `geocodeAsync`). Stamped onto the pending
+  // shop doc so the admin verification surface can render
+  // "Source: device GPS" / "Source: typed address" alongside the
+  // reverse-geocoded address. Optional / back-compat: a client
+  // predating PR-NEXT-SHOP-LOCATION-EDIT omits the field; the
+  // server defaults to `'gps'` (the only path that existed pre-PR).
+  locationSource?: 'gps' | 'geocoded';
   phone?: string;
   hours?: { open: string; close: string };
   gstNumber?: string;
@@ -4828,6 +4848,7 @@ export const registerShop = onCall<ShopRegistrationInput>(
       name,
       address,
       location,
+      locationSource,
       phone,
       hours,
       gstNumber,
@@ -4851,6 +4872,14 @@ export const registerShop = onCall<ShopRegistrationInput>(
       // App passes user's GPS when available; 0,0 is the explicit
       // "unknown" sentinel until v2-iii makes location mandatory.
       location: location ?? { lat: 0, lng: 0 },
+      // PR-NEXT-SHOP-LOCATION-EDIT — stamp the capture source. A
+      // client predating this PR omits `locationSource`; default to
+      // `'gps'` since that was the only registration path before
+      // (no risk of a silent geocode mislabel for legacy clients).
+      locationSource:
+        locationSource === 'geocoded' || locationSource === 'gps'
+          ? locationSource
+          : 'gps',
       categories: [], // populated in v2-ii via menu bootstrap
       deliveryFee: 25,
       minOrder: 99,
@@ -5185,6 +5214,343 @@ export const rejectShop = onCall<{ shopId: string; reason: string }>(
       targetSummary: shop.name,
       reason,
       metadata: { ownerUid: shop.ownerUid },
+    });
+
+    return { ok: true };
+  },
+);
+
+// ────────────────────────────────────────────────────────────────────
+// PR-NEXT-SHOP-LOCATION-EDIT — pending shop-location change flow.
+//
+// Owners can update their shop's GPS pin post-approval, but the
+// change goes through admin re-approval (defense in depth: a
+// silently-mutated pin would re-introduce the fallback-leak class
+// of bug). The owner submits via `submitPendingShopLocation`,
+// which writes `pendingLocation* + pendingLocationStatus = 'pending'`
+// onto the live shop doc (customers keep seeing the verified pin
+// during review). Admin acts via `approvePendingShopLocation`
+// (atomic: live `location` ← `pendingLocation`, clear pending,
+// re-stamp `locationVerifiedAt`/`By`) or `rejectPendingShopLocation`
+// (clear pending with optional reason). Owner can also cancel
+// their own pending change before admin acts via
+// `cancelPendingShopLocation`.
+//
+// Each callable delegates the gate to the matching pure helper in
+// `pendingShopLocationHelpers.ts` (Validator-Result posture; same
+// shape as `validateShopLocationForApproval`).
+// ────────────────────────────────────────────────────────────────────
+
+export const submitPendingShopLocation = onCall<{
+  shopId: string;
+  newLocation: { lat: number; lng: number };
+  newLocationSource: 'gps' | 'geocoded';
+}>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+    if (auth.token?.shopOwner !== true) {
+      throw new HttpsError('permission-denied', 'Shop owner role required');
+    }
+    const { shopId, newLocation, newLocationSource } = request.data ?? {};
+    if (typeof shopId !== 'string' || !shopId) {
+      throw new HttpsError('invalid-argument', 'shopId required');
+    }
+    if (
+      newLocationSource !== 'gps' &&
+      newLocationSource !== 'geocoded'
+    ) {
+      throw new HttpsError(
+        'invalid-argument',
+        'newLocationSource must be "gps" or "geocoded"',
+      );
+    }
+
+    const shopRef = db.doc(`shops/${shopId}`);
+    const shopSnap = await shopRef.get();
+    const shop = shopSnap.exists
+      ? (shopSnap.data() as ShopForPendingGate & { name?: string })
+      : null;
+
+    const v = validateSubmitPendingShopLocation({
+      shop,
+      callerUid: auth.uid,
+      newLocation: {
+        lat: (newLocation as { lat: unknown })?.lat,
+        lng: (newLocation as { lng: unknown })?.lng,
+      },
+    });
+    if (!v.ok) {
+      const httpsCode =
+        v.code === 'shop_not_found'
+          ? 'not-found'
+          : v.code === 'not_owner'
+            ? 'permission-denied'
+            : v.code === 'shop_not_active'
+              ? 'failed-precondition'
+              : v.code === 'identical_to_current'
+                ? 'failed-precondition'
+                : 'invalid-argument';
+      const msg =
+        v.code === 'shop_not_found'
+          ? 'Shop not found'
+          : v.code === 'not_owner'
+            ? 'You can only edit your own shop'
+            : v.code === 'shop_not_active'
+              ? 'Shop must be active before editing its location'
+              : v.code === 'identical_to_current'
+                ? 'Proposed pin is identical to the current pin — nothing to update'
+                : `GPS coordinates invalid (${v.detail ?? 'unknown'})`;
+      throw new HttpsError(httpsCode, msg);
+    }
+
+    // Pin the new location + clear any prior reject metadata. We
+    // don't allow stacking pending changes — a fresh submit
+    // overwrites whatever was there before. (The owner UI prevents
+    // this in practice by hiding the capture CTAs while a pending
+    // change exists, but the server enforces the same invariant.)
+    await shopRef.update({
+      pendingLocation: { lat: newLocation!.lat, lng: newLocation!.lng },
+      pendingLocationSource: newLocationSource,
+      pendingLocationSubmittedAt: Date.now(),
+      pendingLocationStatus: 'pending',
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    pushToAdmins(
+      '📍 Shop location change requested',
+      `${shop?.name ?? 'A shop'} submitted a new GPS pin for review`,
+      { shopId, type: 'shop_location_pending' },
+    ).catch(e =>
+      console.warn('[submitPendingShopLocation] pushToAdmins failed:', e),
+    );
+
+    await writeAuditLog({
+      actorUid: auth.uid,
+      actorRole: 'shopOwner',
+      actionType: 'shop.location.submit_pending',
+      targetType: 'shop',
+      targetId: shopId,
+      targetSummary: shop?.name,
+      metadata: {
+        newLocation: newLocation as Record<string, unknown>,
+        newLocationSource,
+      },
+    });
+
+    return { ok: true };
+  },
+);
+
+export const cancelPendingShopLocation = onCall<{ shopId: string }>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+    if (auth.token?.shopOwner !== true) {
+      throw new HttpsError('permission-denied', 'Shop owner role required');
+    }
+    const shopId = request.data?.shopId;
+    if (typeof shopId !== 'string' || !shopId) {
+      throw new HttpsError('invalid-argument', 'shopId required');
+    }
+
+    const shopRef = db.doc(`shops/${shopId}`);
+    const shopSnap = await shopRef.get();
+    const shop = shopSnap.exists
+      ? (shopSnap.data() as ShopForPendingGate & { name?: string })
+      : null;
+
+    const v = validateCancelPendingShopLocation({ shop, callerUid: auth.uid });
+    if (!v.ok) {
+      const httpsCode =
+        v.code === 'shop_not_found'
+          ? 'not-found'
+          : v.code === 'not_owner'
+            ? 'permission-denied'
+            : 'failed-precondition';
+      const msg =
+        v.code === 'shop_not_found'
+          ? 'Shop not found'
+          : v.code === 'not_owner'
+            ? 'You can only edit your own shop'
+            : 'No pending location change to cancel';
+      throw new HttpsError(httpsCode, msg);
+    }
+
+    await shopRef.update({
+      pendingLocation: null,
+      pendingLocationSource: null,
+      pendingLocationSubmittedAt: null,
+      pendingLocationStatus: null,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    await writeAuditLog({
+      actorUid: auth.uid,
+      actorRole: 'shopOwner',
+      actionType: 'shop.location.cancel_pending',
+      targetType: 'shop',
+      targetId: shopId,
+      targetSummary: shop?.name,
+    });
+
+    return { ok: true };
+  },
+);
+
+export const approvePendingShopLocation = onCall<{ shopId: string }>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+    if (auth.token?.admin !== true) {
+      throw new HttpsError('permission-denied', 'Admin role required');
+    }
+    const shopId = request.data?.shopId;
+    if (typeof shopId !== 'string' || !shopId) {
+      throw new HttpsError('invalid-argument', 'shopId required');
+    }
+
+    const shopRef = db.doc(`shops/${shopId}`);
+    const shopSnap = await shopRef.get();
+    const shop = shopSnap.exists
+      ? (shopSnap.data() as ShopForPendingGate & {
+          name?: string;
+          ownerUid?: string;
+          pendingLocationSource?: 'gps' | 'geocoded' | null;
+        })
+      : null;
+
+    const v = validateApprovePendingShopLocation({ shop });
+    if (!v.ok) {
+      const httpsCode =
+        v.code === 'shop_not_found'
+          ? 'not-found'
+          : v.code === 'no_pending_change'
+            ? 'failed-precondition'
+            : 'failed-precondition';
+      const msg =
+        v.code === 'shop_not_found'
+          ? 'Shop not found'
+          : v.code === 'no_pending_change'
+            ? 'No pending location change to approve'
+            : `Pending pin invalid (${v.detail ?? 'unknown'})`;
+      throw new HttpsError(httpsCode, msg);
+    }
+
+    const now = Date.now();
+    // Atomic move: live `location` ← `pendingLocation`, clear all
+    // pending fields, re-stamp `locationVerifiedAt`/`By`. The pending
+    // source becomes the new live source.
+    await shopRef.update({
+      location: v.newLocation,
+      locationSource: shop?.pendingLocationSource ?? 'gps',
+      locationVerifiedAt: now,
+      locationVerifiedBy: auth.uid,
+      pendingLocation: null,
+      pendingLocationSource: null,
+      pendingLocationSubmittedAt: null,
+      pendingLocationStatus: null,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    if (shop?.ownerUid) {
+      pushToOwner(
+        shop.ownerUid,
+        '✅ Shop location updated',
+        `Your new GPS pin for ${shop.name ?? 'your shop'} is live.`,
+        { shopId, type: 'shop_location_approved' },
+      ).catch(e =>
+        console.warn('[approvePendingShopLocation] pushToOwner failed:', e),
+      );
+    }
+
+    await writeAuditLog({
+      actorUid: auth.uid,
+      actorRole: 'admin',
+      actionType: 'shop.location.approve_pending',
+      targetType: 'shop',
+      targetId: shopId,
+      targetSummary: shop?.name,
+      metadata: {
+        newLocation: v.newLocation as unknown as Record<string, unknown>,
+        ownerUid: shop?.ownerUid,
+      },
+    });
+
+    return { ok: true };
+  },
+);
+
+export const rejectPendingShopLocation = onCall<{
+  shopId: string;
+  reason?: string;
+}>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+    if (auth.token?.admin !== true) {
+      throw new HttpsError('permission-denied', 'Admin role required');
+    }
+    const shopId = request.data?.shopId;
+    const reason = request.data?.reason?.trim() || null;
+    if (typeof shopId !== 'string' || !shopId) {
+      throw new HttpsError('invalid-argument', 'shopId required');
+    }
+
+    const shopRef = db.doc(`shops/${shopId}`);
+    const shopSnap = await shopRef.get();
+    const shop = shopSnap.exists
+      ? (shopSnap.data() as ShopForPendingGate & {
+          name?: string;
+          ownerUid?: string;
+        })
+      : null;
+
+    const v = validateRejectPendingShopLocation({ shop });
+    if (!v.ok) {
+      const httpsCode =
+        v.code === 'shop_not_found' ? 'not-found' : 'failed-precondition';
+      const msg =
+        v.code === 'shop_not_found'
+          ? 'Shop not found'
+          : 'No pending location change to reject';
+      throw new HttpsError(httpsCode, msg);
+    }
+
+    await shopRef.update({
+      pendingLocation: null,
+      pendingLocationSource: null,
+      pendingLocationSubmittedAt: null,
+      pendingLocationStatus: null,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    if (shop?.ownerUid) {
+      pushToOwner(
+        shop.ownerUid,
+        '⚠️ Shop location change rejected',
+        reason
+          ? `Reason: ${reason}`
+          : 'Open ShopSettings to re-capture and resubmit.',
+        { shopId, type: 'shop_location_rejected' },
+      ).catch(e =>
+        console.warn('[rejectPendingShopLocation] pushToOwner failed:', e),
+      );
+    }
+
+    await writeAuditLog({
+      actorUid: auth.uid,
+      actorRole: 'admin',
+      actionType: 'shop.location.reject_pending',
+      targetType: 'shop',
+      targetId: shopId,
+      targetSummary: shop?.name,
+      reason: reason ?? undefined,
+      metadata: { ownerUid: shop?.ownerUid },
     });
 
     return { ok: true };
