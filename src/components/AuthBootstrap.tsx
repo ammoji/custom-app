@@ -1,6 +1,11 @@
 import * as Notifications from 'expo-notifications';
 import { useEffect } from 'react';
-import { safeNavigate } from '../navigation/navigationRef';
+// HOTFIX-5 — DO NOT REMOVE. `navigationRef` powers the cold-start
+// race-guard below (`navigationRef.isReady()`); the existing
+// `safeNavigate` would silently no-op on a same-tick dispatch
+// from `getLastNotificationResponseAsync` before the
+// NavigationContainer has mounted.
+import { navigationRef, safeNavigate } from '../navigation/navigationRef';
 import { Analytics } from '../services/analytics';
 import { authService } from '../services/authService';
 import { pushService } from '../services/pushService';
@@ -208,15 +213,29 @@ export default function AuthBootstrap() {
     // gate on `isAdmin` and render an "Admin only" empty state,
     // so the worst-case UX is a flash of that screen rather than
     // a crash.
-    const tapSub = Notifications.addNotificationResponseReceivedListener(
-      response => {
-        const data = response.notification.request.content.data as
-          | Record<string, unknown>
-          | undefined;
-        const type =
-          typeof data?.type === 'string' ? (data.type as string) : undefined;
+    // HOTFIX-5 — extracted from the inline
+    // `addNotificationResponseReceivedListener` callback so the SAME
+    // routing table can be invoked from both the listener (warm-tap
+    // path) and the cold-start dispatch below
+    // (`getLastNotificationResponseAsync`). Behavior is identical to
+    // the pre-HOTFIX inline arrow — every branch, return, and
+    // `safeNavigate` call is preserved verbatim.
+    //
+    // Stays INSIDE useEffect so it keeps lexical access to the
+    // closure (no captured state today, but if a future PR adds
+    // any, the extraction stays drop-in). Reads
+    // `useAuthStore.getState()` at call time so role precedence
+    // reflects current claims at the tap moment, not at mount.
+    const handleNotificationResponse = (
+      response: Notifications.NotificationResponse,
+    ) => {
+      const data = response.notification.request.content.data as
+        | Record<string, unknown>
+        | undefined;
+      const type =
+        typeof data?.type === 'string' ? (data.type as string) : undefined;
 
-        if (type === 'shop_pending_approval') {
+      if (type === 'shop_pending_approval') {
           const shopId =
             typeof data?.shopId === 'string'
               ? (data.shopId as string)
@@ -373,11 +392,102 @@ export default function AuthBootstrap() {
           return;
         }
         safeNavigate('OrderDetail', { orderId });
-      },
+    };
+
+    // HOTFIX-5 — warm-tap path. Same behavior as pre-HOTFIX; the
+    // listener still only fires for taps registered AFTER it
+    // attaches (i.e. taps that happen while the JS bundle is
+    // running), so cold-start taps are NOT delivered here.
+    const tapSub = Notifications.addNotificationResponseReceivedListener(
+      handleNotificationResponse,
     );
+
+    // HOTFIX-5 (Case 2 + every other cold-start deep-link)
+    // ─────────────────────────────────────────────────────
+    // `addNotificationResponseReceivedListener` only fires for taps
+    // that occur AFTER registration — cold-start taps (app fully
+    // closed when the push arrived, user taps to launch) are
+    // consumed by Expo internally before this useEffect ever runs.
+    // The launching response is available via
+    // `getLastNotificationResponseAsync()`; without this call,
+    // every cold-start tap silently lands on Home regardless of
+    // the deep-link target. Affects shopkeeper new-order, customer
+    // delivered, admin pending-approval, delivery-partner pickup —
+    // every push type the handler above routes.
+    //
+    // Returns null when the app wasn't opened via a tap (normal
+    // foreground launch / push received while running), so this is
+    // a no-op for non-tap launches. The `coldStartDispatched` flag
+    // is belt-and-braces against the rare case where Expo returns
+    // a stale-from-earlier response on a non-tap warm boot on
+    // specific Android OEMs — catches any double-dispatch path
+    // without changing happy-path semantics.
+    //
+    // Race-guard: even with the response in hand, dispatching
+    // immediately is unsafe because (1) `navigationRef.isReady()`
+    // is false until the NavigationContainer mounts a few frames
+    // later, causing `safeNavigate` to warn-and-drop, and (2)
+    // audience-mapped types (`order_status`, `order_delivered`,
+    // `order_cancelled`, `order_cod_converted`) read
+    // `useAuthStore.getState()` for role precedence, which is
+    // `ready=false` until the auth subscription fires. We poll
+    // every 100ms for both flags, with a 10s safety ceiling so a
+    // stuck launch can't leak an interval.
+    let coldStartDispatched = false;
+    let coldStartTimer: ReturnType<typeof setTimeout> | null = null;
+    Notifications.getLastNotificationResponseAsync()
+      .then(response => {
+        if (!response || coldStartDispatched) return;
+
+        const startedAt = Date.now();
+        const TIMEOUT_MS = 10_000;
+        const POLL_MS = 100;
+
+        const tryDispatch = () => {
+          if (coldStartDispatched) return;
+          const auth = useAuthStore.getState();
+          if (navigationRef.isReady() && auth.ready) {
+            coldStartDispatched = true;
+            handleNotificationResponse(response);
+            return;
+          }
+          if (Date.now() - startedAt > TIMEOUT_MS) {
+            // Safety net — don't poll forever. If we couldn't
+            // dispatch within 10s the app is in some unusual state
+            // (locked SIM, anonymous auth thrash, navigator never
+            // mounting). Log so a future Sentry hook can surface a
+            // recurring failure pattern.
+            console.warn(
+              '[AuthBootstrap] cold-start deep-link timed out waiting for nav+auth ready',
+              {
+                type:
+                  typeof response.notification.request.content.data?.type ===
+                  'string'
+                    ? (response.notification.request.content.data
+                        .type as string)
+                    : undefined,
+              },
+            );
+            return;
+          }
+          coldStartTimer = setTimeout(tryDispatch, POLL_MS);
+        };
+        tryDispatch();
+      })
+      .catch(err => {
+        // Defensive — getLastNotificationResponseAsync shouldn't
+        // throw, but if it ever does we don't want to take down the
+        // auth bootstrap.
+        console.warn('[AuthBootstrap] getLastNotificationResponseAsync failed:', err);
+      });
 
     return () => {
       clearTimeout(timer);
+      if (coldStartTimer) clearTimeout(coldStartTimer);
+      // Mark dispatched so any in-flight `tryDispatch` chain
+      // self-aborts on its next tick if the component unmounts
+      // before the navigator becomes ready.
+      coldStartDispatched = true;
       unsubscribe();
       tapSub.remove();
     };
