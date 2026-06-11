@@ -9,6 +9,7 @@
 import { describe, expect, it } from '@jest/globals';
 import {
     computeNewRollingAverage,
+    resolveCustomerName,
     validateDualRatingSubmission,
     validateRatingSubmission,
 } from '../../functions/src/ratingHelpers';
@@ -463,5 +464,30 @@ describe('validateDualRatingSubmission', () => {
     });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe('invalid-argument');
+  });
+});
+
+// PR-NEXT-5.1 §F — customerName denormalization helper.
+describe('resolveCustomerName', () => {
+  it('uses profile displayName when present', () => {
+    expect(resolveCustomerName('Priya Sharma', 'auth-token-name')).toBe(
+      'Priya Sharma',
+    );
+  });
+
+  it('falls back to auth token name when profile displayName absent', () => {
+    expect(resolveCustomerName(undefined, 'Rohan')).toBe('Rohan');
+  });
+
+  it('returns Anonymous when neither name available', () => {
+    expect(resolveCustomerName(undefined, undefined)).toBe('Anonymous');
+  });
+
+  it('treats empty/whitespace displayName as absent and falls through', () => {
+    expect(resolveCustomerName('   ', 'TokenName')).toBe('TokenName');
+  });
+
+  it('trims surrounding whitespace on the resolved name', () => {
+    expect(resolveCustomerName('  Anil  ', undefined)).toBe('Anil');
   });
 });

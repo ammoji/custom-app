@@ -33,6 +33,12 @@ import {
 import { orderService } from '../services/orderService';
 import { useCartStore } from '../store/useCartStore';
 import { useLocationStore } from '../store/useLocationStore';
+// PR-NEXT-BUNDLE-A §A (Finding #2) — DO NOT REMOVE. Canonical
+// delivery-reference resolver: default saved-address pin → live
+// GPS so ShopDetail + CartScreen + ShopCard all compute the same
+// delivery charge reference as CheckoutScreen.
+import { resolveCustomerDeliveryReference } from '../utils/resolveCustomerDeliveryReference';
+import { useProfileStore } from '../store/useProfileStore';
 import { MenuItem, Shop } from '../types';
 import { haversineKm } from '../utils/distance';
 // HOTFIX-6 (Case 1) — DO NOT REMOVE. Distance-based delivery
@@ -94,10 +100,26 @@ export default function ShopDetailScreen() {
   const decrement = useCartStore(s => s.decrement);
   const itemCount = useCartStore(s => s.itemCount());
   const subtotal = useCartStore(s => s.subtotal());
-  const location = useLocationStore(s => s.location);
+  const liveLocation = useLocationStore(s => s.location);
+  // PR-NEXT-BUNDLE-A §A — DO NOT REMOVE. Profile for the
+  // default-address pin lookup. Falls through to live GPS when
+  // profile is loading or has no default address with coords.
+  const profile = useProfileStore(s => s.profile);
+  // PR-NEXT-BUNDLE-A §A — canonical delivery reference.
+  const location = resolveCustomerDeliveryReference(profile, liveLocation);
 
   const cartHasThisShop = cartShopId === shopId;
 
+  // HOTFIX 2026-06-10 — depend on lat/lng primitives, NOT the location
+  // object reference. `useLocationStore.location` returns a new object
+  // identity whenever any consumer mutates the store (e.g. PR-1's
+  // PARTNER-HEADS-UP polling, PR-NEXT-13d's periodic GPS update). The
+  // prior `[shopId, location]` dep array refired this effect on every
+  // location mutation, even when lat/lng were unchanged, producing the
+  // listShopMenuPublic infinite loop Sudhir hit on 2026-06-10.
+  // Primitive dependencies are stable across object-identity changes.
+  const locationLat = location?.lat;
+  const locationLng = location?.lng;
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -108,9 +130,15 @@ export default function ShopDetailScreen() {
           await orderService.listShopMenuPublic(shopId);
         if (cancelled) return;
         // Compute distance client-side (the public callable doesn't
-        // know the user's location).
-        const distanceKm = location
-          ? haversineKm(location, rawShop.location)
+        // know the user's location). Read latest store value inside the
+        // effect so a mid-fetch GPS update is still respected without
+        // re-triggering the effect.
+        const liveLoc =
+          typeof locationLat === 'number' && typeof locationLng === 'number'
+            ? { lat: locationLat, lng: locationLng }
+            : null;
+        const distanceKm = liveLoc
+          ? haversineKm(liveLoc, rawShop.location)
           : rawShop.distanceKm;
         const shopWithDistance = { ...rawShop, distanceKm } as Shop;
         setShop(shopWithDistance);
@@ -136,7 +164,7 @@ export default function ShopDetailScreen() {
     return () => {
       cancelled = true;
     };
-  }, [shopId, location]);
+  }, [shopId, locationLat, locationLng]);
 
   // PR-NEXT-9 — hydrate per-(role, shopId) recent-query history
   // from AsyncStorage on mount + shopId change.
@@ -275,13 +303,29 @@ export default function ShopDetailScreen() {
                   shop's own page (size="md"). Sits above the
                   meta line so it reads as a primary trust signal
                   rather than mixed in with delivery / ETA / fee. */}
-              <View style={styles.ratingRow}>
+              {/* PR-NEXT-5.1 §E — tapping the rating badge opens ShopReviewsScreen. */}
+              <Pressable
+                onPress={() =>
+                  nav.navigate('ShopReviews', {
+                    shopId: shop.id,
+                    shopName: shop.name,
+                  })
+                }
+                accessibilityRole="button"
+                accessibilityLabel={`View reviews for ${shop.name}`}
+                style={styles.ratingRow}
+              >
                 <ShopRatingBadge
                   ratingAvg={shop.ratingAvg}
                   ratingCount={shop.ratingCount}
                   size="md"
                 />
-              </View>
+                {(shop.publicReviewCount ?? 0) > 0 && (
+                  <Text style={styles.reviewsLink}>
+                    {shop.publicReviewCount} reviews ›
+                  </Text>
+                )}
+              </Pressable>
               <Text style={styles.meta}>
                 {formatDistance(shop.distanceKm)} · {shop.etaMinutes} min ·{' '}
                 {formatRupees(displayDeliveryCharge(shop, location))} delivery · Min{' '}
@@ -574,7 +618,18 @@ const styles = StyleSheet.create({
   // PR 20 — spacer for the size="md" rating badge on the shop
   // header. flex-row so the inline badge layout doesn't get
   // stretched to row width.
-  ratingRow: { marginTop: spacing.sm, flexDirection: 'row' },
+  ratingRow: {
+    marginTop: spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  // PR-NEXT-5.1 §E — tappable reviews link beside the rating badge.
+  reviewsLink: {
+    ...typography.caption,
+    color: colors.primary,
+    fontWeight: '700',
+  },
   sectionHeader: {
     backgroundColor: colors.bg,
     paddingHorizontal: spacing.lg,

@@ -53,7 +53,11 @@ export type GetLivePartnerEtaResult =
       ok: false;
       code:
         | 'order_not_found'
-        | 'not_customer'
+        // PR-NEXT-BUNDLE-B §A (Finding #9) — DO NOT REMOVE. Renamed
+        // from 'not_customer' → 'not_authorized' to reflect that the
+        // gate now also allows shop owners of the order's shop.
+        // index.ts switch updated in the same PR.
+        | 'not_authorized'
         | 'no_partner'
         | 'no_partner_location'
         | 'no_target_location';
@@ -107,6 +111,12 @@ function isLatLng(v: unknown): v is LatLng {
 export async function getLivePartnerEtaPure(args: {
   orderId: string;
   callerUid: string;
+  // PR-NEXT-BUNDLE-B §A (Finding #9) — DO NOT REMOVE. Shop owners
+  // of the order's shop may also poll live ETA so their dashboard
+  // shows the same minute count the customer sees. Passed from the
+  // callable via `request.auth.token.shopOwner` + `shopId` claims.
+  callerShopId?: string | null;
+  isCallerShopOwner?: boolean;
   db: LiveEtaDbLike;
   // Injectable for tests so the staleness threshold can be exercised
   // deterministically without `jest.useFakeTimers`.
@@ -123,16 +133,25 @@ export async function getLivePartnerEtaPure(args: {
   }
   const order = (orderSnap.data() ?? {}) as {
     customerUid?: unknown;
+    shopId?: unknown;
     deliveryPersonId?: unknown;
     pickedUpAt?: unknown;
     shopLocation?: unknown;
     deliveryLocation?: unknown;
   };
 
+  // PR-NEXT-BUNDLE-B §A — gate: caller must be the order's customer
+  // OR the shop owner of the order's shop.
   // SCHEMA: `customerUid` (not `customerId` — see the partner-
-  // contact bug fixed in this same PR).
-  if (order.customerUid !== args.callerUid) {
-    return { ok: false, code: 'not_customer' };
+  // contact bug fixed in PARTNER-CARD.2).
+  const isCustomer = order.customerUid === args.callerUid;
+  const isShopOwner =
+    args.isCallerShopOwner === true &&
+    typeof args.callerShopId === 'string' &&
+    args.callerShopId.length > 0 &&
+    order.shopId === args.callerShopId;
+  if (!isCustomer && !isShopOwner) {
+    return { ok: false, code: 'not_authorized' };
   }
   if (
     typeof order.deliveryPersonId !== 'string' ||

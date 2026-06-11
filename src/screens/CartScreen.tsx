@@ -19,6 +19,12 @@ import { displayDeliveryCharge } from '../utils/displayDeliveryCharge';
 // the haversine inside `displayDeliveryCharge`. Same store used
 // by ShopListScreen / ShopDetailScreen for the same purpose.
 import { useLocationStore } from '../store/useLocationStore';
+// PR-NEXT-BUNDLE-A §A (Finding #2) — DO NOT REMOVE. Canonical
+// delivery-reference resolver: prefers default saved-address pin
+// so Cart + ShopDetail + ShopCard all show the same delivery
+// charge as CheckoutScreen.
+import { resolveCustomerDeliveryReference } from '../utils/resolveCustomerDeliveryReference';
+import { useProfileStore } from '../store/useProfileStore';
 
 export default function CartScreen() {
   const nav = useNavigation<any>();
@@ -32,7 +38,14 @@ export default function CartScreen() {
   // through to the flat fee in that case, same as today).
   const deliveryChargeTiers = useCartStore(s => s.deliveryChargeTiers);
   const shopLocation = useCartStore(s => s.shopLocation);
-  const customerLocation = useLocationStore(s => s.location);
+  const liveLocation = useLocationStore(s => s.location);
+  // PR-NEXT-BUNDLE-A §A — DO NOT REMOVE. Profile read for the
+  // default-address pin. Null while loading — helper falls through
+  // to live GPS in that case, matching legacy behaviour.
+  const profile = useProfileStore(s => s.profile);
+  // PR-NEXT-BUNDLE-A §A — single canonical reference for
+  // `displayDeliveryCharge`: default pin > live GPS > null.
+  const customerLocation = resolveCustomerDeliveryReference(profile, liveLocation);
   const subtotal = useCartStore(s => s.subtotal());
   const increment = useCartStore(s => s.increment);
   const decrement = useCartStore(s => s.decrement);

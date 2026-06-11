@@ -21,6 +21,7 @@ import {
 // forward.
 type OrderDoc = {
   customerUid?: string;
+  shopId?: string;
   deliveryPersonId?: string | null;
   pickedUpAt?: number | null;
 };
@@ -69,18 +70,70 @@ describe('getDeliveryPartnerContactPure', () => {
     expect(result).toEqual({ ok: false, code: 'order_not_found' });
   });
 
-  test('not_customer when caller is not the order customer', async () => {
+  test('not_authorized when caller is neither customer nor shop owner', async () => {
     const result = await getDeliveryPartnerContactPure({
       orderId: 'order_1',
       callerUid: 'someone_else',
       db: makeDbWithOrder({
         customerUid: 'customer_A',
+        shopId: 'shop_A',
         deliveryPersonId: 'partner_X',
         pickedUpAt: 1700000000000,
       }),
       auth: makeAuthWithPhone('+919876543210'),
     });
-    expect(result).toEqual({ ok: false, code: 'not_customer' });
+    expect(result).toEqual({ ok: false, code: 'not_authorized' });
+  });
+
+  // PR-NEXT-BUNDLE-E §C — shop-owner authorization branch.
+  test('shop owner of THIS shop → ok (phone revealed)', async () => {
+    const result = await getDeliveryPartnerContactPure({
+      orderId: 'order_1',
+      callerUid: 'owner_A',
+      callerShopOwner: true,
+      callerShopId: 'shop_A',
+      db: makeDbWithOrder({
+        customerUid: 'customer_A',
+        shopId: 'shop_A',
+        deliveryPersonId: 'partner_X',
+        pickedUpAt: 1700000000000,
+      }),
+      auth: makeAuthWithPhone('+919876543210'),
+    });
+    expect(result).toEqual({ ok: true, phone: '+919876543210' });
+  });
+
+  test('shop owner of a DIFFERENT shop → not_authorized', async () => {
+    const result = await getDeliveryPartnerContactPure({
+      orderId: 'order_1',
+      callerUid: 'owner_B',
+      callerShopOwner: true,
+      callerShopId: 'shop_B',
+      db: makeDbWithOrder({
+        customerUid: 'customer_A',
+        shopId: 'shop_A',
+        deliveryPersonId: 'partner_X',
+        pickedUpAt: 1700000000000,
+      }),
+      auth: makeAuthWithPhone('+919876543210'),
+    });
+    expect(result).toEqual({ ok: false, code: 'not_authorized' });
+  });
+
+  test('customer of this order still authorized (regression)', async () => {
+    const result = await getDeliveryPartnerContactPure({
+      orderId: 'order_1',
+      callerUid: 'customer_A',
+      // Even with no shop claims supplied, the customer path holds.
+      db: makeDbWithOrder({
+        customerUid: 'customer_A',
+        shopId: 'shop_A',
+        deliveryPersonId: 'partner_X',
+        pickedUpAt: 1700000000000,
+      }),
+      auth: makeAuthWithPhone('+919876543210'),
+    });
+    expect(result).toEqual({ ok: true, phone: '+919876543210' });
   });
 
   test('no_partner when deliveryPersonId is missing', async () => {

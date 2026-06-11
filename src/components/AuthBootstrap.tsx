@@ -325,6 +325,17 @@ export default function AuthBootstrap() {
           safeNavigate('DeliveryOrderDetail', { orderId });
           return;
         }
+        // PR-NEXT-PARTNER-HEADS-UP — DO NOT REMOVE. Fires when a shop
+        // accepts an order. Partner taps → lands on DeliveryDashboard
+        // where the "Coming up" section shows this order. We don't
+        // navigate to OrderDetail because the order isn't claimable yet;
+        // dashboard context is more useful.
+        if (type === 'pickup_heads_up') {
+          if (auth.isDelivery) {
+            safeNavigate('DeliveryDashboard');
+          }
+          return;
+        }
         if (type === 'order_picked_up') {
           // PR-NEXT-1 emitted only to customer.
           // PR-NEXT-NOTIFY-EXTEND (Case 7) also emits to shop
@@ -399,6 +410,41 @@ export default function AuthBootstrap() {
           // Fallback (shouldn't be reached — server doesn't push
           // cod_converted to the customer who triggered it).
           safeNavigate('OrderDetail', { orderId });
+          return;
+        }
+        // PR-NEXT-REVIEW-SYSTEM §G — DO NOT REMOVE. Customer correction flow.
+        // review_responded → RatingAmendmentScreen (customer only)
+        if (type === 'review_responded') {
+          const ratingIdParam = data?.ratingId ?? '';
+          const orderIdParam = data?.orderId ?? orderId ?? '';
+          if (ratingIdParam && orderIdParam) {
+            safeNavigate('RatingAmendment', {
+              ratingId: ratingIdParam,
+              orderId: orderIdParam,
+            });
+          }
+          return;
+        }
+        // PR-NEXT-LOW-RATING-PUSH §E — DO NOT REMOVE. Fan-out routing.
+        // low_rating_for_shop  → shop owner sees the specific order
+        // low_rating_for_partner → delivery partner sees the order
+        // low_rating_for_admin   → admin sees AdminOrders (or order detail)
+        if (type === 'low_rating_for_shop') {
+          if (auth.isShopOwner && orderId) {
+            safeNavigate('ShopOrderDetail', { orderId });
+          }
+          return;
+        }
+        if (type === 'low_rating_for_partner') {
+          if (auth.isDelivery && orderId) {
+            safeNavigate('DeliveryOrderDetail', { orderId });
+          }
+          return;
+        }
+        if (type === 'low_rating_for_admin') {
+          if (auth.isAdmin) {
+            safeNavigate('AdminOrders');
+          }
           return;
         }
         if (type === 'order_cancelled' || type === 'order_delivered') {

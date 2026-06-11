@@ -10310,3 +10310,220 @@ After OTA + force-quit + fresh sign-in, count Sentry messages:
 - [ ] **Out of scope (deferred).** Interactive map / draggable pin (`react-native-maps` + Google Maps API + native rebuild + recurring spend — defer until pilot signal demands sub-10m pin precision). Automated address-mismatch detection (admin's eye + side-by-side handles pilot scale). Backfill of legacy shops' `locationSource` field (admin UI renders "Source: unknown" honestly). Email notification on pending-location submit (push is enough for pilot). Multi-pending-edit queue (one pending change per shop at a time; new submit clears prior). `[Post-launch / Phase B]`
 
 - [x] **Rule 5 extension shipped via this PR.** `.windsurf/code-discipline.md`: *the schema audit-grep must ALSO cover behavior at call sites when the field is missing / null / nonconforming*. The MOCK_USER_LOCATION leak is the worked example — `source` existed in the type but no call site read it, so PR-NEXT-SHOP-LOCATION-REQUIRED silently accepted the degraded value.
+
+## PR 39.2 — Live-pilot guard (2026-06-09)
+
+**Trigger:** Pre-pilot must-do. Once shop #1 takes a real money order, an accidental `npm run reset:test-data -- --execute` (or any of the three reset scripts) would destroy live customer data. The existing safety guards (project allowlist, admin UID protection, dry-run default, typed DELETE confirm, audit log) were necessary but not sufficient — none noticed when the project contained real customer orders instead of test data.
+
+**Design:** Firestore flag `appConfig/pilotStatus.isLive` read by all three reset scripts at startup. When `true`, scripts refuse with a loud banner — even `--execute --yes` aborts. Override exists (`--i-know-pilot-is-live`) for legitimate disaster recovery but requires explicit acknowledgement that triggers a loud red warning AND writes to the audit log.
+
+**First Cascade-on-Sonnet test** per the executor split commitment in `docs/PROMPT_AUTHORING_NOTES.md`. Validated: +15 tests exactly per forecast (1327 → 1342), discriminated-union Result per Rule 14, fail-CLOSED on read errors, deliberate-break demo confirmed tests pin the bug. Quota usage ~1% of weekly cycle — 30-40% less than equivalent Opus work. Confirms Sonnet-as-executor is the right default for well-specified prompts.
+
+- [x] **Shipped.**
+  - **Pure helpers** at `@c:\Users\dahiy\grocery-mvp\scripts\livePilotGuardHelpers.ts` — `parsePilotStatusFlag` (strict `=== true` parser, falsy on missing/string/numeric), `evaluateLivePilotGuard` (discriminated-union verdict: `pilot_not_live` / `override_acknowledged` / `pilot_is_live_no_override`), `buildLivePilotRefuseBanner` (testable string formatter). Zero firebase-admin imports — unit-testable without booting the SDK.
+  - **11 helper tests** at `@c:\Users\dahiy\grocery-mvp\tests\scripts\livePilotGuardHelpers.test.ts` (7 parse cases + 4 evaluate cases).
+  - **All three reset scripts integrated** — `reset-pilot-data.ts`, `reset-test-data.ts`, `reset-keep-catalog.ts` each gain `--i-know-pilot-is-live` flag in their parseFlags + a `readPilotStatusIsLive` with fail-CLOSED posture + a guard block early in `main()` + extended audit log JSON with the `livePilotGuard` block (isLive, overrideAcknowledged, verdict).
+  - **4 parseFlags tests** added (2 each in `reset-pilot-data.test.ts` + `reset-test-data.test.ts`). `reset-keep-catalog.ts` deliberately gets no test addition per scope (one-shot script; helpers split would be scope creep).
+  - **Suite at 1342 / 1342** (was 1327; +15 exact). `tsc --noEmit` clean for both `src/` and `functions/`.
+  - **No deploy required** — TS-only. Commit + push.
+
+- [ ] **ACTIVATION STEP (Sudhir manual, on the day pilot launches):** Firebase Console → Firestore → create document `appConfig/pilotStatus` with field `isLive: true` (boolean, not string). Before this flip the guard reads the missing doc as safe and all three scripts continue working normally; after the flip they all refuse. **Do not flip this until the moment pilot is actually live with real customers.**
+
+- [ ] **Operational playbook for disaster recovery (post-pilot-launch only).** Coordinate with at least one other human before invoking. Run `--i-know-pilot-is-live` alongside `--execute --yes`. Each invocation writes to `scripts/.cleanup-logs/{timestamp}-*.json` with `verdict: 'override_acknowledged'` so a future audit can review.
+
+- [x] **First Cascade-on-Sonnet executor test validated.** Test count delta exact, deliberate-break verification, ~1% quota usage. Sonnet-as-default for well-specified prompts is now the locked-in posture (see `docs/PROMPT_AUTHORING_NOTES.md` Rule W).
+
+## PR-NEXT-BUNDLE-A — Pilot regression fixes (2026-06-09)
+
+**Trigger:** Four regressions surfaced during pre-pilot family testing. Bundled as a single OTA because all four are pure client-side fixes with no schema/callable changes.
+
+- [x] **§A — Delivery-charge reference consistency (Finding #2).** New pure helper `resolveCustomerDeliveryReference` at `@c:\Users\dahiy\grocery-mvp\src\utils\resolveCustomerDeliveryReference.ts`. Priority order: (1) default saved-address pin (`profile.addresses.find(a => a.id === profile.defaultAddressId)?.lat/lng`) — same coords CheckoutScreen uses, so browse + cart + checkout numbers agree; (2) live GPS from `useLocationStore`; (3) `null` → `displayDeliveryCharge` falls through to `distanceKm` then flat `deliveryFee`. `CartScreen` and `ShopDetailScreen` both updated to derive `customerLocation` via this resolver (pulling in `useProfileStore` alongside the existing `useLocationStore`). **6 unit tests** at `@c:\Users\dahiy\grocery-mvp\tests\utils\resolveCustomerDeliveryReference.test.ts`: default pin wins over GPS, default address no-pin fallback, no default address, no GPS either, null profile, NaN pin.
+  - [ ] **Follow-up: ShopListScreen call site.** `ShopListScreen` passes `customerLocation={location}` from raw `useLocationStore` to `ShopCard`. Should also call `resolveCustomerDeliveryReference` for full parity. Explicitly deferred as a separate PR per scope-boundary in the prompt. `[Phase NEXT-BUNDLE-B]`
+
+- [x] **§B — Status message confusion (Finding #6).** `OrderDetailScreen` at `@c:\Users\dahiy\grocery-mvp\src\screens\OrderDetailScreen.tsx` now double-gates the `readyByEstimate` pickup row: `etaDisplay.kind === 'ready_by' && (order.status === 'accepted' || order.status === 'preparing')`. Finding #17 already suppressed the countdown via `orderEtaDisplay` returning `hidden` for `ready_for_pickup`; this explicit JSX-level gate also suppresses the sub-message text ("by HH:MM · delivery partner brings it to you") for belt-and-suspenders — the block can't appear even if the state machine were to regress.
+
+- [x] **§C — Polling stop on delivered/cancelled (Finding #12a).** Three parts:
+  - `useLivePartnerEta` at `@c:\Users\dahiy\grocery-mvp\src\hooks\useLivePartnerEta.ts` gained a third optional arg `orderStatus?: string | null`. `FINALIZED_STATUSES = new Set(['delivered', 'cancelled'])`. When finalized, the `useEffect` resets state to null and exits without starting the 30s interval. Exported pure helper `shouldPoll({orderId, enabled, orderStatus})` mirrors the gate for unit-testing without RNTL.
+  - `PartnerDetailsSheet` at `@c:\Users\dahiy\grocery-mvp\src\components\order\PartnerDetailsSheet.tsx` gained `orderStatus?: string | null` prop. When `isDelivered` or `isCancelled`, replaces the live ETA rows with a static `Status` row ("✅ Delivered" / "❌ Order cancelled") so the sheet can't show stale "Arriving now" after delivery.
+  - `OrderDetailScreen` passes `order?.status` as the third arg to `useLivePartnerEta` and `orderStatus={order.status}` to `PartnerDetailsSheet`.
+  - **3 `shouldPoll` unit tests** at `@c:\Users\dahiy\grocery-mvp\tests\hooks\useLivePartnerEta.test.ts`: `ready_for_pickup` → polls, `delivered` → no-poll, `cancelled` → no-poll. Deliberate-break confirmed (2 fail as expected).
+
+- [x] **§D — Keyboard covers feedback text field (Finding #14).** `RateOrderCard` at `@c:\Users\dahiy\grocery-mvp\src\components\order\RateOrderCard.tsx` now wraps its full render output in `<KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={Platform.OS === 'ios' ? 88 : 0}>`. iOS: `padding` mode adds inset equal to keyboard height. Android: `height` mode + the surrounding `ScrollView` in `OrderDetailScreen` scrolls the focused `TextInput` into view. `KeyboardAvoidingView` and `Platform` added to the React Native imports.
+  - [ ] **Follow-up: keyboardVerticalOffset tuning.** 88 pt is a heuristic for header (56) + safe-area (32). If the rating screen gains a taller header or different insets, this value should be updated. Monitor during pilot. `[Phase NEXT-BUNDLE-B]`
+
+- [x] **Tests and verification.**
+  - **+9 new tests** (6 resolveCustomerDeliveryReference + 3 shouldPoll).
+  - **Suite: 1351 / 1351** (was 1342; +9 exact). `npm test` exit 0.
+  - **`tsc --noEmit` clean** (exit 0).
+  - **Deliberate-break demo:** reverted `shouldPoll` finalized-status gate → 2 tests failed (`delivered` + `cancelled` cases), 1 passed (`ready_for_pickup`). Restored.
+  - **No deploy required.** Pure client OTA; no schema/callable changes.
+
+- [ ] **Deploy.** `eas update --branch production --message "PR-NEXT-BUNDLE-A pilot regressions: delivery charge ref, status gate, polling stop, keyboard avoiding"`.
+
+- [ ] **Smoke acceptance (all four fixes).**
+  - **§A:** Browse a shop with a saved home address set as default that has a pin; delivery fee on the card and in cart should match what CheckoutScreen shows when the home address is selected. Without a pin (pre-PR-46 address), it should fall back to GPS fee.
+  - **§B:** Tap through an accepted order (readyByEstimate set), then have shop mark ready-for-pickup → pickup-row disappears; then partner picks up → pickup-row stays gone.
+  - **§C:** Open PartnerDetailsSheet during delivery; partner picks up order and delivers → sheet shows "✅ Delivered" row, no stale ETA; close and reopen the sheet → still shows static copy (polling stopped).
+  - **§D:** On a delivered order, tap "Rate this order", tap the shop comment field → keyboard slides up, field stays visible above keyboard on both iOS and Android.
+
+- [ ] **Out of scope (deferred per prompt §I).**
+  - ShopListScreen delivery-charge reference fix (separate PR, same `resolveCustomerDeliveryReference` helper, touches ShopListScreen which was explicitly out of scope). `[Phase NEXT-BUNDLE-B]`
+  - `keyboardVerticalOffset` measured from actual screen hierarchy rather than hardcoded 88. `[Phase NEXT-BUNDLE-B]`
+
+## PR-NEXT-BUNDLE-B — Mid-flow UX fixes (2026-06-09)
+
+**Trigger:** Three mid-flow UX gaps found during pre-pilot review. Bundled as a server-first deploy (functions first, then OTA) because §A and §C both touch server callables.
+
+- [x] **§A — ETA consistency: shop owner sees live partner ETA (Finding #9).** Extended the `getLivePartnerEta` callable and its backing pure helper `getLivePartnerEtaPure` (at `functions/src/livePartnerEtaHelpers.ts`) to accept shop-owner callers alongside customers. Authorization gate changed from single `order.customerUid === callerUid` to: caller must be the customer **or** a shop owner (`isCallerShopOwner === true && callerShopId === order.shopId`). Error code renamed `not_customer` → `not_authorized` (callable switch updated in `functions/src/index.ts`). The `getLivePartnerEta` callable now extracts `request.auth.token.shopOwner` + `request.auth.token.shopId` claims and passes them through. Client side: `ShopOrderDetailScreen` at `src/screens/shop/ShopOrderDetailScreen.tsx` now imports `useLivePartnerEta` and polls with `enabled = order.status === 'ready_for_pickup'`; the `ETA ~X min` display shows the live value when available, falls back to `estimatedDeliveryAt` static otherwise. `ShopOwnerDashboardScreen` has no per-card ETA display so no client change was needed there. **+6 tests** in `tests/functions/getLivePartnerEtaHelpers.test.ts` (1 existing `not_customer` case updated; 5 new shop-owner cases covering: shop owner of matching shop → ok, shop owner of different shop → not_authorized, customer regression, shopOwner flag false → not_authorized, empty callerShopId → not_authorized).
+  - [ ] **Follow-up: ShopOwnerDashboard card-level ETA chip.** If pilot shop owners request a live ETA per-card on the dashboard list view, add a `liveEtaMin` column to the watched orders query + a small chip on each card. Out of scope for this PR (no per-card polling loop yet). `[Phase NEXT-BUNDLE-C]`
+
+- [x] **§B — One-tap call: collapse Show phone → reveal → Call into single CTA (Finding #10).** `PartnerDetailsSheet` at `src/components/order/PartnerDetailsSheet.tsx` previously had a three-branch phone section: pre-pickup muted copy / post-pickup call link (if phone cached) / post-pickup "Show phone" reveal button. Collapsed to two branches: pre-pickup muted copy (unchanged) / post-pickup single "📞 Call [firstName]" button that fires the new `onCallPartner` prop. New `onCallPartner` prop added to `Props`; `onRevealPhone` kept in Props for back-compat but no longer destructured or read in the sheet. `OrderDetailScreen` at `src/screens/OrderDetailScreen.tsx`: `onRevealPartnerPhone` callback replaced with `onCallPartner` — if `partnerPhone` is already cached, dials immediately via `Linking.openURL`; otherwise fetches via `getDeliveryPartnerContact`, caches, then dials in the same tap. `partnerPhone` prop no longer passed to `PartnerDetailsSheet` (phone is only used to dial in the parent). No new tests (pure UX collapse; logic path is same `getDeliveryPartnerContact` call as before).
+  - [ ] **Follow-up: Haptic on successful dial.** A light haptic (`Haptics.impactAsync(ImpactFeedbackStyle.Light)`) on the `Linking.openURL` call would match the pattern established for `handleAddDeliveryProof`. Low priority. `[Phase NEXT-BUNDLE-C]`
+
+- [x] **§C — Mandatory delivery proof gate (Finding #13).** Three-layer implementation:
+  - **New server helper** `functions/src/markDeliveredHelpers.ts` — exports `validateMarkDeliveredProofGate(order: ProofOrderLike)` returning a discriminated-union `ProofGateResult`. Checks `order.deliveryProofStoragePath` (the field stamped by `recordDeliveryProofUpload`; `proofPhotoUrl` was a red-herring name — the actual Firestore field is `deliveryProofStoragePath`). Rejects with `code: 'no_proof'` if the field is absent, null, empty, or whitespace-only.
+  - **`markDelivered` callable** in `functions/src/index.ts` imports and calls `validateMarkDeliveredProofGate` immediately after the COD gate (after `validateMarkDeliveredCodGate` so "confirm payment" surfaces before "upload proof" — the correct priority). Throws `failed-precondition` on gate failure.
+  - **Client: `DeliveryDashboardScreen`** at `src/screens/delivery/DeliveryDashboardScreen.tsx` — `ActiveDeliveryCard`'s Delivered button now uses `disabled={pending || !hasProof}` (the `hasProof` prop already existed, computed from `!!o.deliveryProofStoragePath || !!o.proofPhotoUrl`). Inline hint "📷 Upload delivery proof first" renders above the button when `!hasProof`. New `proofHint` style added to the StyleSheet (`colors.warning`, caption size, centered).
+  - **Client: `DeliveryOrderDetailScreen`** at `src/screens/delivery/DeliveryOrderDetailScreen.tsx` — inside the `canShowDeliveredButton(order)` branch, Delivered button now uses `disabled={pendingAction !== null || !order.deliveryProofStoragePath}`. Matching hint shown when `!order.deliveryProofStoragePath`. New `proofHint` style added.
+  - **+6 tests** in `tests/functions/markDeliveredHelpers.test.ts`: valid path → ok, empty string → no_proof, undefined → no_proof, null → no_proof, whitespace-only → no_proof, legacy order (`{}`) → no_proof (graceful).
+  - [ ] **Follow-up: Remove the "OPTIONAL" language from PR-NEXT-6 comments.** Several comments across `src/types/index.ts` and `DeliveryDashboardScreen.tsx` still say "photo is OPTIONAL". These are now stale. Update them in the next cleanup pass. `[Phase NEXT-BUNDLE-C]`
+  - [ ] **Follow-up: Late-upload window for already-delivered orders.** `DeliveryHistoryCard` currently still shows the "Add proof" CTA for delivered orders (added by PR-NEXT-13d). If the server gate now blocks `markDelivered` without proof, a partner who hit Delivered without uploading (pre-PR-NEXT-BUNDLE-B) would have no recovery path except the history card. Clarify if the server validator permits post-delivery uploads (currently it only checks `pickedUpAt` + assignee, no `deliveredAt` gate). `[Phase NEXT-BUNDLE-C]`
+
+- [x] **Tests and verification.**
+  - **+11 new tests** (+5 getLivePartnerEta shop-owner gate + 1 updated not_authorized + 6 markDeliveredHelpers proofGate).
+  - **Suite: 1362 / 1362** (was 1351; +11 exact). `npm test` exit 0.
+  - **`tsc --noEmit` clean** (exit 0, both root and `functions/`).
+  - **Deliberate-break demo:** changed `not_authorized` → `not_customer` in the test assertion → 1 fail (`Expected: "not_customer", Received: "not_authorized"`). Restored.
+  - **Deploy class: server-first.** Deploy `functions` first (getLivePartnerEta + markDelivered changes), then OTA for client changes.
+
+- [ ] **Deploy — server functions (run in PowerShell).**
+  ```
+  firebase deploy --only functions:getLivePartnerEta
+  firebase deploy --only functions:markDelivered
+  ```
+
+- [ ] **Deploy — client OTA (run in PowerShell after functions verified).**
+  ```
+  eas update --branch production --message "PR-NEXT-BUNDLE-B mid-flow UX: shop ETA, one-tap call, proof gate"
+  ```
+
+- [ ] **Smoke acceptance (all three fixes).**
+  - **§A:** With an order in `ready_for_pickup` status, open `ShopOrderDetailScreen` → ETA chip should update live every 30s (same minute count the customer sees). In `accepted`/`preparing` status, chip shows static `estimatedDeliveryAt` fallback.
+  - **§B:** On an active delivery (post-pickup), open `PartnerDetailsSheet` → single "📞 Call [name]" button visible (no "Show phone" step). Tap → dialer opens immediately (or after a brief "Connecting…" spinner on first tap).
+  - **§C:** Partner picks up order but has not uploaded proof → "Delivered" button is greyed with hint. Upload proof photo → hint disappears, button enables. Tap Delivered → server accepts. Attempt via direct callable without proof → `failed-precondition` error.
+
+- [ ] **Out of scope (deferred).**
+  - ShopOwnerDashboard per-card live ETA chip. `[Phase NEXT-BUNDLE-C]`
+  - Remove stale "photo is OPTIONAL" comments from types + delivery screens. `[Phase NEXT-BUNDLE-C]`
+  - Clarify post-delivery late-upload window semantics. `[Phase NEXT-BUNDLE-C]`
+
+---
+
+## PR-NEXT-PARTNER-HEADS-UP
+
+- [x] **headsUpHelpers.ts + 6 tests** — Created `functions/src/headsUpHelpers.ts` with `computeMinutesFromNow` (clamps to ≥1 min, handles null/undefined/NaN safely). Pinned by `tests/functions/headsUpHelpers.test.ts` (6 cases: future ETA, past ETA, zero delta, null, undefined, NaN). `[Phase PR-NEXT-PARTNER-HEADS-UP]`
+- [x] **sendPickupHeadsUpToDelivery trigger** — Added `export const sendPickupHeadsUpToDelivery` in `functions/src/index.ts` after `sendNewPickupPushToDelivery`. Fires on `pending→accepted` transition (or first `accepted→accepted` field update). Idempotency stamped via `headsUpSentAt: FieldValue.serverTimestamp()` on the order doc post-push. Reuses `filterPartnersByNotificationRadius` (PR 50) for fail-open radius filtering. Push body: "🍽️ Heads up — pickup coming · {shop} · ready in ~{N} min · {count} items". Data: `{ type: 'pickup_heads_up', orderId }`. `[Phase PR-NEXT-PARTNER-HEADS-UP]`
+- [x] **headsUpSentAt schema field** — Added `headsUpSentAt?: number | null` to `Order` type in `src/types/index.ts`. Schema-additive; absent on all legacy orders. `[Phase PR-NEXT-PARTNER-HEADS-UP]`
+- [x] **Client HeadsUpCard already exists** — `HeadsUpCard` + `headsUp`/`availableNow` split already shipped in PR 12 (`DeliveryDashboardScreen.tsx`). No client changes needed for the "Coming up" section. `[Phase PR-NEXT-PARTNER-HEADS-UP]`
+- [x] **pickup_heads_up deep-link** — Added `pickup_heads_up` branch in `src/components/AuthBootstrap.tsx` after `new_pickup_for_delivery`. Tapping navigates delivery partners to `DeliveryDashboard` (not `OrderDetail` — order isn't claimable yet). Non-delivery taps silently no-op. `[Phase PR-NEXT-PARTNER-HEADS-UP]`
+- [x] **tsc + tests + break demo** — Both `npx tsc --noEmit` clean. `npm test`: 1368/1368 (+6). Deliberate-break: changed `Math.max(1, …)` → `Math.max(0, …)` → 2 failures (past + zero delta). Restored. `[Phase PR-NEXT-PARTNER-HEADS-UP]`
+- [ ] **Deploy sendPickupHeadsUpToDelivery** — Run `firebase deploy --only functions:sendPickupHeadsUpToDelivery` in PowerShell. Verify in `firebase functions:list`. `[Phase PR-NEXT-PARTNER-HEADS-UP-deploy]`
+- [ ] **headsUpSentAt Firestore index** — If queries on `headsUpSentAt` are added later, add a composite index. Currently the trigger reads the field client-side only; no index needed now. `[Phase PR-NEXT-PARTNER-HEADS-UP-followup]`
+- [ ] **Re-acceptance after rejection** — When an order goes `accepted→cancelled→accepted` (rare), `headsUpSentAt` is NOT cleared automatically. Server does not currently handle this edge case; manual Firestore delete of `headsUpSentAt` needed. Track for a follow-up. `[Phase PR-NEXT-PARTNER-HEADS-UP-followup]`
+
+---
+
+## PR-NEXT-PARTNER-PHOTO
+
+- [x] **formatPartnerAvatar pure helper + 4 tests** — Created `src/utils/formatPartnerAvatar.ts` with `formatPartnerAvatar(name, photoUrl): PartnerAvatarResult` (discriminated union `{ kind: 'photo', uri } | { kind: 'initials', text }`). Guards empty-string URIs (R9). Pinned by `tests/utils/formatPartnerAvatar.test.ts` (4 cases: photo present, null, empty string, null+null). `[Phase PR-NEXT-PARTNER-PHOTO]`
+- [x] **deliveryPersonPhotoUrl on Order type** — Added `deliveryPersonPhotoUrl?: string | null` to `Order` in `src/types/index.ts`. Schema-additive. `[Phase PR-NEXT-PARTNER-PHOTO]`
+- [x] **profilePhotoUrl on DeliveryRequest type** — Added `profilePhotoUrl?: string` to `DeliveryRequest` in `src/types/index.ts` and `DeliveryRequestDoc` in `functions/src/index.ts`. `[Phase PR-NEXT-PARTNER-PHOTO]`
+- [x] **getPartnerPhotoUploadUrl callable** — Added `export const getPartnerPhotoUploadUrl` in `functions/src/index.ts`. Accepts `{ contentType: 'image/jpeg' | 'image/png' }`. Mints v4 signed PUT URL targeting `delivery-profile/{uid}.jpg|png`. 5-min expiry. `[Phase PR-NEXT-PARTNER-PHOTO]`
+- [x] **requestDeliveryRole — photo required** — Extended callable in `functions/src/index.ts` to accept `profilePhotoUrl`. Validates: non-empty, starts with `https://`, contains `delivery-profile/`, must include caller's own UID (anti-spoofing). Stored in `deliveryRequests/{uid}.profilePhotoUrl`. `[Phase PR-NEXT-PARTNER-PHOTO]`
+- [x] **approveDeliveryRole — copy photo to users doc** — Extended callable to copy `profilePhotoUrl` from `deliveryRequests/{uid}` to `users/{uid}.profilePhotoUrl` + stamps `photoVerifiedAt` + `photoVerifiedBy`. Non-fatal if photo missing (legacy requests). `[Phase PR-NEXT-PARTNER-PHOTO]`
+- [x] **claimDelivery — denormalize deliveryPersonPhotoUrl** — Extended denorm block in `claimDelivery` callable to read `partnerData.profilePhotoUrl` and write `deliveryPersonPhotoUrl` onto the order doc alongside existing trust signals. `[Phase PR-NEXT-PARTNER-PHOTO]`
+- [x] **BecomeDeliveryPartnerScreen — photo capture** — Added `pickAndResizeImage` pipeline + `getPartnerPhotoUploadUrl` signed-URL upload + `profilePhotoUrl` requirement before `requestDeliveryRole` submit. Camera + gallery picker buttons. Preview + upload status shown. `[Phase PR-NEXT-PARTNER-PHOTO]`
+- [x] **PartnerDetailsSheet — photo avatar** — Added `partnerPhotoUrl` prop + `formatPartnerAvatar` call. Renders `<Image style={avatarPhoto}>` (circular, 56px) when photo present; falls back to initials `<View style={avatar}>` otherwise. `[Phase PR-NEXT-PARTNER-PHOTO]`
+- [x] **OrderDetailScreen — wire partnerPhotoUrl** — Passed `order.deliveryPersonPhotoUrl ?? null` as `partnerPhotoUrl` prop to `PartnerDetailsSheet`. `[Phase PR-NEXT-PARTNER-PHOTO]`
+- [x] **ShopOrderDetailScreen — delivery partner card** — Added "Delivery partner" section (shown only when `deliveryPersonId` is set) with photo/initials avatar + partner name. Uses `formatPartnerAvatar`. `[Phase PR-NEXT-PARTNER-PHOTO]`
+- [x] **DeliveryRequestDetailScreen — photo review** — Added face photo card (full-width 200px image) + caption "Review face is clearly visible…" for admin review. Shows ⚠️ warning for legacy requests without photo. `[Phase PR-NEXT-PARTNER-PHOTO]`
+- [x] **orderService — getPartnerPhotoUploadUrl** — Added `getPartnerPhotoUploadUrl(contentType)` method to `src/services/orderService.ts`. Extended `requestDeliveryRole` signature with `profilePhotoUrl?`. `[Phase PR-NEXT-PARTNER-PHOTO]`
+- [x] **tsc + tests + break demo** — Both tsc clean. `npm test`: 1372/1372 (+4). Deliberate-break: removed `trim().length > 0` guard → empty-string photo returned `kind: 'photo'` instead of `initials` → 1 failure. Restored. `[Phase PR-NEXT-PARTNER-PHOTO]`
+- [ ] **Storage rules for delivery-profile/** — Add `allow write: if request.auth.uid == resource.name.split('/')[1]` (or similar) to `storage.rules` so the signed-URL PUT is the only write path and direct client writes are blocked. `[Phase PR-NEXT-PARTNER-PHOTO-deploy]`
+- [ ] **Project bucket name is hardcoded** — `BecomeDeliveryPartnerScreen` constructs the download URL with `grocery-mvp-dev.appspot.com`. Move to `expo-constants` env var or a server-returned field before production. `[Phase PR-NEXT-PARTNER-PHOTO-followup]`
+- [ ] **Photo re-upload on rejection** — If a partner is rejected and resubmits, `requestDeliveryRole` overwrites the doc but the `profilePhotoUrl` must point to the new upload. Current flow supports this if the client re-captures the photo. Consider a "re-take photo" hint on `DeliveryApprovalWaitingScreen` after rejection. `[Phase PR-NEXT-PARTNER-PHOTO-followup]`
+- [ ] **EAS build needed** — `expo-image-picker` was already in `package.json`; no new native module. OTA update is sufficient for this PR. Confirm before shipping. `[Phase PR-NEXT-PARTNER-PHOTO-deploy]`
+
+---
+
+## PR-NEXT-STATIC-MAP-PREVIEW
+
+- [x] **buildStaticMapUrl pure helper + 8 tests** — Created `src/utils/buildStaticMapUrl.ts` with `buildStaticMapUrl(input): string | null`. Returns null when any required input (shopPin, dropPin, apiKey) is missing or non-finite. Builds Google Static Maps URL with green S marker (shop), blue D marker (drop), blue path between. Default 320×160 px, scale 2. Pinned by `tests/utils/buildStaticMapUrl.test.ts` (8 cases: valid URL, missing shopPin, missing dropPin, missing apiKey, non-finite lat, non-finite lng, default dimensions, custom dimensions). `[Phase PR-NEXT-STATIC-MAP-PREVIEW]`
+- [x] **app.config.js extra.googleMapsApiKey** — Extended `app.config.js` to spread `extra.googleMapsApiKey: process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY ?? null` into the Expo config at build time. Follows same pattern as firebase/sentry/legal entries in `app.json`. `[Phase PR-NEXT-STATIC-MAP-PREVIEW]`
+- [x] **src/constants/maps.ts getGoogleMapsApiKey()** — Created accessor following `legal.ts` pattern: reads `Constants.expoConfig?.extra?.googleMapsApiKey`, returns `string | null`. Returns null in local dev (no EAS secret), callers treat null as "no map." `[Phase PR-NEXT-STATIC-MAP-PREVIEW]`
+- [x] **PartnerDetailsSheet — static map preview slot** — Added `shopLocation?: LatLng | null` + `dropLocation?: LatLng | null` props. Computes `mapUrl` via `buildStaticMapUrl` + `getGoogleMapsApiKey()`. Renders map between WHO/STATE row and divider: `<Image style={mapImage}>` (aspectRatio 2, backgroundColor surface as load placeholder) + caption row "● Shop · ● You" with Google green/blue colors. Hidden when mapUrl is null. R9 guard: mapUrl non-null guarantee from helper. `[Phase PR-NEXT-STATIC-MAP-PREVIEW]`
+- [x] **OrderDetailScreen — wire shopLocation/dropLocation** — Passed `order.shopLocation ?? null` and `order.deliveryLocation ? { lat, lng } : null` to `PartnerDetailsSheet`. `[Phase PR-NEXT-STATIC-MAP-PREVIEW]`
+- [x] **tsc + tests + break demo** — Both tsc clean. `npm test`: 1380/1380 (+8). Deliberate-break: removed `apiKey.length === 0` guard → empty-string apiKey returned URL instead of null → 1 failure. Restored. `[Phase PR-NEXT-STATIC-MAP-PREVIEW]`
+- [ ] **GCP one-time setup (Sudhir)** — Enable Maps Static API in GCP Console for `grocery-mvp-dev`. Create API key restricted to Maps Static API + bundle ID `com.sudhirdavim.grocerymvp`. Run `eas secret:create --scope project --name EXPO_PUBLIC_GOOGLE_MAPS_KEY --value <key>`. Verify `eas secret:list`. `[Phase PR-NEXT-STATIC-MAP-PREVIEW-deploy]`
+- [ ] **EAS build required** — `extra.googleMapsApiKey` is baked at build time. OTA alone is insufficient. Plan a TestFlight + Play Internal Testing cycle after key provisioning. `[Phase PR-NEXT-STATIC-MAP-PREVIEW-deploy]`
+- [ ] **Quota monitoring** — Free tier: 1000 static map requests/day. At pilot scale (~20/day) this is fine. If MAU grows, set a GCP budget alert at 500/day. `[Phase PR-NEXT-STATIC-MAP-PREVIEW-followup]`
+- [ ] **Interactive map deferred** — `react-native-maps` live pin deferred until pilot signal demands sub-10m precision. `[Phase PR-NEXT-STATIC-MAP-PREVIEW-deferred]`
+
+---
+
+## PR-NEXT-LOW-RATING-PUSH
+
+- [x] **Schema §A — Shop + UserProfile fields** — Added `lowRatingThreshold?: number | null` and `lowRatingNotificationsEnabled?: boolean | null` to both `Shop` and `UserProfile` types in `src/types/index.ts`. Optional/nullable for back-compat with all legacy documents. `[Phase PR-NEXT-LOW-RATING-PUSH]`
+- [x] **Pure helpers §B — lowRatingAlertHelpers.ts + 16 tests** — Created `functions/src/lowRatingAlertHelpers.ts` with `parseAlertConfig`, `decideShopFanout`, `decidePartnerFanout`, `decideAdminFanout`. `parseAlertConfig` is fail-OPEN (missing fields → defaults 3★/all enabled). All three `decide*` helpers return discriminated-union `FanoutDecision`. Pinned by `tests/functions/lowRatingAlertHelpers.test.ts` (16 cases: parseAlertConfig×5, decideShopFanout×5, decidePartnerFanout×3, decideAdminFanout×3). `[Phase PR-NEXT-LOW-RATING-PUSH]`
+- [x] **Server §C — submitOrderRating fan-out** — Extended `submitOrderRating` in `functions/src/index.ts` (after transaction + auditLog) with a non-fatal try/catch fan-out block. Reads `appConfig/ratingAlerts` + `shops/{shopId}` in parallel, optionally reads `users/{deliveryPersonId}`. Calls `pushToOwner`, `pushToUser`, `pushToAdmins` respectively when each role's `decide*` function returns `notify: true`. Each push sets `type` field for deep-link routing. `[Phase PR-NEXT-LOW-RATING-PUSH]`
+- [x] **Server §D — 3 new callables** — Added `updateShopRatingAlertSettings` (shopOwner+admin, resolves shopId via claim or param, permission-denied for cross-shop), `updatePartnerRatingAlertSettings` (delivery claim only, writes to own `users/{uid}`), `updateAdminRatingAlertConfig` (admin only, writes to `appConfig/ratingAlerts`). All three at end of `functions/src/index.ts`. `[Phase PR-NEXT-LOW-RATING-PUSH]`
+- [x] **Client §D — orderService wrappers** — Added 3 callable wrappers to `src/services/orderService.ts` following the dual-SDK pattern (RNFB + web SDK). `[Phase PR-NEXT-LOW-RATING-PUSH]`
+- [x] **Client §D — ShopSettingsScreen notifications card** — Added "Notifications" card at bottom of `ShopSettingsScreen`. 1–5★ threshold picker (Pressable row), enabled checkbox, Save button. State hydrated from `resolved.lowRatingThreshold` / `resolved.lowRatingNotificationsEnabled` on screen load. Calls `updateShopRatingAlertSettings`. All new styles added. `[Phase PR-NEXT-LOW-RATING-PUSH]`
+- [x] **Client §D — DeliveryDashboardScreen alert card** — Added "LOW-RATING ALERTS" settings card below notification-radius card in `DeliveryDashboardScreen`. Same 1–5★ picker + enabled checkbox + Save button pattern. State hydrated from `getMyDeliverySettings` response (forward-compat cast). Calls `updatePartnerRatingAlertSettings`. `[Phase PR-NEXT-LOW-RATING-PUSH]`
+- [x] **Client §E — AuthBootstrap deep-links** — Added 3 new push type branches in `AuthBootstrap.tsx`: `low_rating_for_shop` → `ShopOrderDetail`, `low_rating_for_partner` → `DeliveryOrderDetail`, `low_rating_for_admin` → `AdminOrders`. Same audience-guard pattern (role check before navigate). `[Phase PR-NEXT-LOW-RATING-PUSH]`
+- [x] **tsc + tests + break demo** — Both tsc clean. `npm test`: 1396/1396 (+16). Deliberate-break: flipped `<=` to `>` in `decideShopFanout` → 4 failures (above/at-threshold/override cases). Restored. `[Phase PR-NEXT-LOW-RATING-PUSH]`
+- [ ] **Admin settings UI** — `updateAdminRatingAlertConfig` callable is wired but no admin screen exposes it yet. Add a "Rating alert defaults" section to AdminSettingsScreen (or create one). `[Phase PR-NEXT-LOW-RATING-PUSH-followup]`
+- [ ] **getMyDeliverySettings back-compat** — `DeliveryDashboardScreen` reads `lowRatingThreshold`/`lowRatingNotificationsEnabled` from the `getMyDeliverySettings` response via cast. The server callable currently doesn't return these fields — wire them through `getMyDeliverySettings` so the hydration works without a cast. `[Phase PR-NEXT-LOW-RATING-PUSH-followup]`
+- [ ] **Firestore rules** — `appConfig/ratingAlerts` must be writable only by admin (currently any authenticated user can write; callables enforce the claim gate but direct client writes would bypass it). `[Phase PR-NEXT-LOW-RATING-PUSH-deploy]`
+- [ ] **IAM verify post-deploy** — Run `gcloud run services get-iam-policy` for `submitrating`, `updateshopratingalertsettings`, `updatepartnerratingalertsettings`, `updateadminratingalertconfig` after deploy. `[Phase PR-NEXT-LOW-RATING-PUSH-deploy]`
+- [ ] **Seed appConfig/ratingAlerts** — Create the doc in Firestore console pre-launch so defaults are explicit and visible: `{ shopDefaultThreshold: 3, partnerDefaultThreshold: 3, adminThreshold: 3, adminNotificationsEnabled: true }`. `[Phase PR-NEXT-LOW-RATING-PUSH-deploy]`
+
+---
+
+## PR-NEXT-REVIEW-SYSTEM
+
+- [x] **Schema §A — Order correction-state fields** — Added 8 optional fields to `Order` type in `src/types/index.ts`: `correctionState`, `responseText`, `responseBy`, `responseAt`, `amendedStars`, `amendedAt`, `publishedAt`, `publishedReason`, plus `ratingId` (links order to reviews sub-collection doc). Back-compat: all optional/nullable; absent on legacy orders = treated as `'published'`. `[Phase PR-NEXT-REVIEW-SYSTEM]`
+- [x] **Schema §A — Shop + UserInfo public review cache** — Added `publicReviewCount?: number` and `publicReviewLatest?: Array<{...}>` (top-5 cache) to both `Shop` and `UserInfo` types. `[Phase PR-NEXT-REVIEW-SYSTEM]`
+- [x] **Pure helpers §B — reviewWorkflowHelpers.ts + 12 tests** — Created `functions/src/reviewWorkflowHelpers.ts` with `decideInitialState` (null-safe delivery stars), `canRespond`, `canAmend`, `canAcknowledge`, `decideTimeoutPublish` (configurable days, default 7). Pinned by `tests/functions/reviewWorkflowHelpers.test.ts` (12 cases). `[Phase PR-NEXT-REVIEW-SYSTEM]`
+- [x] **Server §C — submitOrderRating correction-state init** — Extended the transaction in `submitOrderRating` to compute `decideInitialState` (default 3★ thresholds, lean transaction), generate a `ratingId` (Firestore doc ID), write `reviews/{ratingId}` sub-collection doc alongside the order update. Order doc stamped with `correctionState`, `publishedReason`, `publishedAt`, `ratingId`. `[Phase PR-NEXT-REVIEW-SYSTEM]`
+- [x] **Server §D — 5 new callables** — `respondToReview` (shop owner or partner, `flagged_low`→`responded`, notifies customer), `amendRating` (customer, `responded`→`amended`→`published`, recomputes rolling avg), `acknowledgeReview` (customer, `responded`→`published`), `publishTimedOutReviews` (scheduled daily, auto-publishes `flagged_low` reviews >7 days old), `listShopReviews` (public paginated, shopId + state=published). Internal `_publishReview` helper updates `reviews` doc + shop/partner `publicReviewLatest` top-5 cache in a single transaction. `[Phase PR-NEXT-REVIEW-SYSTEM]`
+- [x] **Server §D — Firestore composite indexes** — Added 2 new entries to `firestore.indexes.json`: `reviews(shopId==, correctionState==, publishedAt desc)` for `listShopReviews` pagination, `reviews(correctionState==, submittedAt asc)` for `publishTimedOutReviews` batch. `[Phase PR-NEXT-REVIEW-SYSTEM]`
+- [x] **Client §E — orderService wrappers** — Added `respondToReview`, `amendRating`, `acknowledgeReview`, `listShopReviews` wrappers to `src/services/orderService.ts` (dual RNFB + web SDK pattern). `[Phase PR-NEXT-REVIEW-SYSTEM]`
+- [x] **Client §F — ShopReviewsScreen** — Created `src/screens/shop/ShopReviewsScreen.tsx`. Paginated `FlatList` of published reviews via `listShopReviews`. Each `ReviewCard` shows stars, customer name, relative time, comment, and shop response (indented with primary-color left border). Empty state, error state, end-of-list handled. `[Phase PR-NEXT-REVIEW-SYSTEM]`
+- [x] **Client §G — RatingAmendmentScreen** — Created `src/screens/customer/RatingAmendmentScreen.tsx`. Shows shop's response text, 1–5★ amendment picker, two CTAs: "Keep original" (`acknowledgeReview`) and "Update to N★" (`amendRating`). All data via route params (no extra fetch). `[Phase PR-NEXT-REVIEW-SYSTEM]`
+- [x] **Navigation wiring §F/§G** — Added `ShopReviews` and `RatingAmendment` routes to `RootStackParamList` and `AppNavigator.tsx`. `RatingAmendment` carries optional prefill params (`shopName`, `originalShopStars`, `responseText`, `responseBy`). `[Phase PR-NEXT-REVIEW-SYSTEM]`
+- [x] **Deep-link §G — review_responded** — Added `review_responded` push type handler in `AuthBootstrap.tsx` → navigates to `RatingAmendment` with `ratingId` + `orderId` from push payload. `[Phase PR-NEXT-REVIEW-SYSTEM]`
+- [x] **tsc + tests + break demo** — tsc clean. `npm test`: 1410/1410 (+14). Deliberate-break: flipped `<=` to `>` in `decideInitialState` → 2 failures (low-shop and low-partner cases). Restored. `[Phase PR-NEXT-REVIEW-SYSTEM]`
+- [x] **PartnerReviewsScreen** — DONE in PR-NEXT-5.1 §D. Added `listPartnerReviews({ partnerUid, limit, cursor })` callable + `src/screens/delivery/PartnerReviewsScreen.tsx` + orderService wrapper + composite index. `[Phase PR-NEXT-5.1]`
+- [x] **Shop owner RespondToReview surface** — DONE in PR-NEXT-5.1 §A. Low-rating banner + Respond CTA + ResponseModal on `ShopOrderDetailScreen`. `[Phase PR-NEXT-5.1]`
+- [x] **Delivery partner respond surface** — DONE in PR-NEXT-5.1 §B. Mirror banner + Respond CTA on `DeliveryOrderDetailScreen` with `responseBy: 'partner'`. `[Phase PR-NEXT-5.1]`
+- [x] **ShopReviews entry point** — DONE in PR-NEXT-5.1 §E. Tappable rating row on `ShopDetailScreen` → ShopReviewsScreen. `[Phase PR-NEXT-5.1]`
+- [x] **customerName denormalization** — DONE in PR-NEXT-5.1 §F. `resolveCustomerName` helper + read in `submitOrderRating` writes `customerName` + `customerUid` onto the review doc. `[Phase PR-NEXT-5.1]`
+- [x] **Firestore rules for reviews collection** — DONE in PR-NEXT-5.1 §G. `reviews/{ratingId}` block: published readable by all, pre-published gated to customer/shop-owner/partner/admin, writes always denied. `[Phase PR-NEXT-5.1]`
+- [ ] **Deploy firestore:indexes** — New `reviews` composite indexes must be deployed before `listShopReviews` or `publishTimedOutReviews` can run. `firebase deploy --only firestore:indexes`. `[Phase PR-NEXT-REVIEW-SYSTEM-deploy]`
+- [ ] **IAM verify post-deploy** — Verify `allUsers` invoker on `respondtoreview`, `amendrating`, `acknowledgereview`, `listshopreviews`, `publishtimedoutreviews`, `listpartnerreviews`. `[Phase PR-NEXT-REVIEW-SYSTEM-deploy]`
+
+---
+
+## PR-NEXT-5.1 — Review-system loop close
+
+- [x] **§C — ResponseModal** — Created `src/components/order/ResponseModal.tsx`. BottomSheet chrome (Rule 13), 280-char limit + counter, disabled-when-empty submit, `responseBy: 'shop' | 'partner'` prop. Reused by §A + §B. `[Phase PR-NEXT-5.1]`
+- [x] **§A — Shop respond banner** — `ShopOrderDetailScreen` shows a low-rating banner when `correctionState` is `flagged_low` (Respond CTA → ResponseModal → `respondToReview`) or `responded` (response text + days-left countdown) or `published` (confirmation). State hooks declared above early returns (Rule 2). `[Phase PR-NEXT-5.1]`
+- [x] **§B — Partner respond banner** — Mirror on `DeliveryOrderDetailScreen` reading `deliveryRating`/`deliveryComment`, `responseBy: 'partner'`. `[Phase PR-NEXT-5.1]`
+- [x] **§D — PartnerReviewsScreen + callable** — `listPartnerReviews` callable (`functions/src/index.ts`, deliveryPersonId + published filter, paginated), orderService wrapper, `src/screens/delivery/PartnerReviewsScreen.tsx` (paginated FlatList + ReviewCard), composite index `reviews(deliveryPersonId==, correctionState==, publishedAt desc)`. Route wired in `AppNavigator`. `[Phase PR-NEXT-5.1]`
+- [x] **§E — Entry points** — `ShopDetailScreen` rating row wrapped in Pressable → ShopReviews; `PartnerDetailsSheet` trust line tappable (new `partnerUid` prop, passed from `OrderDetailScreen`) → PartnerReviews. `[Phase PR-NEXT-5.1]`
+- [x] **§F — customerName denorm** — `resolveCustomerName(profileDisplayName, authTokenName)` pure helper in `ratingHelpers.ts` (profile → token → 'Anonymous', whitespace-safe). `submitOrderRating` reads the customer profile outside the transaction and writes `customerName` + `customerUid` onto the review doc. +5 unit tests. `[Phase PR-NEXT-5.1]`
+- [x] **§G — Firestore rules + tests** — `reviews/{ratingId}` block in `firestore.rules`; +10 rules tests in `tests/rules/reviews.test.ts` (published-by-anyone, own pre-published, other-customer denied, shop-owner same/different shop, assigned/other partner, admin, direct-write denied ×2). `[Phase PR-NEXT-5.1]`
+- [x] **tsc + tests + break demo** — Both tsc clean (root + functions). `npm test`: 1415/1415 (+5). `npm run test:full`: 102/102 rules (+10, rules changed). Deliberate-break: swapped profile/token precedence in `resolveCustomerName` → 1 failure. Restored. `[Phase PR-NEXT-5.1]`
+- [ ] **Deploy submitOrderRating + rules + indexes** — Server-first: `firebase deploy --only functions:submitOrderRating,functions:listPartnerReviews` → `firestore:rules` → `firestore:indexes`. Then client OTA. Awaiting user. `[Phase PR-NEXT-5.1-deploy]`
+- [ ] **Edit/delete response** — Out of scope this PR: shop/partner gets one response; corrections need admin override. Post-MVP. `[Phase PR-NEXT-5.1-followup]`

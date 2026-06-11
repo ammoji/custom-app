@@ -17,6 +17,19 @@ export const colors = {
   mrpStrike: '#9CA3AF',
 };
 
+// PR-NEXT-BUNDLE-F — brand accent for active states + banners.
+// Light green fill + dark green text reads as food/freshness without
+// being aggressive (vs orange/red which look like alerts).
+export const brandGreen = {
+  fillLight: '#EAF3DE', // active-order banner bg, badge bg
+  fillMedium: '#C0DD97', // icon-on-banner background
+  textDark: '#173404', // text on light green; primary brand text
+  textMedium: '#3B6D11', // secondary text on light green
+};
+
+// PR-NEXT-BUNDLE-F — star rating color. Amber, not yellow.
+export const ratingAmber = '#BA7517';
+
 export const spacing = {
   xs: 4,
   sm: 8,

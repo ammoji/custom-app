@@ -137,6 +137,10 @@ export default function ShopSettingsScreen() {
   const [pendingResolved, setPendingResolved] = useState<string | null>(null);
   const [submittingLocation, setSubmittingLocation] = useState(false);
   const [cancellingLocation, setCancellingLocation] = useState(false);
+  // PR-NEXT-LOW-RATING-PUSH §D — notification threshold settings.
+  const [alertThreshold, setAlertThreshold] = useState<number>(3);
+  const [alertEnabled, setAlertEnabled] = useState<boolean>(true);
+  const [savingAlert, setSavingAlert] = useState(false);
 
   // Wrapped so post-submit and post-cancel can refetch through the
   // same code path the initial load takes. Keeps `shop` in sync with
@@ -177,6 +181,13 @@ export default function ShopSettingsScreen() {
                 : DEFAULT_SERVICE_RADIUS_KM,
             ),
           );
+          // PR-NEXT-LOW-RATING-PUSH §D — hydrate alert settings from shop doc.
+          if (typeof resolved.lowRatingThreshold === 'number') {
+            setAlertThreshold(resolved.lowRatingThreshold);
+          }
+          if (typeof resolved.lowRatingNotificationsEnabled === 'boolean') {
+            setAlertEnabled(resolved.lowRatingNotificationsEnabled);
+          }
           // PR 47 — hydrate the tier editor. Use the stored tiers
           // when present; otherwise seed from the admin defaults so
           // a legacy shop owner sees a sensible starting table they
@@ -981,6 +992,85 @@ export default function ShopSettingsScreen() {
               size="lg"
             />
           </View>
+          {/* PR-NEXT-LOW-RATING-PUSH §D — low-rating notification settings card. */}
+          <View style={{ height: spacing.lg }} />
+          <View style={styles.card}>
+            <Text style={styles.sectionTitle}>Notifications</Text>
+            <Text style={styles.helpText}>
+              Get notified when a customer rates your shop at or below this
+              many ★
+            </Text>
+            <View style={[styles.field, { marginTop: spacing.sm }]}>
+              <Text style={styles.label}>Alert threshold (stars)</Text>
+              <View style={styles.ratingRow}>
+                {[1, 2, 3, 4, 5].map(s => (
+                  <Pressable
+                    key={s}
+                    onPress={() => setAlertThreshold(s)}
+                    style={[
+                      styles.starBtn,
+                      alertThreshold === s && styles.starBtnActive,
+                    ]}
+                    accessibilityLabel={`Alert threshold ${s} stars`}
+                  >
+                    <Text
+                      style={[
+                        styles.starBtnText,
+                        alertThreshold === s && styles.starBtnTextActive,
+                      ]}
+                    >
+                      {s}★
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+              <Text style={styles.helpText}>
+                You’ll be notified for ratings of {alertThreshold}★ or lower.
+              </Text>
+            </View>
+            <View style={styles.field}>
+              <Pressable
+                onPress={() => setAlertEnabled(v => !v)}
+                style={styles.checkRow}
+                accessibilityRole="checkbox"
+                accessibilityState={{ checked: alertEnabled }}
+                accessibilityLabel="Enable low-rating notifications"
+              >
+                <View
+                  style={[
+                    styles.checkbox,
+                    alertEnabled && styles.checkboxChecked,
+                  ]}
+                >
+                  {alertEnabled && (
+                    <Text style={styles.checkMark}>✓</Text>
+                  )}
+                </View>
+                <Text style={styles.label}>Enabled</Text>
+              </Pressable>
+            </View>
+            <Button
+              title={savingAlert ? 'Saving…' : 'Save notification settings'}
+              onPress={async () => {
+                setSavingAlert(true);
+                try {
+                  await orderService.updateShopRatingAlertSettings({
+                    threshold: alertThreshold,
+                    enabled: alertEnabled,
+                  });
+                  Alert.alert('Saved', 'Notification settings updated.');
+                } catch (e: any) {
+                  Alert.alert('Could not save', e?.message ?? 'Please try again.');
+                } finally {
+                  setSavingAlert(false);
+                }
+              }}
+              loading={savingAlert}
+              disabled={savingAlert}
+              size="lg"
+            />
+          </View>
+
           <View style={{ height: spacing.md }} />
           <Button
             title="Cancel"
@@ -1247,5 +1337,60 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.primary,
     fontWeight: '700',
+  },
+  // PR-NEXT-LOW-RATING-PUSH §D
+  sectionTitle: {
+    ...typography.h3,
+    marginBottom: spacing.xs,
+  },
+  ratingRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.xs,
+    marginBottom: spacing.sm,
+  },
+  starBtn: {
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  starBtnActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primaryLight,
+  },
+  starBtnText: {
+    ...typography.body,
+    color: colors.textSecondary,
+  },
+  starBtnTextActive: {
+    color: colors.primaryDark,
+    fontWeight: '700',
+  },
+  checkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginVertical: spacing.xs,
+  },
+  checkbox: {
+    width: 22,
+    height: 22,
+    borderRadius: radii.sm,
+    borderWidth: 2,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  checkboxChecked: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary,
+  },
+  checkMark: {
+    color: colors.bg,
+    fontWeight: '700',
+    fontSize: 14,
   },
 });

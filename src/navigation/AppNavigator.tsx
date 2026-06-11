@@ -31,7 +31,16 @@ import ShopManagementScreen from '../screens/admin/ShopManagementScreen';
 import ShopRegistrationDetailScreen from '../screens/admin/ShopRegistrationDetailScreen';
 import UserDetailScreen from '../screens/admin/UserDetailScreen';
 import UserManagementScreen from '../screens/admin/UserManagementScreen';
-import DeliveryDashboardScreen from '../screens/delivery/DeliveryDashboardScreen';
+// PR-NEXT-BUNDLE-D §A — DO NOT REMOVE. The 4-tab delivery workspace
+// replaces the bare dashboard at the `DeliveryDashboard` route. The
+// dashboard itself is now mounted as the Home tab inside the
+// navigator, so AppNavigator no longer imports it directly.
+import DeliveryTabNavigator from './DeliveryTabNavigator';
+// PR-NEXT-REVIEW-SYSTEM §F/§G — DO NOT REMOVE. Public reviews + correction.
+import ShopReviewsScreen from '../screens/shop/ShopReviewsScreen';
+import RatingAmendmentScreen from '../screens/customer/RatingAmendmentScreen';
+// PR-NEXT-5.1 §D — DO NOT REMOVE. Partner public reviews screen.
+import PartnerReviewsScreen from '../screens/delivery/PartnerReviewsScreen';
 import DeliveryOrderDetailScreen from '../screens/delivery/DeliveryOrderDetailScreen';
 import BecomeDeliveryPartnerScreen from '../screens/roles/BecomeDeliveryPartnerScreen';
 // PR 1 — security hardening delivery waiting screen (mirrors WaitingForApproval).
@@ -129,6 +138,24 @@ export type RootStackParamList = {
         };
       }
     | undefined;
+  // PR-NEXT-REVIEW-SYSTEM §F/§G
+  // PR-NEXT-BUNDLE-E §E — optional `mode='admin'` shows ALL reviews
+  // (pre-published included) for admin moderation; default 'public'.
+  ShopReviews: { shopId: string; shopName?: string; mode?: 'public' | 'admin' };
+  // PR-NEXT-5.1 §D
+  PartnerReviews: {
+    partnerUid: string;
+    partnerName?: string;
+    mode?: 'public' | 'admin';
+  };
+  RatingAmendment: {
+    ratingId: string;
+    orderId: string;
+    shopName?: string;
+    originalShopStars?: number;
+    responseText?: string | null;
+    responseBy?: string | null;
+  };
 };
 
 export type ShopRegistrationPrefill = {
@@ -224,7 +251,7 @@ export default function AppNavigator() {
       <Stack.Screen name="ShopCustomers" component={ShopCustomersScreen} />
       <Stack.Screen
         name="DeliveryDashboard"
-        component={DeliveryDashboardScreen}
+        component={DeliveryTabNavigator}
       />
       <Stack.Screen
         name="DeliveryOrderDetail"
@@ -233,6 +260,9 @@ export default function AppNavigator() {
       <Stack.Screen name="Login" component={LoginScreen} />
       <Stack.Screen name="Profile" component={ProfileScreen} />
       <Stack.Screen name="AddressEdit" component={AddressEditScreen} />
+      <Stack.Screen name="ShopReviews" component={ShopReviewsScreen} />
+      <Stack.Screen name="RatingAmendment" component={RatingAmendmentScreen} />
+      <Stack.Screen name="PartnerReviews" component={PartnerReviewsScreen} />
     </Stack.Navigator>
   );
 }

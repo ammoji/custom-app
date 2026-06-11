@@ -87,6 +87,7 @@ describe('parseFlags', () => {
       keepOrders: false,
       noConfirm: false,
       adminUid: null,
+      iKnowPilotIsLive: false,
     });
   });
 
@@ -154,6 +155,14 @@ describe('parseFlags', () => {
     // to "delete everything including shops" — the worst possible
     // default for this script.
     expect(() => parseFlags(['--keep-shop'])).toThrow(/Unknown flag/);
+  });
+
+  test('--i-know-pilot-is-live sets iKnowPilotIsLive=true', () => {
+    expect(parseFlags(['--i-know-pilot-is-live']).iKnowPilotIsLive).toBe(true);
+  });
+
+  test('absence of --i-know-pilot-is-live leaves iKnowPilotIsLive=false', () => {
+    expect(parseFlags([]).iKnowPilotIsLive).toBe(false);
   });
 });
 

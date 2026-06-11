@@ -35,5 +35,15 @@ module.exports = () => {
       googleServicesFile:
         process.env.GOOGLE_SERVICES_JSON ?? expo.android.googleServicesFile,
     },
+    // PR-NEXT-STATIC-MAP-PREVIEW §B — bake API key into extra at build time.
+    // The key is read at runtime via `getGoogleMapsApiKey()` in
+    // `src/constants/maps.ts`. Same pattern as `firebase.ts` / `sentry.ts`.
+    // To provision: eas secret:create --scope project
+    //   --name EXPO_PUBLIC_GOOGLE_MAPS_KEY --value <key>
+    // then `eas build --profile production --platform all`.
+    extra: {
+      ...expo.extra,
+      googleMapsApiKey: process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY ?? null,
+    },
   };
 };

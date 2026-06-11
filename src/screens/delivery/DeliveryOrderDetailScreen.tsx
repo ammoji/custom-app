@@ -1,5 +1,5 @@
 import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
-import React from 'react';
+import React, { useState } from 'react';
 import {
     Alert,
     Linking,
@@ -25,6 +25,9 @@ import { formatOrderTime, formatRupees } from '../../utils/format';
 // card's `needsCodConfirmation` derivation.
 import { canShowDeliveredButton } from '../../utils/codDeliveryGate';
 import { useDeliveryOrderDetail } from './DeliveryOrderDetailScreen.useDeliveryOrderDetail';
+// PR-NEXT-5.1 §B — DO NOT REMOVE. Respond-to-review banner + modal for partners.
+import ResponseModal from '../../components/order/ResponseModal';
+import { orderService } from '../../services/orderService';
 
 /**
  * Full delivery view of a single order. Reuses watchOrder for live
@@ -69,6 +72,10 @@ export default function DeliveryOrderDetailScreen() {
     handleConfirmCodPayment,
     retry,
   } = useDeliveryOrderDetail(orderId, uid, !!isDelivery);
+
+  // PR-NEXT-5.1 §B — review response state (declared before early returns).
+  const [respondModalOpen, setRespondModalOpen] = useState(false);
+  const [responseSubmitting, setResponseSubmitting] = useState(false);
 
   const openMaps = (query: string) => {
     const url = `https://maps.google.com/?q=${encodeURIComponent(query)}`;
@@ -377,13 +384,23 @@ export default function DeliveryOrderDetailScreen() {
                 size="lg"
               />
             ) : canShowDeliveredButton(order) ? (
-              <Button
-                title="Delivered"
-                onPress={onDelivered}
-                loading={pendingAction === 'delivered'}
-                disabled={pendingAction !== null}
-                size="lg"
-              />
+              // PR-NEXT-BUNDLE-B §C — DO NOT REMOVE. Proof required.
+              // Hint appears above the disabled button; disappears
+              // once the proof is uploaded via the dashboard flow.
+              <>
+                {!order.deliveryProofStoragePath && (
+                  <Text style={styles.proofHint}>
+                    📷 Upload delivery proof first
+                  </Text>
+                )}
+                <Button
+                  title="Delivered"
+                  onPress={onDelivered}
+                  loading={pendingAction === 'delivered'}
+                  disabled={pendingAction !== null || !order.deliveryProofStoragePath}
+                  size="lg"
+                />
+              </>
             ) : (
               // COD unpaid — show the same Cash/UPI selector as
               // the dashboard. Visually mirrors `codConfirmLabel /
@@ -433,7 +450,80 @@ export default function DeliveryOrderDetailScreen() {
             <Text style={styles.doneText}>✅ Delivered</Text>
           </View>
         )}
+
+        {/* PR-NEXT-5.1 §B — delivery partner low-rating banner. */}
+        {(order.correctionState === 'flagged_low' ||
+          order.correctionState === 'responded') && (
+          <View style={styles.reviewBanner}>
+            <Text style={styles.reviewBannerTitle}>
+              ⚠️ Customer rated delivery {order.deliveryRating ?? '?'}★
+            </Text>
+            {!!order.deliveryComment && (
+              <Text style={styles.reviewBannerComment}>
+                "{order.deliveryComment}"
+              </Text>
+            )}
+            {order.correctionState === 'flagged_low' && (
+              <Pressable
+                onPress={() => setRespondModalOpen(true)}
+                style={styles.respondBtn}
+                accessibilityRole="button"
+                accessibilityLabel="Respond to review"
+                disabled={responseSubmitting}
+              >
+                <Text style={styles.respondBtnText}>
+                  📝 Respond to review
+                </Text>
+              </Pressable>
+            )}
+            {order.correctionState === 'responded' && (
+              <>
+                <Text style={styles.reviewResponseLabel}>Your response:</Text>
+                <Text style={styles.reviewResponseText}>{order.responseText}</Text>
+                <Text style={styles.reviewWaiting}>
+                  Waiting on customer to acknowledge or amend
+                  {order.responseAt
+                    ? ` · ${Math.max(0, 7 - Math.floor((Date.now() - order.responseAt) / 86400000))} days left`
+                    : ''}
+                  .
+                </Text>
+              </>
+            )}
+          </View>
+        )}
+        {order.correctionState === 'published' && !!order.deliveryRating && (
+          <View style={[styles.reviewBanner, styles.reviewBannerDone]}>
+            <Text style={styles.reviewBannerTitle}>
+              ✅ Review published — {order.deliveryRating}★
+              {order.responseText ? ' with your response' : ''}
+            </Text>
+          </View>
+        )}
       </ScrollView>
+
+      {/* PR-NEXT-5.1 §B — review response modal for delivery partners. */}
+      <ResponseModal
+        visible={respondModalOpen}
+        onClose={() => setRespondModalOpen(false)}
+        stars={order.deliveryRating ?? 1}
+        comment={order.deliveryComment ?? null}
+        responseBy="partner"
+        onSubmit={async (responseText) => {
+          if (!order.ratingId) return;
+          setResponseSubmitting(true);
+          try {
+            await orderService.respondToReview({
+              ratingId: order.ratingId,
+              responseText,
+            });
+            setRespondModalOpen(false);
+          } catch (e: any) {
+            throw e;
+          } finally {
+            setResponseSubmitting(false);
+          }
+        }}
+      />
     </SafeAreaView>
   );
 }
@@ -617,4 +707,50 @@ const styles = StyleSheet.create({
     ...typography.bodyBold,
     color: colors.primary,
   },
+  // PR-NEXT-BUNDLE-B §C — DO NOT REMOVE. Shown above the disabled
+  // Delivered button when no proof photo has been uploaded yet.
+  proofHint: {
+    ...typography.caption,
+    color: colors.warning,
+    textAlign: 'center',
+    marginBottom: spacing.sm,
+  },
+  // PR-NEXT-5.1 §B — review correction workflow banner styles.
+  reviewBanner: {
+    backgroundColor: '#FEF9E7',
+    borderRadius: radii.md,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: '#F4D03F',
+    marginBottom: spacing.md,
+  },
+  reviewBannerDone: {
+    backgroundColor: colors.primaryLight,
+    borderColor: colors.primary,
+  },
+  reviewBannerTitle: { ...typography.bodyBold, color: colors.textPrimary, marginBottom: spacing.xs },
+  reviewBannerComment: {
+    ...typography.body,
+    color: colors.textSecondary,
+    fontStyle: 'italic',
+    marginBottom: spacing.sm,
+  },
+  respondBtn: {
+    marginTop: spacing.sm,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    backgroundColor: colors.primary,
+    borderRadius: radii.sm,
+    alignSelf: 'flex-start',
+  },
+  respondBtnText: { ...typography.bodyBold, color: '#fff' },
+  reviewResponseLabel: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '700',
+    marginTop: spacing.sm,
+    marginBottom: 2,
+  },
+  reviewResponseText: { ...typography.body, color: colors.textPrimary, marginBottom: spacing.xs },
+  reviewWaiting: { ...typography.caption, color: colors.textSecondary, fontStyle: 'italic' },
 });

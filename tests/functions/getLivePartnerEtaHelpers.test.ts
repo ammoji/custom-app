@@ -16,6 +16,9 @@ import {
 
 type OrderDoc = {
   customerUid?: string;
+  // PR-NEXT-BUNDLE-B §A — DO NOT REMOVE. shopId is used by the
+  // shop-owner authorization gate added in this PR.
+  shopId?: string;
   deliveryPersonId?: string | null;
   pickedUpAt?: number | null;
   shopLocation?: { lat: number; lng: number } | null;
@@ -63,13 +66,16 @@ describe('getLivePartnerEtaPure', () => {
     if (!result.ok) expect(result.code).toBe('order_not_found');
   });
 
-  test('caller is not the order customer → not_customer', async () => {
+  test('caller is not the order customer and no shop claim → not_authorized', async () => {
+    // PR-NEXT-BUNDLE-B §A — renamed from not_customer. Random uid
+    // with no shopOwner claim is rejected.
     const result = await getLivePartnerEtaPure({
       orderId: 'o1',
       callerUid: 'someone_else',
       db: makeDb(
         {
           customerUid: 'customer_A',
+          shopId: 'shop_1',
           deliveryPersonId: 'p1',
           shopLocation: BLR,
         },
@@ -77,7 +83,128 @@ describe('getLivePartnerEtaPure', () => {
       ),
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.code).toBe('not_customer');
+    if (!result.ok) expect(result.code).toBe('not_authorized');
+  });
+
+  // ──────────────────────────────────────────────────────────────────
+  // PR-NEXT-BUNDLE-B §A — shop-owner authorization gate (5 cases)
+  // ──────────────────────────────────────────────────────────────────
+
+  test('§A: shop owner of the order’s shop → ok (returns ETA)', async () => {
+    const now = 1_700_000_000_000;
+    const result = await getLivePartnerEtaPure({
+      orderId: 'o1',
+      callerUid: 'owner_uid',
+      callerShopId: 'shop_1',
+      isCallerShopOwner: true,
+      nowMs: now,
+      db: makeDb(
+        {
+          customerUid: 'customer_A',
+          shopId: 'shop_1',
+          deliveryPersonId: 'p1',
+          pickedUpAt: null,
+          shopLocation: BLR,
+        },
+        {
+          currentLocation: NEAR_BLR,
+          currentLocationUpdatedAt: now - 30_000,
+        },
+      ),
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.distanceKm).toBeGreaterThan(1.0);
+    }
+  });
+
+  test('§A: shop owner of a DIFFERENT shop → not_authorized', async () => {
+    const result = await getLivePartnerEtaPure({
+      orderId: 'o1',
+      callerUid: 'owner_uid',
+      callerShopId: 'shop_OTHER',
+      isCallerShopOwner: true,
+      db: makeDb(
+        {
+          customerUid: 'customer_A',
+          shopId: 'shop_1',
+          deliveryPersonId: 'p1',
+          shopLocation: BLR,
+        },
+        { currentLocation: NEAR_BLR, currentLocationUpdatedAt: Date.now() },
+      ),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('not_authorized');
+  });
+
+  test('§A: customer of the order (regression) → still ok', async () => {
+    // Existing customer gate must not regress after shop-owner
+    // extension was added.
+    const now = 1_700_000_000_000;
+    const result = await getLivePartnerEtaPure({
+      orderId: 'o1',
+      callerUid: 'customer_A',
+      nowMs: now,
+      db: makeDb(
+        {
+          customerUid: 'customer_A',
+          shopId: 'shop_1',
+          deliveryPersonId: 'p1',
+          pickedUpAt: null,
+          shopLocation: BLR,
+        },
+        {
+          currentLocation: NEAR_BLR,
+          currentLocationUpdatedAt: now - 30_000,
+        },
+      ),
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  test('§A: no shopOwner flag (isCallerShopOwner=false) with correct shopId → not_authorized', async () => {
+    // shopId matches but the caller doesn’t have the shopOwner claim
+    // — both conditions required.
+    const result = await getLivePartnerEtaPure({
+      orderId: 'o1',
+      callerUid: 'impostor',
+      callerShopId: 'shop_1',
+      isCallerShopOwner: false,
+      db: makeDb(
+        {
+          customerUid: 'customer_A',
+          shopId: 'shop_1',
+          deliveryPersonId: 'p1',
+          shopLocation: BLR,
+        },
+        { currentLocation: NEAR_BLR, currentLocationUpdatedAt: Date.now() },
+      ),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('not_authorized');
+  });
+
+  test('§A: shopOwner claim present but empty callerShopId → not_authorized', async () => {
+    // isCallerShopOwner=true but no shopId claim — incomplete claim
+    // set; must not grant access.
+    const result = await getLivePartnerEtaPure({
+      orderId: 'o1',
+      callerUid: 'owner_uid',
+      callerShopId: '',
+      isCallerShopOwner: true,
+      db: makeDb(
+        {
+          customerUid: 'customer_A',
+          shopId: 'shop_1',
+          deliveryPersonId: 'p1',
+          shopLocation: BLR,
+        },
+        { currentLocation: NEAR_BLR, currentLocationUpdatedAt: Date.now() },
+      ),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('not_authorized');
   });
 
   test('no deliveryPersonId → no_partner', async () => {

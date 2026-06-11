@@ -46,6 +46,10 @@ export type ResetPilotFlags = {
   skipStorage: boolean;
   /** Override for `ADMIN_PROTECT_UID` env var. */
   adminUid: string | null;
+  // PR 39.2 — explicit operator acknowledgement that pilot is
+  // live and they intend disaster recovery. NEVER use this
+  // casually; the live-pilot guard exists for a reason.
+  iKnowPilotIsLive: boolean;
 };
 
 /**
@@ -72,6 +76,7 @@ export function parseFlags(argv: string[]): ResetPilotFlags {
     yes: false,
     skipStorage: false,
     adminUid: null,
+    iKnowPilotIsLive: false,
   };
 
   for (const raw of argv) {
@@ -89,10 +94,13 @@ export function parseFlags(argv: string[]): ResetPilotFlags {
         );
       }
       flags.adminUid = v;
+    } else if (raw === '--i-know-pilot-is-live') {
+      flags.iKnowPilotIsLive = true;
     } else {
       throw new Error(
         `Unknown flag: "${raw}". Recognised flags:\n` +
-          '  --execute, --yes, --skip-storage, --admin-uid=<uid>',
+          '  --execute, --yes, --skip-storage, --admin-uid=<uid>,\n' +
+          '  --i-know-pilot-is-live',
       );
     }
   }

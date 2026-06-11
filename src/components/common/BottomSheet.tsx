@@ -98,7 +98,14 @@ export default function BottomSheet({
       >
         {keyboardAvoid ? (
           <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            // HOTFIX 2026-06-10 — Android needs `behavior: 'height'`
+            // (not undefined) for KeyboardAvoidingView to actually
+            // move the sheet above the keyboard. Pre-hotfix the
+            // ResponseModal (PR-5.1 §C), SaveCurrentLocationModal,
+            // and CancelAndRefundModal all had keyboard covering
+            // their TextInputs on Android because behavior=undefined
+            // made the wrapper inert. iOS stays on 'padding'.
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
             style={styles.kbWrap}
           >
             {body}

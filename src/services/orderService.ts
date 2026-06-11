@@ -1039,10 +1039,28 @@ export const orderService = {
   // (admin queue), approveDeliveryRole / rejectDeliveryRole (admin
   // actions). No direct Firestore reads on deliveryRequests/* from the
   // client — callables only.
+  // PR-NEXT-PARTNER-PHOTO §B — DO NOT REMOVE.
+  async getPartnerPhotoUploadUrl(
+    contentType: string,
+  ): Promise<{ uploadUrl: string; storagePath: string }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'getPartnerPhotoUploadUrl',
+      );
+      const result = await fn({ contentType });
+      return result.data as { uploadUrl: string; storagePath: string };
+    }
+    const fn = httpsCallable(functions, 'getPartnerPhotoUploadUrl');
+    const result = await fn({ contentType });
+    return result.data as { uploadUrl: string; storagePath: string };
+  },
+
   async requestDeliveryRole(form: {
     name?: string;
     vehicleType?: string;
     city?: string;
+    // PR-NEXT-PARTNER-PHOTO §C — DO NOT REMOVE.
+    profilePhotoUrl?: string;
   }): Promise<{ ok: boolean }> {
     if (isNative) {
       const fn = getNativeFunctions().httpsCallable('requestDeliveryRole');
@@ -1825,6 +1843,15 @@ export const orderService = {
   async getMyDeliverySettings(): Promise<{
     deliveryStatus: 'online' | 'offline';
     notificationRadiusKm: number;
+    // PR-NEXT-BUNDLE-D §B/§C — profile + alert display fields.
+    lowRatingThreshold?: number | null;
+    lowRatingNotificationsEnabled?: boolean | null;
+    displayName?: string | null;
+    name?: string | null;
+    vehicleType?: string | null;
+    profilePhotoUrl?: string | null;
+    deliveryRatingAvg?: number | null;
+    deliveryRatingCount?: number | null;
   }> {
     if (isNative) {
       const fn = getNativeFunctions().httpsCallable(
@@ -1842,6 +1869,242 @@ export const orderService = {
       deliveryStatus: 'online' | 'offline';
       notificationRadiusKm: number;
     };
+  },
+
+  // PR-NEXT-LOW-RATING-PUSH §D — rating alert settings callables.
+
+  async updateShopRatingAlertSettings(input: {
+    shopId?: string;
+    threshold?: number;
+    enabled?: boolean;
+  }): Promise<{ ok: true }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'updateShopRatingAlertSettings',
+      );
+      const res = await fn(input);
+      return res.data as { ok: true };
+    }
+    const fn = httpsCallable(functions, 'updateShopRatingAlertSettings');
+    const res = await fn(input);
+    return res.data as { ok: true };
+  },
+
+  async updatePartnerRatingAlertSettings(input: {
+    threshold?: number;
+    enabled?: boolean;
+  }): Promise<{ ok: true }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'updatePartnerRatingAlertSettings',
+      );
+      const res = await fn(input);
+      return res.data as { ok: true };
+    }
+    const fn = httpsCallable(functions, 'updatePartnerRatingAlertSettings');
+    const res = await fn(input);
+    return res.data as { ok: true };
+  },
+
+  // PR-NEXT-BUNDLE-D §F — DO NOT REMOVE. Delivery partner self-service
+  // profile edit (display name / vehicle / photo).
+  async updateMyDeliveryProfile(input: {
+    displayName?: string;
+    vehicleType?: 'motorbike' | 'bicycle' | 'on_foot' | 'car';
+    profilePhotoUrl?: string;
+  }): Promise<{ ok: true; changed: number }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('updateMyDeliveryProfile');
+      const res = await fn(input);
+      return res.data as { ok: true; changed: number };
+    }
+    const fn = httpsCallable(functions, 'updateMyDeliveryProfile');
+    const res = await fn(input);
+    return res.data as { ok: true; changed: number };
+  },
+
+  // PR-NEXT-BUNDLE-D §D — DO NOT REMOVE. Delivery partner earnings.
+  async listMyEarnings(input?: {
+    from?: number;
+    limit?: number;
+  }): Promise<{
+    ok: true;
+    today: { totalRupees: number; count: number };
+    week: { totalRupees: number; count: number };
+    deliveries: Array<{
+      orderId: string;
+      shopName: string | null;
+      deliveryFee: number;
+      deliveredAt: number;
+    }>;
+    hasMore: boolean;
+    nextCursor: number | null;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('listMyEarnings');
+      const res = await fn(input ?? {});
+      return res.data as any;
+    }
+    const fn = httpsCallable(functions, 'listMyEarnings');
+    const res = await fn(input ?? {});
+    return res.data as any;
+  },
+
+  // PR-NEXT-REVIEW-SYSTEM §E — review correction workflow callables.
+
+  async respondToReview(input: {
+    ratingId: string;
+    responseText: string;
+  }): Promise<{ ok: true; state: string }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('respondToReview');
+      const res = await fn(input);
+      return res.data as { ok: true; state: string };
+    }
+    const fn = httpsCallable(functions, 'respondToReview');
+    const res = await fn(input);
+    return res.data as { ok: true; state: string };
+  },
+
+  async amendRating(input: {
+    ratingId: string;
+    newShopStars?: number;
+    newDeliveryStars?: number;
+  }): Promise<{ ok: true; state: string }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('amendRating');
+      const res = await fn(input);
+      return res.data as { ok: true; state: string };
+    }
+    const fn = httpsCallable(functions, 'amendRating');
+    const res = await fn(input);
+    return res.data as { ok: true; state: string };
+  },
+
+  async acknowledgeReview(input: {
+    ratingId: string;
+  }): Promise<{ ok: true; state: string }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('acknowledgeReview');
+      const res = await fn(input);
+      return res.data as { ok: true; state: string };
+    }
+    const fn = httpsCallable(functions, 'acknowledgeReview');
+    const res = await fn(input);
+    return res.data as { ok: true; state: string };
+  },
+
+  async listShopReviews(input: {
+    shopId: string;
+    limit?: number;
+    cursor?: number;
+    // PR-NEXT-BUNDLE-E §E — admin moderation scope.
+    adminScope?: boolean;
+  }): Promise<{
+    ok: true;
+    reviews: Array<{
+      ratingId: string;
+      correctionState?: string | null;
+      shopStars: number;
+      shopComment: string | null;
+      deliveryStars: number | null;
+      customerName: string | null;
+      submittedAt?: number | null;
+      publishedAt: number;
+      responseText: string | null;
+      responseBy: string | null;
+    }>;
+    hasMore: boolean;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('listShopReviews');
+      const res = await fn(input);
+      return res.data as any;
+    }
+    const fn = httpsCallable(functions, 'listShopReviews');
+    const res = await fn(input);
+    return res.data as any;
+  },
+
+  // PR-NEXT-5.1 §D — partner reviews callable wrapper.
+  async listPartnerReviews(input: {
+    partnerUid: string;
+    limit?: number;
+    cursor?: number;
+    // PR-NEXT-BUNDLE-E §E — admin moderation scope.
+    adminScope?: boolean;
+  }): Promise<{
+    ok: true;
+    reviews: Array<{
+      ratingId: string;
+      correctionState?: string | null;
+      deliveryStars: number;
+      deliveryComment: string | null;
+      customerName: string | null;
+      submittedAt?: number | null;
+      publishedAt: number;
+      responseText: string | null;
+      responseBy: string | null;
+    }>;
+    hasMore: boolean;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('listPartnerReviews');
+      const res = await fn(input);
+      return res.data as any;
+    }
+    const fn = httpsCallable(functions, 'listPartnerReviews');
+    const res = await fn(input);
+    return res.data as any;
+  },
+
+  // PR-NEXT-BUNDLE-E §D — DO NOT REMOVE. Admin order review thread.
+  async getOrderReviewThread(input: { orderId: string }): Promise<{
+    ok: true;
+    hasReview: boolean;
+    review: {
+      ratingId: string;
+      correctionState: string | null;
+      shopStars: number | null;
+      deliveryStars: number | null;
+      shopComment: string | null;
+      deliveryComment: string | null;
+      customerName: string | null;
+      responseText: string | null;
+      responseBy: string | null;
+    } | null;
+    timeline: Array<{
+      type: 'submitted' | 'response' | 'amended' | 'published';
+      at: number;
+      [k: string]: unknown;
+    }>;
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('getOrderReviewThread');
+      const res = await fn(input);
+      return res.data as any;
+    }
+    const fn = httpsCallable(functions, 'getOrderReviewThread');
+    const res = await fn(input);
+    return res.data as any;
+  },
+
+  async updateAdminRatingAlertConfig(input: {
+    shopDefaultThreshold?: number;
+    partnerDefaultThreshold?: number;
+    adminThreshold?: number;
+    adminNotificationsEnabled?: boolean;
+  }): Promise<{ ok: true }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable(
+        'updateAdminRatingAlertConfig',
+      );
+      const res = await fn(input);
+      return res.data as { ok: true };
+    }
+    const fn = httpsCallable(functions, 'updateAdminRatingAlertConfig');
+    const res = await fn(input);
+    return res.data as { ok: true };
   },
 
   // Polling helpers — same shape as watchShopOrders / watchAllOrders.

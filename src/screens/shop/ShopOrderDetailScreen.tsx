@@ -33,7 +33,22 @@ import {
     nextActionsFor,
     OrderStatus,
 } from '../../utils/orderStateMachine';
+// PR-NEXT-BUNDLE-B §A (Finding #9) — DO NOT REMOVE. Shop owners now
+// see the same live partner ETA the customer sees via useLivePartnerEta.
+// The callable gate was extended to allow shopOwner claims in the
+// same PR. Auto-formatter risk: if tsc complains about this import,
+// re-add this block.
+import { useLivePartnerEta } from '../../hooks/useLivePartnerEta';
 import { useShopOrderDetail } from './ShopOrderDetailScreen.useShopOrderDetail';
+// PR-NEXT-PARTNER-PHOTO §G — DO NOT REMOVE. Photo-vs-initials avatar
+// for the assigned delivery partner card below.
+import { formatPartnerAvatar } from '../../utils/formatPartnerAvatar';
+// PR-NEXT-BUNDLE-E §A — DO NOT REMOVE. Trust line (rating + vehicle)
+// for the shop-side partner card. Auto-formatter strip risk.
+import { formatPartnerTrust } from '../../utils/formatPartnerTrust';
+// PR-NEXT-5.1 §A — DO NOT REMOVE. Respond-to-review banner + modal.
+import ResponseModal from '../../components/order/ResponseModal';
+import { orderService } from '../../services/orderService';
 
 /**
  * Per-order detail screen for shop owners. Mirrors the customer
@@ -80,6 +95,18 @@ export default function ShopOrderDetailScreen() {
     retry,
   } = useShopOrderDetail(orderId);
 
+  // PR-NEXT-5.1 §A — review response state. Declared above early returns
+  // (Rules of Hooks). `respondModalOpen` toggles the ResponseModal.
+  const [respondModalOpen, setRespondModalOpen] = useState(false);
+  const [responseSubmitting, setResponseSubmitting] = useState(false);
+
+  // PR-NEXT-BUNDLE-E §A — partner phone reveal (post-pickup only).
+  // Server gate (getDeliveryPartnerContactPure) authorizes the shop
+  // owner of this order's shop. Declared above early returns (Rules
+  // of Hooks).
+  const [partnerPhone, setPartnerPhone] = useState<string | null>(null);
+  const [revealingPhone, setRevealingPhone] = useState(false);
+
   // PR 12 — ETA prompt state. MUST be declared HERE (before any
   // conditional early returns below) because React's Rules of Hooks
   // require the same hook call order on every render. Previously this
@@ -95,6 +122,18 @@ export default function ShopOrderDetailScreen() {
     action: OrderStatus;
     minutes: string;
   } | null>(null);
+
+  // PR-NEXT-BUNDLE-B §A (Finding #9) — DO NOT REMOVE. Live partner
+  // ETA polling. Only runs when the partner is en route (status is
+  // 'ready_for_pickup'). `enabled=true` here because the screen itself
+  // is already open; the order status arg stops polling once delivered.
+  // The callable's shopOwner gate was extended in this PR so this poll
+  // is authorized for the shop owner.
+  const livePartnerEta = useLivePartnerEta(
+    orderId,
+    order?.status === 'ready_for_pickup',
+    order?.status,
+  );
 
   // Role guard: if the caller isn't a shop owner at all, the
   // navigation entry point shouldn't have been visible — but in
@@ -269,8 +308,16 @@ export default function ShopOrderDetailScreen() {
           </Text>
           {order.status !== 'delivered' &&
             order.status !== 'cancelled' &&
-            minutesLeft > 0 && (
-              <Text style={styles.eta}>ETA ~{minutesLeft} min</Text>
+            // PR-NEXT-BUNDLE-B §A (Finding #9) — DO NOT REMOVE. Show
+            // live partner ETA when available (partner en route);
+            // fall back to static at-order estimate otherwise.
+            (livePartnerEta.etaMin != null
+              ? <Text style={styles.eta}>
+                  ETA ~{Math.max(1, Math.round(livePartnerEta.etaMin))} min{livePartnerEta.stale ? ' ~' : ''}
+                </Text>
+              : minutesLeft > 0 && (
+                  <Text style={styles.eta}>ETA ~{minutesLeft} min</Text>
+                )
             )}
         </View>
 
@@ -290,6 +337,152 @@ export default function ShopOrderDetailScreen() {
             <Text style={styles.callHint}>Tap to call</Text>
           </Pressable>
         </View>
+
+        {/* PR-NEXT-BUNDLE-E §A — delivery partner card. Photo + name +
+            tappable rating row (→ PartnerReviews) + vehicle/status +
+            post-pickup Call CTA (gated server-side to this shop's
+            owner). */}
+        {order.deliveryPersonId && (
+          <>
+            <Text style={styles.sectionTitle}>Delivery partner</Text>
+            {(() => {
+              const av = formatPartnerAvatar(
+                order.deliveryPersonName ?? null,
+                order.deliveryPersonPhotoUrl ?? null,
+              );
+              const trust = formatPartnerTrust({
+                ratingAvg: order.deliveryPersonRating ?? null,
+                ratingCount: order.deliveryPersonDeliveriesCount ?? null,
+                vehicleType: order.deliveryPersonVehicleType ?? null,
+              });
+              const pickedUp = order.pickedUpAt != null;
+              const statusLabel = pickedUp
+                ? 'On the way to the customer'
+                : 'Heading to your shop';
+              return (
+                <View style={styles.card}>
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: spacing.md,
+                    }}
+                  >
+                    {av.kind === 'photo' ? (
+                      <Image
+                        source={{ uri: av.uri }}
+                        style={styles.partnerAvatar}
+                        accessibilityLabel={`Photo of ${order.deliveryPersonName ?? 'delivery partner'}`}
+                      />
+                    ) : (
+                      <View style={styles.partnerAvatarPlaceholder}>
+                        <Text style={styles.partnerAvatarText}>{av.text}</Text>
+                      </View>
+                    )}
+                    <View style={{ flex: 1 }}>
+                      <Text style={typography.bodyBold} numberOfLines={1}>
+                        {order.deliveryPersonName ?? 'Partner assigned'}
+                      </Text>
+                      {/* Tappable rating row → partner public reviews. */}
+                      <Pressable
+                        onPress={() =>
+                          nav.navigate('PartnerReviews', {
+                            partnerUid: order.deliveryPersonId!,
+                            partnerName: order.deliveryPersonName ?? undefined,
+                          })
+                        }
+                        accessibilityRole="button"
+                        accessibilityLabel="View partner reviews"
+                      >
+                        <Text style={styles.partnerTrustLine}>
+                          {trust.trustLine} ›
+                        </Text>
+                      </Pressable>
+                      <Text style={styles.partnerStatusLine}>
+                        {trust.vehicleIcon} {statusLabel}
+                      </Text>
+                    </View>
+                  </View>
+                  {/* Post-pickup phone reveal — pre-pickup stays hidden. */}
+                  {pickedUp &&
+                    (partnerPhone ? (
+                      <Pressable
+                        onPress={() =>
+                          Linking.openURL(`tel:${partnerPhone}`).catch(() => {})
+                        }
+                        style={styles.partnerCallBtn}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Call ${order.deliveryPersonName ?? 'partner'}`}
+                      >
+                        <Text style={styles.partnerCallText}>
+                          📞 {partnerPhone}
+                        </Text>
+                      </Pressable>
+                    ) : (
+                      <Pressable
+                        onPress={async () => {
+                          setRevealingPhone(true);
+                          try {
+                            const { phone } =
+                              await orderService.getDeliveryPartnerContact(
+                                orderId,
+                              );
+                            setPartnerPhone(phone);
+                          } catch (e: any) {
+                            Alert.alert(
+                              'Could not get phone',
+                              e?.message || 'Please try again.',
+                            );
+                          } finally {
+                            setRevealingPhone(false);
+                          }
+                        }}
+                        disabled={revealingPhone}
+                        style={styles.partnerCallBtn}
+                        accessibilityRole="button"
+                        accessibilityLabel="Reveal partner phone"
+                      >
+                        <Text style={styles.partnerCallText}>
+                          {revealingPhone ? 'Loading…' : `📞 Call ${order.deliveryPersonName ?? 'partner'}`}
+                        </Text>
+                      </Pressable>
+                    ))}
+                </View>
+              );
+            })()}
+          </>
+        )}
+
+        {/* PR-NEXT-BUNDLE-E §B — customer's rating of this order.
+            Shown once the customer has rated (any correctionState).
+            Reads flat order fields; the shop's own response (if any)
+            is surfaced by the PR-5.1 banner above. */}
+        {order.correctionState && typeof order.shopRating === 'number' && (
+          <>
+            <Text style={styles.sectionTitle}>Customer rated this order</Text>
+            <View style={styles.card}>
+              <Text style={styles.ratingLine}>
+                Shop: {'⭐'.repeat(order.shopRating)}
+              </Text>
+              {typeof order.deliveryRating === 'number' && (
+                <Text style={styles.ratingLine}>
+                  Delivery: {'⭐'.repeat(order.deliveryRating)}
+                </Text>
+              )}
+              {!!order.shopComment && (
+                <Text style={styles.ratingComment}>“{order.shopComment}”</Text>
+              )}
+              {!!order.responseText && (
+                <View style={styles.ratingResponse}>
+                  <Text style={styles.ratingResponseLabel}>Your response</Text>
+                  <Text style={styles.ratingComment}>
+                    “{order.responseText}”
+                  </Text>
+                </View>
+              )}
+            </View>
+          </>
+        )}
 
         {/* Delivery address */}
         <Text style={styles.sectionTitle}>Delivery address</Text>
@@ -489,6 +682,61 @@ export default function ShopOrderDetailScreen() {
           </View>
         )}
 
+        {/* PR-NEXT-5.1 §A — low-rating review banner. Shown only when
+            the order has a correctionState of 'flagged_low' or
+            'responded' (review is private, correction workflow active). */}
+        {(order.correctionState === 'flagged_low' ||
+          order.correctionState === 'responded') && (
+          <View style={styles.reviewBanner}>
+            <Text style={styles.reviewBannerTitle}>
+              ⚠️ Customer left a {order.shopRating ?? '?'}★ rating
+            </Text>
+            {!!order.shopComment && (
+              <Text style={styles.reviewBannerComment}>
+                "{order.shopComment}"
+              </Text>
+            )}
+            {order.correctionState === 'flagged_low' && (
+              <Pressable
+                onPress={() => setRespondModalOpen(true)}
+                style={styles.respondBtn}
+                accessibilityRole="button"
+                accessibilityLabel="Respond to review"
+                disabled={responseSubmitting}
+              >
+                <Text style={styles.respondBtnText}>
+                  📝 Respond to review
+                </Text>
+              </Pressable>
+            )}
+            {order.correctionState === 'responded' && (
+              <>
+                <Text style={styles.reviewResponseLabel}>
+                  Your response:
+                </Text>
+                <Text style={styles.reviewResponseText}>
+                  {order.responseText}
+                </Text>
+                <Text style={styles.reviewWaiting}>
+                  Waiting on customer to acknowledge or amend
+                  {order.responseAt
+                    ? ` · ${Math.max(0, 7 - Math.floor((Date.now() - order.responseAt) / 86400000))} days left`
+                    : ''}
+                  .
+                </Text>
+              </>
+            )}
+          </View>
+        )}
+        {order.correctionState === 'published' && !!order.shopRating && (
+          <View style={[styles.reviewBanner, styles.reviewBannerDone]}>
+            <Text style={styles.reviewBannerTitle}>
+              ✅ Review published — {order.shopRating}★
+              {order.responseText ? ' with your response' : ''}
+            </Text>
+          </View>
+        )}
+
         {/* Action buttons */}
         {actions.length > 0 && (
           <View style={styles.actionsRow}>
@@ -510,6 +758,30 @@ export default function ShopOrderDetailScreen() {
           </View>
         )}
       </ScrollView>
+
+      {/* PR-NEXT-5.1 §A — review response modal. */}
+      <ResponseModal
+        visible={respondModalOpen}
+        onClose={() => setRespondModalOpen(false)}
+        stars={order.shopRating ?? 1}
+        comment={order.shopComment ?? null}
+        responseBy="shop"
+        onSubmit={async (responseText) => {
+          if (!order.ratingId) return;
+          setResponseSubmitting(true);
+          try {
+            await orderService.respondToReview({
+              ratingId: order.ratingId,
+              responseText,
+            });
+            setRespondModalOpen(false);
+          } catch (e: any) {
+            throw e;
+          } finally {
+            setResponseSubmitting(false);
+          }
+        }}
+      />
 
       {/* PR 12 — ETA prompt modal. Opens when the shopkeeper taps
           Accept (mandatory) or Start Preparing (optional update).
@@ -832,5 +1104,103 @@ const styles = StyleSheet.create({
   dropInstructionsValue: {
     ...typography.body,
     color: colors.textPrimary,
+  },
+  // PR-NEXT-PARTNER-PHOTO §G
+  partnerAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+  },
+  partnerAvatarPlaceholder: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.primaryLight,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  partnerAvatarText: { ...typography.bodyBold, color: colors.primaryDark },
+  // PR-NEXT-BUNDLE-E §A/§B — partner trust + customer rating block.
+  partnerTrustLine: {
+    ...typography.caption,
+    color: colors.primary,
+    marginTop: 2,
+  },
+  partnerStatusLine: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  partnerCallBtn: {
+    marginTop: spacing.md,
+    backgroundColor: colors.primaryLight,
+    borderRadius: radii.md,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  partnerCallText: { ...typography.bodyBold, color: colors.primaryDark },
+  ratingLine: { ...typography.body, marginBottom: spacing.xs },
+  ratingComment: {
+    ...typography.body,
+    color: colors.textSecondary,
+    fontStyle: 'italic',
+    marginTop: spacing.xs,
+  },
+  ratingResponse: {
+    marginTop: spacing.sm,
+    paddingLeft: spacing.md,
+    borderLeftWidth: 3,
+    borderLeftColor: colors.primary,
+  },
+  ratingResponseLabel: { ...typography.caption, color: colors.textSecondary },
+  // PR-NEXT-5.1 §A — review correction workflow banner styles.
+  reviewBanner: {
+    backgroundColor: '#FEF9E7',
+    borderRadius: radii.md,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: '#F4D03F',
+    marginTop: spacing.md,
+  },
+  reviewBannerDone: {
+    backgroundColor: colors.primaryLight,
+    borderColor: colors.primary,
+  },
+  reviewBannerTitle: {
+    ...typography.bodyBold,
+    color: colors.textPrimary,
+    marginBottom: spacing.xs,
+  },
+  reviewBannerComment: {
+    ...typography.body,
+    color: colors.textSecondary,
+    fontStyle: 'italic',
+    marginBottom: spacing.sm,
+  },
+  respondBtn: {
+    marginTop: spacing.sm,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    backgroundColor: colors.primary,
+    borderRadius: radii.sm,
+    alignSelf: 'flex-start',
+  },
+  respondBtnText: { ...typography.bodyBold, color: '#fff' },
+  reviewResponseLabel: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '700',
+    marginTop: spacing.sm,
+    marginBottom: 2,
+  },
+  reviewResponseText: {
+    ...typography.body,
+    color: colors.textPrimary,
+    marginBottom: spacing.xs,
+  },
+  reviewWaiting: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontStyle: 'italic',
   },
 });

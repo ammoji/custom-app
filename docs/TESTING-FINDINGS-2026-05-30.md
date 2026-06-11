@@ -432,6 +432,32 @@ Two new findings from Sudhir's June 2 morning testing of the just-shipped HOTFIX
   - **Suite at 1299 / 1299** (was 1282; +17). `tsc --noEmit` clean for both `src/` and `functions/`.
   - **Deferred (explicit out-of-scope, §I):** map-based location editor in RegisterShop (drag pin); periodic re-verification of shop location; custom `serviceRadiusKm` at registration time; bulk-fixing existing location-less shops via code (handled operationally per §E — let them disappear, owners re-capture).
 
+### June 9 e2e retest — Bundle A + Bundle B + Phase B planning
+
+Sudhir's full e2e pass after the Devin/Cascade migration surfaced 16 findings. Triaged into:
+
+- **Self-resolved on second test run:** #1 cart bar safe area (HOTFIX-7 BottomSheet already shipped; second test caught it post-reinstall), #7 pay-online during prep (was the same code, perception fix on reinstall).
+- **Bundle A — ✅ SHIPPED via Cascade-on-Sonnet (1342 → 1351, +9 exact):**
+  - #2 Cart consistency — `resolveCustomerDeliveryReference` pure helper (default address pin → live GPS → null priority); CartScreen + ShopDetailScreen migrated. Cart, shop, checkout numbers now match.
+  - #6 Status message confusion — JSX gate on `readyByEstimate` sub-message hides on `ready_for_pickup` and later. Belt-and-suspenders on top of orderEtaDisplay state machine.
+  - #12a Polling stop — `useLivePartnerEta` gets `orderStatus` arg + `FINALIZED_STATUSES = ['delivered', 'cancelled']` + exported `shouldPoll` pure helper. PartnerDetailsSheet renders static "Delivered"/"Cancelled" row instead of stale live ETA.
+  - #14 Keyboard avoidance — `RateOrderCard` wrapped in `KeyboardAvoidingView`.
+  - Bonus audit: ShopListScreen call site deferred to Bundle NEXT per scope boundary.
+- **Bundle B — ✅ SHIPPED via Cascade-on-Sonnet (1351 → 1362, +11 exact):**
+  - #9 ETA consistency across roles — `getLivePartnerEta` server gate extended to allow shop owner of the order's shop. Pure helper now takes `isCallerShopOwner` + `callerShopId`; failure code renamed `not_customer` → `not_authorized` for broader audience. `ShopOrderDetailScreen` uses `useLivePartnerEta` hook for live ETA matching customer's PartnerDetailsSheet. +6 tests in `getLivePartnerEtaHelpers.test.ts`.
+  - #10 One-tap call — `onCallPartner` handler fetches phone if not cached + opens dialer in same tap. `PartnerDetailsSheet` collapses three-state phone disclosure into single "📞 Call partner" CTA. `OrderDetailScreen` wires the handler.
+  - #13 Mandatory delivery proof — new pure helper `validateMarkDeliveredProofGate` in `functions/src/markDeliveredHelpers.ts` returns discriminated-union Result per Rule 14. `markDelivered` server callable gates on `proofPhotoUrl` present. Client `DeliveryDashboardScreen` + `DeliveryOrderDetailScreen` disable Delivered button when `!deliveryProofStoragePath` with inline hint. +6 tests in `markDeliveredHelpers.test.ts`.
+  - Deliberate-break demo confirmed tests pin the bug (corrupted `not_customer` → `not_authorized` swap; 1 test failed; restored).
+  - Pending Sudhir deploy: server-first (`firebase deploy --only functions:getLivePartnerEta,functions:markDelivered`) + IAM verify both + client OTA bundling Bundle A + B.
+- **Investigated, not a bug — #5 partner push at ready_for_pickup:** Function logs (`firebase functions:log --only sendNewPickupPushToDelivery`) showed `sent 1 push(es) for order ORD-... status: ok` from `2026-06-09T18:59:26Z`. Server-side fan-out fires correctly. Root cause was solo-testing role-switching on a single device — PR 24 push-token cleanup removes the previous role's FCM token on sign-out, so when shopkeeper signs in on the iPhone that previously had delivery partner signed in, the partner's `users/{uid}.fcmTokens` becomes empty. Push goes nowhere observable. Sudhir moved to multi-device test setup (one phone per role) which will validate this properly on next retest. **No code fix needed.**
+- **Phase B picks (scope locked, prompts to draft after Bundle B ships):**
+  - **#11 Partner profile photo** — mandatory at delivery profile onboarding. Storage at `delivery-profile/{uid}.jpg`; URL denormalized onto order at claim time (same pattern as `displayName`).
+  - **#12b Live navigation** — static map preview (Google Static Maps API free tier; 1000 loads/day; pilot scale uses ~20/day; no recurring cost). Shop pin + drop pin + straight line. Defers full live map to post-pilot.
+  - **#15 Low-rating fan-out** — per-role configurable threshold + opt-in per shop/partner/admin. Settings UI per role + server-side fan-out callable.
+  - **#16 Review system** — full correction workflow: customer rates → if low rating, shop/partner notified (overlaps #15), can respond → customer can amend rating after issue resolved. Public listing of acknowledged reviews only.
+
+Discipline tweak shipped via Rule W extension: **Autonomous execution authorization block** in every prompt henceforth — explicit green-light list (file edits, tests, tsc, lint, builds) + red-light list (deploys, IAM, force-push, schema additions outside spec). Cascade runs through specs without per-step confirmation; only stops for irreversible operations or scope-creep decisions. Sudhir's reported pain point was the every-minute "Run?" / "Execute?" dialogs; the block addresses it at prompt-level (model intent) but Cascade's UI gate may still require him to find a Trust Mode setting in Devin → Cascade Settings.
+
 ### June 2 observation — US friend's shop registered with Faridabad pin (MOCK_USER_LOCATION leak)
 
 - **Symptom:** Sudhir's US friend registered a shop with the address `16663 Chesterfield Farms Drive, Ballwin MO 63005`. The shop submitted with `location: { lat: 28.5605, lng: 77.2065 }` — Faridabad coords, not Ballwin. Admin opened ShopRegistrationDetail and the "Verify on map" deeplink pointed to Faridabad. Owner had no way to update the pin post-rejection — there's no Location section in ShopSettings today.

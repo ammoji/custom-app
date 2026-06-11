@@ -50,6 +50,12 @@ import {
   type DeletionPlan,
   type ResetFlags,
 } from './reset-test-data.helpers';
+// PR 39.2 — DO NOT REMOVE. Live-pilot guard helpers used in main() below.
+import {
+  buildLivePilotRefuseBanner,
+  evaluateLivePilotGuard,
+  parsePilotStatusFlag,
+} from './livePilotGuardHelpers';
 
 // Re-export so tests can `import { ... } from '../../scripts/reset-test-data'`
 // without forcing the firebase-admin side-effect path. (Tests import
@@ -247,6 +253,13 @@ type AuditLog = {
     users: number;
     authUsers: number;
   };
+  // PR 39.2 — live-pilot guard verdict recorded in every run so
+  // a future audit can see whether the override was used.
+  livePilotGuard: {
+    isLive: boolean;
+    overrideAcknowledged: boolean;
+    verdict: 'pilot_not_live' | 'override_acknowledged';
+  };
   errors: Array<{
     phase: string;
     message: string;
@@ -278,6 +291,29 @@ function writeAuditLog(audit: AuditLog): string {
   const path = join(dir, fname);
   writeFileSync(path, JSON.stringify(audit, null, 2));
   return path;
+}
+
+// -------------------------------------------------------------------
+// Live-pilot guard — reads appConfig/pilotStatus with fail-CLOSED posture
+// -------------------------------------------------------------------
+
+/**
+ * PR 39.2 — Read appConfig/pilotStatus.isLive from Firestore.
+ * Fail-CLOSED: any read error is treated as isLive=true to prevent
+ * an outage from bypassing the guard.
+ */
+async function readPilotStatusIsLive(db: Firestore): Promise<boolean> {
+  try {
+    const snap = await db.doc('appConfig/pilotStatus').get();
+    if (!snap.exists) return false; // pre-pilot — missing doc means safe
+    return parsePilotStatusFlag(snap.data());
+  } catch (err) {
+    console.error(
+      `${C.red}[livePilotGuard] flag read failed; FAILING CLOSED${C.reset}`,
+      err,
+    );
+    return true; // can't confirm safety → treat as live
+  }
 }
 
 // -------------------------------------------------------------------
@@ -326,6 +362,30 @@ async function main(): Promise<number> {
   // 4. Project allowlist guard — FIRST thing after init.
   assertProjectAllowed(sa.project_id);
 
+  // 4a. PR 39.2 — Live-pilot guard. Runs in both dry-run and execute
+  //     modes so operators see the refuse banner before they ever
+  //     pass --execute.
+  const isLive = await readPilotStatusIsLive(db);
+  const verdict = evaluateLivePilotGuard({
+    isLive,
+    overrideAcknowledged: flags.iKnowPilotIsLive,
+  });
+
+  if (!verdict.ok) {
+    console.error('\n' + buildLivePilotRefuseBanner() + '\n');
+    process.exit(1);
+  }
+
+  if (verdict.reason === 'override_acknowledged') {
+    console.log(`\n${C.red}${C.bold}⚠️  --i-know-pilot-is-live USED${C.reset}`);
+    console.log(`${C.yellow}    Pilot IS live. Operator override acknowledged.`);
+    console.log(`    This action will be in the audit log.${C.reset}\n`);
+  }
+
+  console.log(
+    `${C.dim}  pilot guard   isLive=${isLive} verdict=${verdict.reason}${C.reset}`,
+  );
+
   banner(`reset-test-data — project: ${sa.project_id}`);
   console.log(`  service account: ${sa.client_email}`);
   console.log(`  protected admin UID: ${adminUid || '(unset — will abort)'}`);
@@ -373,6 +433,12 @@ async function main(): Promise<number> {
     flags,
     plan,
     actual: { orders: 0, shops: 0, menu: 0, users: 0, authUsers: 0 },
+    // PR 39.2 — guard verdict recorded for every run (incl. dry-run).
+    livePilotGuard: {
+      isLive,
+      overrideAcknowledged: flags.iKnowPilotIsLive,
+      verdict: verdict.reason as 'pilot_not_live' | 'override_acknowledged',
+    },
     errors: [],
   };
 

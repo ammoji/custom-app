@@ -152,6 +152,26 @@ export type Shop = {
   // every surface reads `ratingAvg` exclusively.
   ratingAvg?: number;
   ratingCount?: number;
+  // PR-NEXT-REVIEW-SYSTEM §A — published review cache for public listing.
+  // Top-5 most-recent published reviews cached here so the shop
+  // listing + ShopReviewsScreen can render without a sub-collection
+  // read on every load. Cleared and rebuilt by amendRating /
+  // acknowledgeReview / publishTimedOutReviews on each publish.
+  publicReviewCount?: number;
+  publicReviewLatest?: Array<{
+    ratingId: string;
+    stars: number;
+    comment?: string | null;
+    customerName?: string | null;
+    publishedAt: number;
+    responseText?: string | null;
+  }>;
+  // PR-NEXT-LOW-RATING-PUSH §A — per-shop notification threshold
+  // override. When null/undefined, falls back to
+  // appConfig/ratingAlerts.shopDefaultThreshold (default 3).
+  // Schema-additive; absent on legacy shops.
+  lowRatingThreshold?: number | null;
+  lowRatingNotificationsEnabled?: boolean | null;
 };
 
 // Returned by `listAllUsers` callable. Mirrors the subset of
@@ -181,6 +201,16 @@ export type UserInfo = {
   // partner doesn't surface a misleading "0★" badge.
   deliveryRatingAvg?: number;
   deliveryRatingCount?: number;
+  // PR-NEXT-REVIEW-SYSTEM §A — published delivery partner review cache.
+  publicReviewCount?: number;
+  publicReviewLatest?: Array<{
+    ratingId: string;
+    stars: number;
+    comment?: string | null;
+    customerName?: string | null;
+    publishedAt: number;
+    responseText?: string | null;
+  }>;
 };
 
 export type Product = {
@@ -398,6 +428,9 @@ export type DeliveryRequest = {
   name?: string;
   vehicleType?: string;
   city?: string;
+  // PR-NEXT-PARTNER-PHOTO §C — mandatory face photo URL submitted at
+  // onboarding. Optional here for back-compat with legacy requests.
+  profilePhotoUrl?: string;
   submittedAt: number; // epoch ms
   status: DeliveryRequestStatus;
   approvedAt?: number;
@@ -428,6 +461,11 @@ export type UserProfile = {
   // is gone. But the customer's separate favorite for "Aashirvaad
   // atta 5kg" at Test Kirana 2 keeps working independently.
   favorites?: Record<string, string[]>;
+  // PR-NEXT-LOW-RATING-PUSH §A — per-partner threshold override.
+  // Customer users may have these set too but they have no effect
+  // (no fan-out targets a customer). Schema-additive.
+  lowRatingThreshold?: number | null;
+  lowRatingNotificationsEnabled?: boolean | null;
 };
 
 export type PaymentMethod = 'cod' | 'online';
@@ -589,6 +627,12 @@ export type Order = {
     | 'on_foot'
     | 'car'
     | null;
+  // PR-NEXT-PARTNER-PHOTO §E — partner face photo URL, denormalized
+  // at claim time alongside the other trust signals. Nullable /
+  // optional: legacy orders (pre-this-PR) and partners who skipped
+  // onboarding before the photo was mandatory omit this field. Caller
+  // must fall back to the initials avatar via `formatPartnerAvatar`.
+  deliveryPersonPhotoUrl?: string | null;
   pickedUpAt: number | null;
   deliveredAt: number | null;
   // Audit trail of every status change. Server (Cloud Functions) is
@@ -638,6 +682,23 @@ export type Order = {
   // failing the whole submission).
   deliveryRating?: 1 | 2 | 3 | 4 | 5;
   deliveryComment?: string;
+  // PR-NEXT-REVIEW-SYSTEM §A — correction state machine for low-rating
+  // reviews. Fields are absent on legacy orders (treated as
+  // 'published' by inference). All optional + nullable for
+  // back-compat. correctionState is the authoritative signal;
+  // the remaining fields are populated as the state advances.
+  correctionState?: 'submitted' | 'flagged_low' | 'responded' | 'amended' | 'published' | null;
+  responseText?: string | null;
+  responseBy?: 'shop' | 'partner' | null;
+  responseAt?: number | null;
+  amendedStars?: { shopStars?: number; deliveryStars?: number } | null;
+  amendedAt?: number | null;
+  publishedAt?: number | null;
+  publishedReason?: 'above_threshold' | 'customer_acknowledged' | 'customer_amended' | 'timeout' | null;
+  // PR-NEXT-REVIEW-SYSTEM §A — ratingId for the reviews sub-collection
+  // document written by submitOrderRating. Stored on the order doc
+  // so callables can look up the review without an extra query.
+  ratingId?: string | null;
   // PR 21 — customer's substitution preference. Captured ONCE at
   // checkout. Tells the shop how to handle an item that turns out
   // to be unavailable mid-fulfillment without a call interrupting
@@ -670,6 +731,15 @@ export type Order = {
   // by `recordDeliveryProofUpload` via serverTimestamp(). Bumps on
   // re-upload (overwrite at the same storagePath).
   deliveryProofUploadedAt?: number | null;
+
+  // PR-NEXT-PARTNER-HEADS-UP — idempotency marker. Set by the
+  // `sendPickupHeadsUpToDelivery` trigger on first successful fan-out.
+  // Once set, subsequent updates to the order doc that keep status
+  // at 'accepted' don't re-fire the push. Cleared if the order is
+  // rejected back to 'pending' (rare) so a re-acceptance can re-push.
+  // Optional / schema-additive: absent on legacy orders and on orders
+  // accepted before this PR ships.
+  headsUpSentAt?: number | null;
 };
 
 // PR 21 — substitution preference. Set ONCE at checkout. Tells the

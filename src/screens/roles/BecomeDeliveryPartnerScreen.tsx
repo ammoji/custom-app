@@ -2,6 +2,7 @@ import { useNavigation } from '@react-navigation/native';
 import React, { useEffect, useState } from 'react';
 import {
     Alert,
+    Image,
     Pressable,
     ScrollView,
     StyleSheet,
@@ -18,6 +19,9 @@ import { APP_NAME } from '../../constants/branding';
 import { colors, radii, shadow, spacing, typography } from '../../constants/theme';
 import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
+// PR-NEXT-PARTNER-PHOTO §A — DO NOT REMOVE. Photo capture pipeline
+// (ImagePicker + resize). expo-image-picker is already in deps.
+import { pickAndResizeImage } from '../../utils/imageUpload';
 
 // PR 1 — security hardening. Rewritten from the one-tap self-service
 // flow to an admin-approval form. Mirrors RegisterShopScreen +
@@ -48,6 +52,11 @@ export default function BecomeDeliveryPartnerScreen() {
 
   const [checking, setChecking] = useState(true);
   const [hasPending, setHasPending] = useState(false);
+  // PR-NEXT-PARTNER-PHOTO §A — DO NOT REMOVE. Photo states must sit
+  // at top level (above conditional returns) per code-discipline R2.
+  const [photoUri, setPhotoUri] = useState<string | null>(null);
+  const [photoUploading, setPhotoUploading] = useState(false);
+  const [photoUploadedUrl, setPhotoUploadedUrl] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [vehicleType, setVehicleType] = useState<string | undefined>(
     undefined,
@@ -86,13 +95,64 @@ export default function BecomeDeliveryPartnerScreen() {
     };
   }, [isAnonymous, nav]);
 
+  // PR-NEXT-PARTNER-PHOTO §A — capture photo from camera or gallery,
+  // resize, then mint a signed URL and upload immediately so the URL
+  // is ready when the form is submitted.
+  const handleTakePhoto = async (source: 'camera' | 'gallery') => {
+    const picked = await pickAndResizeImage(source);
+    if (!picked.ok) {
+      if (picked.reason === 'cancelled') return;
+      Alert.alert(
+        'Photo error',
+        picked.message || 'Could not capture photo. Please try again.',
+      );
+      return;
+    }
+    setPhotoUri(picked.uri);
+    setPhotoUploadedUrl(null);
+    setPhotoUploading(true);
+    try {
+      const { uploadUrl, storagePath } =
+        await orderService.getPartnerPhotoUploadUrl('image/jpeg');
+      // Fetch the local file as a Blob, then PUT it to the signed URL.
+      const response = await fetch(picked.uri);
+      const blob = await response.blob();
+      await fetch(uploadUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'image/jpeg' },
+        body: blob,
+      });
+      // Construct the download URL from the storage path.
+      const bucket = 'grocery-mvp-dev.appspot.com'; // project default bucket
+      const encodedPath = encodeURIComponent(storagePath);
+      const downloadUrl = `https://storage.googleapis.com/${bucket}/${encodedPath}`;
+      setPhotoUploadedUrl(downloadUrl);
+    } catch (e: any) {
+      Alert.alert(
+        'Upload failed',
+        e?.message || 'Could not upload photo. Please try again.',
+      );
+      setPhotoUri(null);
+    } finally {
+      setPhotoUploading(false);
+    }
+  };
+
   const handleSubmit = async () => {
+    if (!photoUploadedUrl) {
+      Alert.alert(
+        'Photo required',
+        'Please take a face photo before submitting your application.',
+      );
+      return;
+    }
     setSubmitting(true);
     try {
       await orderService.requestDeliveryRole({
         name: name.trim() || undefined,
         vehicleType,
         city: city.trim() || undefined,
+        profilePhotoUrl: photoUploadedUrl,
       });
       nav.replace('DeliveryApprovalWaiting');
     } catch (e: any) {
@@ -156,6 +216,51 @@ export default function BecomeDeliveryPartnerScreen() {
           Tell us a bit about yourself. An admin will review your application
           (usually within 24 hours) and approve you to start picking up orders.
         </Text>
+
+        {/* PR-NEXT-PARTNER-PHOTO §A — photo capture */}
+        <View style={styles.card}>
+          <Text style={styles.label}>Your Face Photo *</Text>
+          {photoUri ? (
+            <Image
+              // R9: truthy guard applied (photoUri is non-null here)
+              source={{ uri: photoUri }}
+              style={styles.photoPreview}
+              accessibilityLabel="Your face photo preview"
+            />
+          ) : (
+            <View style={styles.photoPlaceholder}>
+              <Text style={styles.photoPlaceholderText}>No photo yet</Text>
+            </View>
+          )}
+          {photoUploading && (
+            <Text style={styles.photoHint}>Uploading…</Text>
+          )}
+          {!photoUploading && photoUploadedUrl && (
+            <Text style={[styles.photoHint, { color: colors.success }]}>
+              ✅ Photo uploaded
+            </Text>
+          )}
+          <View style={styles.photoRow}>
+            <Pressable
+              style={styles.photoBtn}
+              onPress={() => handleTakePhoto('camera')}
+              disabled={photoUploading || submitting}
+              accessibilityRole="button"
+              accessibilityLabel="Take photo with camera"
+            >
+              <Text style={styles.photoBtnText}>📷 Camera</Text>
+            </Pressable>
+            <Pressable
+              style={styles.photoBtn}
+              onPress={() => handleTakePhoto('gallery')}
+              disabled={photoUploading || submitting}
+              accessibilityRole="button"
+              accessibilityLabel="Choose from gallery"
+            >
+              <Text style={styles.photoBtnText}>🖼 Gallery</Text>
+            </Pressable>
+          </View>
+        </View>
 
         <View style={styles.card}>
           <Text style={styles.label}>Name (optional)</Text>
@@ -304,5 +409,54 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.textMuted,
     fontStyle: 'italic',
+  },
+  // PR-NEXT-PARTNER-PHOTO §A
+  photoPreview: {
+    width: 120,
+    height: 120,
+    borderRadius: radii.md,
+    alignSelf: 'center',
+    marginBottom: spacing.sm,
+  },
+  photoPlaceholder: {
+    width: 120,
+    height: 120,
+    borderRadius: radii.md,
+    alignSelf: 'center',
+    marginBottom: spacing.sm,
+    backgroundColor: colors.bg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  photoPlaceholderText: {
+    ...typography.caption,
+    color: colors.textMuted,
+  },
+  photoHint: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    marginBottom: spacing.xs,
+  },
+  photoRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.sm,
+  },
+  photoBtn: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    borderRadius: radii.sm,
+    backgroundColor: colors.bg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+  },
+  photoBtnText: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontWeight: '600',
   },
 });

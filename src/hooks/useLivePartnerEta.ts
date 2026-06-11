@@ -44,9 +44,40 @@ export type LivePartnerEtaState = {
 
 const REFRESH_MS = 30 * 1000;
 
+// PR-NEXT-BUNDLE-A §C (Finding #12a) — DO NOT REMOVE. Finalized
+// statuses that must stop polling even when the sheet is open.
+// Polling against a delivered/cancelled order returns stale
+// "Arriving now" copy because partner→drop distance is ~0.
+const FINALIZED_STATUSES = new Set(['delivered', 'cancelled'] as const);
+
+/**
+ * PR-NEXT-BUNDLE-A §C — pure decision: should the hook poll right now?
+ * Exported so it can be unit-tested without RNTL.
+ * The hook body mirrors this logic exactly.
+ */
+export function shouldPoll(args: {
+  orderId: string | null;
+  enabled: boolean;
+  orderStatus?: string | null;
+}): boolean {
+  if (!args.orderId || !args.enabled) return false;
+  if (
+    typeof args.orderStatus === 'string' &&
+    FINALIZED_STATUSES.has(args.orderStatus as 'delivered' | 'cancelled')
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function useLivePartnerEta(
   orderId: string | null,
   enabled: boolean,
+  // PR-NEXT-BUNDLE-A §C — DO NOT REMOVE. When status flips to
+  // 'delivered' or 'cancelled', polling stops immediately and
+  // state is cleared to null so the sheet can show static
+  // "Delivered" / "Cancelled" copy instead of a stale ETA.
+  orderStatus?: string | null,
 ): LivePartnerEtaState {
   const [state, setState] = useState<LivePartnerEtaState>({
     distanceKm: null,
@@ -57,10 +88,17 @@ export function useLivePartnerEta(
   const cancelledRef = useRef(false);
 
   useEffect(() => {
-    if (!orderId || !enabled) {
-      // Sheet closed (or no order yet): reset to the initial state
-      // so the next open starts clean. Otherwise stale values would
-      // flash for ~30s while the new fetch runs.
+    // PR-NEXT-BUNDLE-A §C — stop polling on finalized orders.
+    // Cost of continuing: server returns ~0 distance → "Arriving
+    // now" on a delivered order. Clearing to null lets the sheet
+    // render its own static copy for those states.
+    const isFinalized =
+      typeof orderStatus === 'string' &&
+      FINALIZED_STATUSES.has(orderStatus as 'delivered' | 'cancelled');
+
+    if (!orderId || !enabled || isFinalized) {
+      // Sheet closed, no order yet, or order finalized: reset to
+      // the initial state so the next open starts clean.
       setState({
         distanceKm: null,
         etaMin: null,
@@ -103,7 +141,7 @@ export function useLivePartnerEta(
       cancelledRef.current = true;
       clearInterval(intervalId);
     };
-  }, [orderId, enabled]);
+  }, [orderId, enabled, orderStatus]);
 
   return state;
 }

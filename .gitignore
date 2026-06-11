@@ -38,6 +38,7 @@ yarn-error.*
 .env*.local
 .env
 service-account.json
+play-service-account.json
 GoogleService-Info.plist
 google-services.json
 

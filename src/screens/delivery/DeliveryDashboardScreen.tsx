@@ -45,6 +45,14 @@ import {
     rideLegsForOrder,
     sortPickupsByProximity,
 } from '../../utils/deliveryRoutingHelpers';
+// PR-NEXT-BUNDLE-D §E — DO NOT REMOVE. Chip-filter + coming-up
+// priority sort helpers (pure, unit-pinned). Auto-formatter strip
+// risk — this comment is the canary.
+import {
+    sortComingUpByPriority,
+    sortPickups,
+    type PickupSortMode,
+} from '../../utils/deliverySortHelpers';
 import {
     formatOrderTime,
     formatRelativeDeliveryTime,
@@ -143,6 +151,11 @@ export default function DeliveryDashboardScreen() {
   const [radiusInput, setRadiusInput] = useState<string>('3');
   const [savingRadius, setSavingRadius] = useState(false);
   const [radiusError, setRadiusError] = useState<string | null>(null);
+  // PR-NEXT-BUNDLE-D §E#3 — per-section sort chip state. The
+  // low-rating alert settings that used to live here moved to the
+  // dedicated DeliverySettingsScreen tab (§C / §G cleanup).
+  const [availableSort, setAvailableSort] =
+    useState<PickupSortMode>('distance');
 
   // Subscribe to the two pollers. Both fire immediately on mount and
   // then every 10/15s respectively. The "loading" flag flips once
@@ -346,6 +359,8 @@ export default function DeliveryDashboardScreen() {
               ? String(settings.notificationRadiusKm)
               : prev,
           );
+          // PR-NEXT-BUNDLE-D §G — low-rating alert hydration moved to
+          // DeliverySettingsScreen; the dashboard no longer reads it.
         } catch {
           // swallow — settings read is an enhancement, not a
           // requirement.
@@ -390,24 +405,32 @@ export default function DeliveryDashboardScreen() {
   // sort a stable no-op (every distance Infinity → original order
   // preserved), so a freshly-mounted dashboard reads the same as
   // pre-PR-49 until the location resolves a beat later.
+  // PR-NEXT-BUNDLE-D §E#2 — coming-up pool sorts preparing-first
+  // (closest to ready), then by readyByEstimate. We keep the
+  // proximity sort as the input ordering so two preparing orders
+  // with no ETA still cluster nearest-first.
   const headsUp = useMemo(
     () =>
-      sortPickupsByProximity(
-        available.filter(
-          o => o.status === 'accepted' || o.status === 'preparing',
+      sortComingUpByPriority(
+        sortPickupsByProximity(
+          available.filter(
+            o => o.status === 'accepted' || o.status === 'preparing',
+          ),
+          partnerLoc,
         ),
-        partnerLoc,
       ),
     [available, partnerLoc],
   );
-  const availableNow = useMemo(
-    () =>
-      sortPickupsByProximity(
-        available.filter(o => o.status === 'ready_for_pickup'),
-        partnerLoc,
-      ),
-    [available, partnerLoc],
-  );
+  // PR-NEXT-BUNDLE-D §E#3 — available pool honors the chip sort.
+  // 'distance' uses the existing haversine proximity sort (orders
+  // carry shopLocation, not a stored distanceKm); 'pay' / 'age' use
+  // the pure sortPickups helper.
+  const availableNow = useMemo(() => {
+    const filtered = available.filter(o => o.status === 'ready_for_pickup');
+    return availableSort === 'distance'
+      ? sortPickupsByProximity(filtered, partnerLoc)
+      : sortPickups(filtered, availableSort);
+  }, [available, partnerLoc, availableSort]);
 
   // Delivery History = orders this partner has delivered, newest
   // first. Data is already in scope via watchMyDeliveries (same
@@ -823,6 +846,9 @@ export default function DeliveryDashboardScreen() {
               )}
             </View>
 
+            {/* PR-NEXT-BUNDLE-D §G — the LOW-RATING ALERTS card moved
+                to the dedicated DeliverySettingsScreen tab. */}
+
             <View style={styles.statsCard}>
               <Text style={styles.statsTitle}>Today</Text>
               <View style={styles.statsRow}>
@@ -962,6 +988,9 @@ export default function DeliveryDashboardScreen() {
               onToggle={() => setShowAvailable(s => !s)}
               count={availableNow.length}
             />
+            {showAvailable && availableNow.length > 0 && (
+              <SortChipRow value={availableSort} onChange={setAvailableSort} />
+            )}
             {showAvailable && availableNow.length === 0 && (
               <EmptyState
                 title="No pickups available"
@@ -1012,6 +1041,45 @@ function SectionHeader({
       </Text>
       <Text style={styles.sectionChevron}>{expanded ? '▾' : '▸'}</Text>
     </Pressable>
+  );
+}
+
+// PR-NEXT-BUNDLE-D §E#3 — sort chip row. Tapping a chip re-sorts the
+// local array (no server round-trip). Defaults to 'distance'
+// (Nearest), preserving the pre-bundle behavior.
+const SORT_CHIPS: Array<{ value: PickupSortMode; label: string }> = [
+  { value: 'distance', label: 'Nearest' },
+  { value: 'pay', label: 'Highest pay' },
+  { value: 'age', label: 'Newest' },
+];
+
+function SortChipRow({
+  value,
+  onChange,
+}: {
+  value: PickupSortMode;
+  onChange: (v: PickupSortMode) => void;
+}) {
+  return (
+    <View style={styles.chipRow}>
+      {SORT_CHIPS.map(chip => {
+        const active = value === chip.value;
+        return (
+          <Pressable
+            key={chip.value}
+            onPress={() => onChange(chip.value)}
+            style={[styles.chip, active && styles.chipActive]}
+            accessibilityRole="button"
+            accessibilityState={{ selected: active }}
+            accessibilityLabel={`Sort by ${chip.label}`}
+          >
+            <Text style={[styles.chipText, active && styles.chipTextActive]}>
+              {chip.label}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
   );
 }
 
@@ -1105,6 +1173,13 @@ function HeadsUpCard({
         {itemCount} item{itemCount > 1 ? 's' : ''} ·{' '}
         {formatRupees(order.total)}
       </Text>
+      {/* PR-NEXT-BUNDLE-D §E#1 — earnings line on coming-up cards
+          (mirrors AvailablePickupCard + ActiveDeliveryCard). */}
+      {typeof order.deliveryFee === 'number' && order.deliveryFee > 0 && (
+        <Text style={styles.earningsLine}>
+          💰 Earn {formatRupees(order.deliveryFee)}
+        </Text>
+      )}
       <Text style={styles.tapHint}>Tap to view items</Text>
     </Pressable>
   );
@@ -1327,11 +1402,11 @@ function ActiveDeliveryCard({
   // `confirmCodPayment` callable.
   onConfirmCodPayment: (paidMethod: 'cash' | 'online') => void;
   // PR-NEXT-6 (finding #13) — emitted when the partner taps the
-  // optional "Add delivery proof" button. Parent runs the
+  // proof photo button. Parent runs the
   // `pickAndResizeImage('camera')` → `uploadDeliveryProof` flow
-  // and toggles `uploadingPhoto` for the duration. Photo is
-  // OPTIONAL and parallel to the Delivered CTA — the partner can
-  // tap Delivered with or without ever touching this button.
+  // and toggles `uploadingPhoto` for the duration.
+  // PR-NEXT-BUNDLE-B §C (Finding #13) — proof is now REQUIRED.
+  // `hasProof` gates the Delivered CTA — DO NOT REMOVE.
   onAddPhoto: () => void;
   uploadingPhoto: boolean;
   hasProof: boolean;
@@ -1471,12 +1546,22 @@ function ActiveDeliveryCard({
             </View>
           </View>
         ) : pickedUp ? (
-          <Button
-            title="Delivered"
-            onPress={onDelivered}
-            loading={pending}
-            disabled={pending}
-          />
+          // PR-NEXT-BUNDLE-B §C — DO NOT REMOVE. Proof required
+          // before Delivered can be tapped. Inline hint above the
+          // button directs the partner to upload first.
+          <>
+            {!hasProof && (
+              <Text style={styles.proofHint}>
+                📷 Upload delivery proof first
+              </Text>
+            )}
+            <Button
+              title="Delivered"
+              onPress={onDelivered}
+              loading={pending}
+              disabled={pending || !hasProof}
+            />
+          </>
         ) : (
           <Button
             title="I've picked it up"
@@ -1643,6 +1728,24 @@ const styles = StyleSheet.create({
   },
   sectionTitle: { ...typography.bodyBold },
   sectionChevron: { ...typography.h3, color: colors.textSecondary },
+  // PR-NEXT-BUNDLE-D §E#3 — sort chip row.
+  chipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  chip: {
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.md,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.bg,
+  },
+  chipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  chipText: { ...typography.caption, color: colors.textSecondary },
+  chipTextActive: { color: '#fff' },
   card: {
     backgroundColor: colors.bg,
     borderRadius: radii.md,
@@ -1776,5 +1879,68 @@ const styles = StyleSheet.create({
   photoBtnText: {
     ...typography.body,
     color: colors.textPrimary,
+  },
+  // PR-NEXT-BUNDLE-B §C — DO NOT REMOVE. Shown above the disabled
+  // Delivered button when no proof photo has been uploaded yet.
+  proofHint: {
+    ...typography.caption,
+    color: colors.warning ?? colors.textSecondary,
+    textAlign: 'center',
+    marginBottom: spacing.sm,
+  },
+  // PR-NEXT-LOW-RATING-PUSH §D
+  ratingRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  starBtn: {
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.bg,
+  },
+  starBtnActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primaryLight,
+  },
+  starBtnText: {
+    ...typography.body,
+    color: colors.textSecondary,
+  },
+  starBtnTextActive: {
+    color: colors.primaryDark,
+    fontWeight: '700',
+  },
+  checkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginVertical: spacing.xs,
+  },
+  alertCheckbox: {
+    width: 22,
+    height: 22,
+    borderRadius: radii.sm,
+    borderWidth: 2,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  alertCheckboxChecked: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary,
+  },
+  alertCheckMark: {
+    color: colors.bg,
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  radiusSaveBtnText: {
+    ...typography.bodyBold,
+    color: colors.bg,
   },
 });

@@ -2,6 +2,7 @@ import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import React, { useEffect, useState } from 'react';
 import {
     Alert,
+    Image,
     Keyboard,
     KeyboardAvoidingView,
     Modal,
@@ -195,6 +196,30 @@ export default function DeliveryRequestDetailScreen() {
           </Text>
         </View>
 
+        {/* PR-NEXT-PARTNER-PHOTO §H — show partner face photo + checkbox */}
+        {request.profilePhotoUrl ? (
+          <View style={styles.card}>
+            <Text style={styles.label}>Face Photo</Text>
+            {/* R9: truthy guard is the outer ternary check above */}
+            <Image
+              source={{ uri: request.profilePhotoUrl }}
+              style={styles.photoReview}
+              accessibilityLabel="Partner face photo"
+              resizeMode="cover"
+            />
+            <Text style={styles.photoHint}>
+              Review face is clearly visible, matches the applicant.
+            </Text>
+          </View>
+        ) : (
+          <View style={styles.card}>
+            <Text style={styles.label}>Face Photo</Text>
+            <Text style={[styles.value, { color: colors.warning }]}>
+              ⚠️ No photo submitted — review carefully.
+            </Text>
+          </View>
+        )}
+
         <View style={styles.card}>
           <Text style={styles.label}>Applicant</Text>
           <Text style={styles.value}>
@@ -387,5 +412,18 @@ const styles = StyleSheet.create({
     textAlignVertical: 'top',
     ...typography.body,
     color: colors.textPrimary,
+  },
+  // PR-NEXT-PARTNER-PHOTO §H
+  photoReview: {
+    width: '100%',
+    height: 200,
+    borderRadius: radii.md,
+    marginTop: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  photoHint: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontStyle: 'italic',
   },
 });

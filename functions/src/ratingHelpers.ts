@@ -508,3 +508,32 @@ export function computeNewRollingAverage(
   const newAvg = Math.round(newAvgRaw * 10) / 10;
   return { newAvg, newCount };
 }
+
+/**
+ * PR-NEXT-5.1 §F — resolve a customer's display name for review
+ * denormalization at submitOrderRating write time.
+ *
+ * Preference order:
+ *   1. users/{uid}.displayName (Firestore profile)
+ *   2. auth.token.name (Firebase Auth display name)
+ *   3. 'Anonymous' (no name available)
+ *
+ * Trims whitespace and treats empty / non-string values as absent
+ * so a profile with `displayName: ''` falls through to the token,
+ * then the 'Anonymous' fallback.
+ *
+ * Pure — no Firestore. The caller fetches the profile doc + passes
+ * its data alongside the decoded auth token.
+ */
+export function resolveCustomerName(
+  profileDisplayName: unknown,
+  authTokenName: unknown,
+): string {
+  const fromProfile =
+    typeof profileDisplayName === 'string' ? profileDisplayName.trim() : '';
+  if (fromProfile.length > 0) return fromProfile;
+  const fromToken =
+    typeof authTokenName === 'string' ? authTokenName.trim() : '';
+  if (fromToken.length > 0) return fromToken;
+  return 'Anonymous';
+}

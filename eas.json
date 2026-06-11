@@ -61,6 +61,12 @@
   },
   "submit": {
     "production": {
+      "android": {
+        "serviceAccountKeyPath": "./play-service-account.json",
+        "track": "internal",
+        "releaseStatus": "completed",
+        "changesNotSentForReview": false
+      },
       "ios": {
         "appleId": "sudhir.davim@gmail.com",
         "ascAppId": "6770058310",

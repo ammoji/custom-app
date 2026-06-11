@@ -1,6 +1,6 @@
 import { useNavigation } from '@react-navigation/native';
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../../components/common/Button';
 import EmptyState from '../../components/common/EmptyState';
@@ -100,6 +100,11 @@ export default function AdminOrdersScreen() {
   // Trigger row only renders when the order actually has a proof on it
   // (partners can deliver without one — photo is optional by design).
   const [proofExpandedId, setProofExpandedId] = useState<string | null>(null);
+  // PR-NEXT-BUNDLE-E §D — review-thread disclosure. Same one-card-at-
+  // a-time semantics as the other disclosures. The expanded card
+  // renders <ReviewThreadView> which fetches getOrderReviewThread on
+  // mount (mirrors DeliveryProofViewer's self-fetch pattern).
+  const [reviewExpandedId, setReviewExpandedId] = useState<string | null>(null);
   // PR 2 — payment hardening (Phase B). Refund modal target. We track
   // the entire order rather than just the id so the modal can show
   // the amount in its title without an extra lookup.
@@ -521,6 +526,37 @@ export default function AdminOrdersScreen() {
                   )}
                 </View>
               )}
+
+              {/* PR-NEXT-BUNDLE-E §D — review thread disclosure. Only
+                  shown when the order carries a ratingId (i.e. the
+                  customer has rated). Expanding fetches the full
+                  correction timeline via getOrderReviewThread. */}
+              {item.ratingId && (
+                <View style={styles.proofSection}>
+                  <Pressable
+                    onPress={() =>
+                      setReviewExpandedId(
+                        reviewExpandedId === item.id ? null : item.id,
+                      )
+                    }
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      reviewExpandedId === item.id
+                        ? 'Hide review thread'
+                        : 'Show review thread'
+                    }
+                    style={styles.disclosureRow}
+                  >
+                    <Text style={styles.disclosureText}>
+                      {reviewExpandedId === item.id ? '▾' : '▸'}{'  '}
+                      ⭐ Review thread
+                    </Text>
+                  </Pressable>
+                  {reviewExpandedId === item.id && (
+                    <ReviewThreadView orderId={item.id} />
+                  )}
+                </View>
+              )}
             </View>
           );
         }}
@@ -541,6 +577,106 @@ export default function AdminOrdersScreen() {
         />
       ) : null}
     </SafeAreaView>
+  );
+}
+
+// PR-NEXT-BUNDLE-E §D — admin review thread. Fetches the order's
+// review timeline on mount (admin-gated callable) and renders it
+// chronologically: customer rating → shop/partner response →
+// amendment → published.
+type ThreadEvent = {
+  type: 'submitted' | 'response' | 'amended' | 'published';
+  at: number;
+  [k: string]: unknown;
+};
+
+function starStr(n: unknown): string {
+  return typeof n === 'number' && n > 0 ? '⭐'.repeat(Math.min(5, n)) : '—';
+}
+
+function ReviewThreadView({ orderId }: { orderId: string }) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [timeline, setTimeline] = useState<ThreadEvent[]>([]);
+  const [hasReview, setHasReview] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await orderService.getOrderReviewThread({ orderId });
+        if (cancelled) return;
+        setHasReview(res.hasReview);
+        setTimeline((res.timeline ?? []) as ThreadEvent[]);
+      } catch (e: any) {
+        if (!cancelled) setError(e?.message ?? 'Could not load review thread');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [orderId]);
+
+  if (loading) {
+    return (
+      <ActivityIndicator style={{ marginVertical: spacing.md }} color={colors.primary} />
+    );
+  }
+  if (error) {
+    return <Text style={styles.reviewThreadEmpty}>{error}</Text>;
+  }
+  if (!hasReview || timeline.length === 0) {
+    return <Text style={styles.reviewThreadEmpty}>No review on this order yet.</Text>;
+  }
+
+  return (
+    <View style={styles.reviewThread}>
+      {timeline.map((ev, i) => (
+        <View key={`${ev.type}-${i}`} style={styles.reviewEvent}>
+          {ev.type === 'submitted' && (
+            <>
+              <Text style={styles.reviewEventTitle}>
+                Customer rating · {formatOrderTime(ev.at)}
+              </Text>
+              <Text style={styles.reviewEventBody}>
+                Shop: {starStr(ev.shopStars)}  Delivery: {starStr(ev.deliveryStars)}
+              </Text>
+              {!!ev.comment && (
+                <Text style={styles.reviewEventQuote}>“{String(ev.comment)}”</Text>
+              )}
+            </>
+          )}
+          {ev.type === 'response' && (
+            <>
+              <Text style={styles.reviewEventTitle}>
+                {ev.by === 'partner' ? 'Partner' : 'Shop'} response ·{' '}
+                {formatOrderTime(ev.at)}
+              </Text>
+              {!!ev.text && (
+                <Text style={styles.reviewEventQuote}>“{String(ev.text)}”</Text>
+              )}
+            </>
+          )}
+          {ev.type === 'amended' && (
+            <>
+              <Text style={styles.reviewEventTitle}>
+                Customer amended · {formatOrderTime(ev.at)}
+              </Text>
+              <Text style={styles.reviewEventBody}>
+                Shop: {starStr(ev.shopStars)}  Delivery: {starStr(ev.deliveryStars)}
+              </Text>
+            </>
+          )}
+          {ev.type === 'published' && (
+            <Text style={styles.reviewEventTitle}>
+              Published ({String(ev.reason ?? 'final')}) · {formatOrderTime(ev.at)}
+            </Text>
+          )}
+        </View>
+      ))}
+    </View>
   );
 }
 
@@ -668,6 +804,27 @@ const styles = StyleSheet.create({
     paddingTop: spacing.sm,
     borderTopWidth: 1,
     borderTopColor: colors.border,
+  },
+  // PR-NEXT-BUNDLE-E §D — review thread.
+  reviewThread: { marginTop: spacing.xs, gap: spacing.sm },
+  reviewEvent: {
+    paddingLeft: spacing.md,
+    borderLeftWidth: 2,
+    borderLeftColor: colors.primary,
+  },
+  reviewEventTitle: { ...typography.caption, fontWeight: '700', color: colors.textPrimary },
+  reviewEventBody: { ...typography.caption, color: colors.textSecondary, marginTop: 2 },
+  reviewEventQuote: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontStyle: 'italic',
+    marginTop: 2,
+  },
+  reviewThreadEmpty: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontStyle: 'italic',
+    marginVertical: spacing.sm,
   },
   disclosureRow: {
     paddingVertical: spacing.xs,

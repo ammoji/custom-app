@@ -42,7 +42,12 @@ export type GetDeliveryPartnerContactResult =
       ok: false;
       code:
         | 'order_not_found'
-        | 'not_customer'
+        // PR-NEXT-BUNDLE-E §C — DO NOT REMOVE. Renamed from
+        // 'not_customer' → 'not_authorized' now that the gate also
+        // allows the shop owner of the order's shop (same precedent
+        // as getLivePartnerEta's Bundle-B extension). index.ts switch
+        // updated in the same PR.
+        | 'not_authorized'
         | 'no_partner'
         | 'not_picked_up'
         | 'no_phone_on_partner';
@@ -77,6 +82,13 @@ export async function getDeliveryPartnerContactPure(args: {
   callerUid: string;
   db: AdminFirestore;
   auth: AdminAuth;
+  // PR-NEXT-BUNDLE-E §C — shop-owner authorization. When the caller
+  // holds the shopOwner claim AND their claim's shopId matches the
+  // order's shopId, the reveal is allowed (post-pickup, as for the
+  // customer). Both optional so existing customer-side callers that
+  // omit them behave exactly as before.
+  callerShopOwner?: boolean;
+  callerShopId?: string | null;
 }): Promise<GetDeliveryPartnerContactResult> {
   const snap = await args.db.collection('orders').doc(args.orderId).get();
   if (!snap.exists) {
@@ -84,11 +96,18 @@ export async function getDeliveryPartnerContactPure(args: {
   }
   const order = (snap.data() ?? {}) as {
     customerUid?: unknown;
+    shopId?: unknown;
     deliveryPersonId?: unknown;
     pickedUpAt?: unknown;
   };
-  if (order.customerUid !== args.callerUid) {
-    return { ok: false, code: 'not_customer' };
+  const isCustomer = order.customerUid === args.callerUid;
+  const isShopOwner =
+    args.callerShopOwner === true &&
+    typeof args.callerShopId === 'string' &&
+    args.callerShopId.length > 0 &&
+    order.shopId === args.callerShopId;
+  if (!isCustomer && !isShopOwner) {
+    return { ok: false, code: 'not_authorized' };
   }
   if (
     typeof order.deliveryPersonId !== 'string' ||

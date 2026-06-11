@@ -26,6 +26,7 @@ describe('reset-pilot-data — parseFlags', () => {
       yes: false,
       skipStorage: false,
       adminUid: null,
+      iKnowPilotIsLive: false,
     });
   });
 
@@ -60,6 +61,14 @@ describe('reset-pilot-data — parseFlags', () => {
     expect(() => parseFlags(['--yes'])).toThrow(
       /--yes requires --execute/,
     );
+  });
+
+  test('--i-know-pilot-is-live sets iKnowPilotIsLive=true', () => {
+    expect(parseFlags(['--i-know-pilot-is-live']).iKnowPilotIsLive).toBe(true);
+  });
+
+  test('absence of --i-know-pilot-is-live leaves iKnowPilotIsLive=false', () => {
+    expect(parseFlags([]).iKnowPilotIsLive).toBe(false);
   });
 });
 

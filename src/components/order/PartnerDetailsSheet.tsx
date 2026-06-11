@@ -39,7 +39,14 @@
  * server round-trip; the sheet only renders the resulting state.
  */
 import React from 'react';
-import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Image, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+// PR-NEXT-5.1 §E — DO NOT REMOVE. Navigation to PartnerReviewsScreen
+// from the tappable trust line.
+import { useNavigation } from '@react-navigation/native';
+// PR-NEXT-PARTNER-PHOTO §F — DO NOT REMOVE. formatPartnerAvatar drives
+// the photo-vs-initials avatar branch below (R9 truthy guard is inside
+// the helper via kind === 'photo').
+import { formatPartnerAvatar } from '../../utils/formatPartnerAvatar';
 // PR-NEXT-HOTFIX-7 — DO NOT REMOVE. Shared bottom-sheet chrome
 // (Modal + backdrop + safe-area-aware paddingBottom). Replaces the
 // hand-rolled per-modal scaffolding that under-padded the gesture-
@@ -60,6 +67,10 @@ import {
   type PartnerVehicleType,
 } from '../../utils/formatPartnerTrust';
 import type { LivePartnerEtaState } from '../../hooks/useLivePartnerEta';
+// PR-NEXT-STATIC-MAP-PREVIEW §C — DO NOT REMOVE. Pure URL builder +
+// API key accessor for the static map preview slot.
+import { buildStaticMapUrl, type LatLng } from '../../utils/buildStaticMapUrl';
+import { getGoogleMapsApiKey } from '../../constants/maps';
 
 type Props = {
   visible: boolean;
@@ -79,14 +90,41 @@ type Props = {
   partnerRating?: number | null;
   partnerDeliveriesCount?: number | null;
   partnerVehicleType?: PartnerVehicleType | null;
-  // Phone-reveal state (unchanged from PARTNER-CARD.1).
+  // PR-NEXT-PARTNER-PHOTO §F — denormalized partner face photo URL.
+  // Optional: absent on legacy orders / partners who pre-date this PR.
+  // Falls back to initials avatar via formatPartnerAvatar.
+  partnerPhotoUrl?: string | null;
+  // PR-NEXT-BUNDLE-B §B (Finding #10) — one-tap call. `partnerPhone`
+  // is still cached in the parent (no change) but the two-step
+  // reveal-then-call button is collapsed to a single "Call partner"
+  // CTA. `onCallPartner` is the async handler in the parent; it
+  // fetches the phone if not yet cached, then opens the dialer in
+  // the same tap. `revealing` gates the spinner on the button.
   partnerPhone?: string | null;
-  onRevealPhone?: () => void;
+  onCallPartner?: () => void;
   revealing?: boolean;
+  // Kept for back-compat — the prop is no longer read in the sheet.
+  // Parent (OrderDetailScreen) still passes it; we just ignore it.
+  onRevealPhone?: () => void;
   // Live polling state — parent owns the hook (so polling lifecycle
   // is tied to the parent's mount-lifecycle, not the sheet's open
   // state alone).
   live: LivePartnerEtaState;
+  // PR-NEXT-BUNDLE-A §C (Finding #12a) — DO NOT REMOVE. When
+  // order is finalized, the sheet shows static copy instead of a
+  // stale live ETA (which would say "Arriving now" because
+  // partner→drop distance is ~0 after delivery).
+  orderStatus?: string | null;
+  // PR-NEXT-STATIC-MAP-PREVIEW §C — shop + drop coords for the map
+  // preview. Both optional: absent on legacy orders (pre-PR-49/46).
+  // Null → map slot hidden. Parent passes order.shopLocation and
+  // order.deliveryLocation directly (no extra callable).
+  shopLocation?: LatLng | null;
+  dropLocation?: LatLng | null;
+  // PR-NEXT-5.1 §E — partner uid for the tappable trust line that
+  // opens PartnerReviewsScreen. Optional/nullable: legacy orders or
+  // pre-claim states omit it, in which case the trust line is static.
+  partnerUid?: string | null;
 };
 
 export default function PartnerDetailsSheet({
@@ -101,18 +139,35 @@ export default function PartnerDetailsSheet({
   partnerRating,
   partnerDeliveriesCount,
   partnerVehicleType,
-  partnerPhone,
-  onRevealPhone,
+  partnerPhotoUrl,
+  onCallPartner,
   revealing,
+  // onRevealPhone is kept in Props for back-compat but not used here.
   live,
+  orderStatus,
+  shopLocation,
+  dropLocation,
+  partnerUid,
 }: Props) {
+  const nav = useNavigation<any>();
   const isPickedUp = pickedUpAt != null;
   const displayName =
     typeof partnerName === 'string' && partnerName.trim().length > 0
       ? partnerName.trim()
       : 'Your delivery partner';
-  const initials = initialsFor(partnerName);
   const firstName = displayName.split(' ')[0];
+  // PR-NEXT-PARTNER-PHOTO §F — discriminated avatar result.
+  // `initialsFor` still imported (used by PartnerIdentityCard) — DO NOT REMOVE.
+  const avatar = formatPartnerAvatar(partnerName, partnerPhotoUrl ?? null);
+
+  // PR-NEXT-STATIC-MAP-PREVIEW §C — build static map URL. Returns
+  // null when shopLocation / dropLocation are absent (legacy orders)
+  // or apiKey is not provisioned. JSX branch below guards on null.
+  const mapUrl = buildStaticMapUrl({
+    shopPin: shopLocation ?? null,
+    dropPin: dropLocation ?? null,
+    apiKey: getGoogleMapsApiKey(),
+  });
 
   const trust = formatPartnerTrust({
     ratingAvg: partnerRating ?? null,
@@ -136,6 +191,12 @@ export default function PartnerDetailsSheet({
     isPickedUp,
   });
 
+  // PR-NEXT-BUNDLE-A §C — detect finalized order so we can show
+  // static copy instead of live ETA rows.
+  const isDelivered = orderStatus === 'delivered';
+  const isCancelled = orderStatus === 'cancelled';
+  const isFinalized = isDelivered || isCancelled;
+
   const stateText = isPickedUp
     ? `${trust.vehicleIcon} On the way to you`
     : `${trust.vehicleIcon} Heading to the shop`;
@@ -150,34 +211,93 @@ export default function PartnerDetailsSheet({
     <BottomSheet visible={visible} onClose={onClose} keyboardAvoid={false}>
       {/* WHO — avatar + name + trust line */}
       <View style={styles.header}>
-        <View style={styles.avatar}>
-          <Text style={styles.avatarText}>{initials}</Text>
-        </View>
+        {avatar.kind === 'photo' ? (
+          // R9: uri is non-empty (formatPartnerAvatar guarantees it for 'photo')
+          <Image
+            source={{ uri: avatar.uri }}
+            style={styles.avatarPhoto}
+            accessibilityLabel={`Photo of ${displayName}`}
+          />
+        ) : (
+          <View style={styles.avatar}>
+            <Text style={styles.avatarText}>{avatar.text}</Text>
+          </View>
+        )}
         <View style={{ flex: 1 }}>
           <Text style={styles.title} numberOfLines={1}>
             {displayName}
           </Text>
-          <Text style={styles.trust}>{trust.trustLine}</Text>
+          {/* PR-NEXT-5.1 §E — tappable trust line → PartnerReviewsScreen.
+              Only tappable when partnerUid is present (claimed order). */}
+          {partnerUid ? (
+            <Pressable
+              onPress={() => {
+                onClose();
+                nav.navigate('PartnerReviews', {
+                  partnerUid,
+                  partnerName: displayName,
+                });
+              }}
+              accessibilityRole="button"
+              accessibilityLabel={`View reviews for ${firstName}`}
+            >
+              <Text style={styles.trust}>{trust.trustLine} ›</Text>
+            </Pressable>
+          ) : (
+            <Text style={styles.trust}>{trust.trustLine}</Text>
+          )}
         </View>
       </View>
       <Text style={styles.state}>{stateText}</Text>
 
+      {/* PR-NEXT-STATIC-MAP-PREVIEW §C — static map preview slot.
+          Hidden when mapUrl is null (missing coords or key). */}
+      {mapUrl && (
+        <View style={styles.mapWrap}>
+          {/* R9: mapUrl is non-empty (buildStaticMapUrl guarantees) */}
+          <Image
+            source={{ uri: mapUrl }}
+            style={styles.mapImage}
+            accessibilityLabel="Map showing shop and delivery location"
+          />
+          <Text style={styles.mapCaption}>
+            <Text style={styles.shopDot}>{'\u25cf '}</Text>
+            {'Shop  ·  '}
+            <Text style={styles.dropDot}>{'\u25cf '}</Text>
+            {'You'}
+          </Text>
+        </View>
+      )}
+
       <View style={styles.divider} />
 
-      {/* WHEN — live ETA (with em-dash fallback if formatter rejects) */}
-      <Row
-        label={eta.whenLabel}
-        value={eta.whenValue}
-        estimated={eta.estimatedSuffix}
-      />
-      {/* WHERE — live distance; row hides itself when <50m (the WHEN
-          copy "Arriving now" carries the signal). */}
-      {eta.distanceValue && (
+      {/* PR-NEXT-BUNDLE-A §C — finalized-order footer replaces the
+          live ETA rows. Polling has already been stopped by the
+          hook; rendering static copy avoids "Arriving now" on a
+          delivered order (partner→drop distance is ~0). */}
+      {isFinalized ? (
         <Row
-          label="Distance"
-          value={eta.distanceValue}
-          estimated={eta.estimatedSuffix}
+          label="Status"
+          value={isDelivered ? '✅ Delivered' : '❌ Order cancelled'}
         />
+      ) : (
+        <>
+          {/* WHEN — live ETA (with em-dash fallback if formatter rejects) */}
+          <Row
+            label={eta.whenLabel}
+            value={eta.whenValue}
+            estimated={eta.estimatedSuffix}
+          />
+          {/* WHERE — live distance; row hides itself when <50m (the WHEN
+              copy "Arriving now" carries the signal). */}
+          {eta.distanceValue && (
+            <Row
+              label="Distance"
+              value={eta.distanceValue}
+              estimated={eta.estimatedSuffix}
+            />
+          )}
+        </>
       )}
       {/* Static context rows */}
       <Row label={shopRowLabel} value={shopRowValue} />
@@ -187,43 +307,28 @@ export default function PartnerDetailsSheet({
 
       <View style={styles.divider} />
 
-      {/* REACH — phone reveal / call link / muted pre-pickup copy */}
+      {/* REACH — PR-NEXT-BUNDLE-B §B single one-tap call CTA.
+          Pre-pickup: muted copy (unchanged privacy posture).
+          Post-pickup: single "Call partner" button — parent
+          handler fetches phone if not yet cached, then dials. */}
       {!isPickedUp ? (
         <Text style={styles.phoneMuted}>
           📞 Phone shared once the order is picked up
         </Text>
-      ) : typeof partnerPhone === 'string' && partnerPhone.length > 0 ? (
+      ) : onCallPartner ? (
         <Pressable
-          onPress={() => {
-            Linking.openURL(`tel:${partnerPhone}`).catch(() => {
-              // Best-effort — silent on rejection (web preview /
-              // no-SIM dev devices) is preferable to a confusing
-              // alert. The number text is still visible.
-            });
-          }}
-          style={({ pressed }) => [
-            styles.callBtn,
-            pressed && { opacity: 0.85 },
-          ]}
-          accessibilityRole="link"
-          accessibilityLabel={`Call ${displayName} at ${partnerPhone}`}
-        >
-          <Text style={styles.callBtnText}>📞 Call {firstName}</Text>
-        </Pressable>
-      ) : onRevealPhone ? (
-        <Pressable
-          onPress={onRevealPhone}
+          onPress={onCallPartner}
           disabled={revealing === true}
           style={({ pressed }) => [
-            styles.revealBtn,
+            styles.callBtn,
             pressed && { opacity: 0.85 },
             revealing === true && { opacity: 0.6 },
           ]}
           accessibilityRole="button"
-          accessibilityLabel={`Show ${displayName}'s phone number`}
+          accessibilityLabel={`Call ${displayName}`}
         >
-          <Text style={styles.revealBtnText}>
-            {revealing === true ? 'Loading…' : `📞 Show ${firstName}'s phone`}
+          <Text style={styles.callBtnText}>
+            {revealing === true ? 'Connecting…' : `📞 Call ${firstName}`}
           </Text>
         </Pressable>
       ) : null}
@@ -282,6 +387,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   avatarText: { ...typography.h2, color: colors.primaryDark },
+  // PR-NEXT-PARTNER-PHOTO §F — same circular dimensions as initials avatar.
+  avatarPhoto: {
+    width: AVATAR_SIZE,
+    height: AVATAR_SIZE,
+    borderRadius: AVATAR_SIZE / 2,
+  },
   title: { ...typography.h2 },
   trust: {
     ...typography.caption,
@@ -349,4 +460,20 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   closeBtnText: { ...typography.bodyBold, color: colors.primaryDark },
+  // PR-NEXT-STATIC-MAP-PREVIEW §C
+  mapWrap: { marginVertical: spacing.md },
+  mapImage: {
+    width: '100%',
+    aspectRatio: 2,
+    borderRadius: radii.md,
+    backgroundColor: colors.surface,
+  },
+  mapCaption: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    marginTop: spacing.xs,
+  },
+  shopDot: { color: '#0F9D58' },
+  dropDot: { color: '#4285F4' },
 });

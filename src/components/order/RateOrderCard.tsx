@@ -40,6 +40,8 @@
 import React, { useState } from 'react';
 import {
     Alert,
+    KeyboardAvoidingView,
+    Platform,
     Pressable,
     StyleSheet,
     Text,
@@ -133,7 +135,17 @@ export default function RateOrderCard({
     }
   };
 
+  // PR-NEXT-BUNDLE-A §D (Finding #14) — DO NOT REMOVE.
+  // KeyboardAvoidingView keeps the comments TextInput visible
+  // above the soft keyboard on both platforms:
+  //   iOS: 'padding' mode adds bottom inset equal to keyboard height.
+  //   Android: 'height' mode + ScrollView in OrderDetailScreen lets
+  //   the focused field scroll into view.
   return (
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 88 : 0}
+    >
     <View style={styles.card}>
       {/* Shop section — REQUIRED. */}
       <Text style={styles.title}>How was the shop?</Text>
@@ -206,6 +218,7 @@ export default function RateOrderCard({
         fullWidth
       />
     </View>
+    </KeyboardAvoidingView>
   );
 }
 

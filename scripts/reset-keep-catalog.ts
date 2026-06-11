@@ -38,6 +38,12 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { cert, initializeApp } from 'firebase-admin/app';
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
+// PR 39.2 — DO NOT REMOVE. Live-pilot guard helpers used in main() below.
+import {
+  buildLivePilotRefuseBanner,
+  evaluateLivePilotGuard,
+  parsePilotStatusFlag,
+} from './livePilotGuardHelpers';
 
 const ALLOWED_PROJECT = 'grocery-mvp-dev';
 const BATCH_SIZE = 400; // under Firestore's 500/batch cap
@@ -89,20 +95,29 @@ const C = {
   cyan: '\x1b[36m',
 };
 
-type Flags = { execute: boolean; yes: boolean; adminUid: string | null };
+type Flags = {
+  execute: boolean;
+  yes: boolean;
+  adminUid: string | null;
+  // PR 39.2 — explicit operator acknowledgement that pilot is
+  // live and they intend disaster recovery. NEVER use this
+  // casually; the live-pilot guard exists for a reason.
+  iKnowPilotIsLive: boolean;
+};
 
 function parseFlags(argv: string[]): Flags {
-  const flags: Flags = { execute: false, yes: false, adminUid: null };
+  const flags: Flags = { execute: false, yes: false, adminUid: null, iKnowPilotIsLive: false };
   for (const raw of argv) {
     if (raw === '--execute') flags.execute = true;
     else if (raw === '--yes') flags.yes = true;
+    else if (raw === '--i-know-pilot-is-live') flags.iKnowPilotIsLive = true;
     else if (raw.startsWith('--admin-uid=')) {
       const v = raw.slice('--admin-uid='.length).trim();
       if (!v) throw new Error('--admin-uid= requires a value');
       flags.adminUid = v;
     } else {
       throw new Error(
-        `Unknown flag: "${raw}". Recognised: --execute, --yes, --admin-uid=<uid>`,
+        `Unknown flag: "${raw}". Recognised: --execute, --yes, --admin-uid=<uid>, --i-know-pilot-is-live`,
       );
     }
   }
@@ -112,6 +127,31 @@ function parseFlags(argv: string[]): Flags {
     );
   }
   return flags;
+}
+
+// -------------------------------------------------------------------
+// Live-pilot guard — reads appConfig/pilotStatus with fail-CLOSED posture
+// -------------------------------------------------------------------
+
+/**
+ * PR 39.2 — Read appConfig/pilotStatus.isLive from Firestore.
+ * Fail-CLOSED: any read error is treated as isLive=true to prevent
+ * an outage from bypassing the guard.
+ */
+async function readPilotStatusIsLive(
+  db: ReturnType<typeof getFirestore>,
+): Promise<boolean> {
+  try {
+    const snap = await db.doc('appConfig/pilotStatus').get();
+    if (!snap.exists) return false; // pre-pilot — missing doc means safe
+    return parsePilotStatusFlag(snap.data());
+  } catch (err) {
+    console.error(
+      `${C.red}[livePilotGuard] flag read failed; FAILING CLOSED${C.reset}`,
+      err,
+    );
+    return true; // can't confirm safety → treat as live
+  }
 }
 
 // -------------------------------------------------------------------
@@ -307,6 +347,30 @@ async function main() {
   initializeApp({ credential: cert(sa as any), projectId: sa.project_id });
   const db = getFirestore();
 
+  // PR 39.2 — Live-pilot guard. Runs in both dry-run and execute
+  // modes so operators see the refuse banner before they ever
+  // pass --execute.
+  const isLive = await readPilotStatusIsLive(db);
+  const verdict = evaluateLivePilotGuard({
+    isLive,
+    overrideAcknowledged: flags.iKnowPilotIsLive,
+  });
+
+  if (!verdict.ok) {
+    console.error('\n' + buildLivePilotRefuseBanner() + '\n');
+    process.exit(1);
+  }
+
+  if (verdict.reason === 'override_acknowledged') {
+    console.log(`\n${C.red}${C.bold}⚠️  --i-know-pilot-is-live USED${C.reset}`);
+    console.log(`${C.yellow}    Pilot IS live. Operator override acknowledged.`);
+    console.log(`    This action will be in the audit log.${C.reset}\n`);
+  }
+
+  console.log(
+    `${C.dim}  pilot guard   isLive=${isLive} verdict=${verdict.reason}${C.reset}`,
+  );
+
   console.log(`\n${C.bold}${C.cyan}reset-keep-catalog${C.reset}`);
   console.log(`  project       ${sa.project_id}`);
   console.log(`  service acct  ${sa.client_email}`);
@@ -350,6 +414,12 @@ async function main() {
         ranAt: new Date().toISOString(),
         project: sa.project_id,
         adminUidProtected: adminUid,
+        // PR 39.2 — guard verdict recorded for every run (incl. dry-run).
+        livePilotGuard: {
+          isLive,
+          overrideAcknowledged: flags.iKnowPilotIsLive,
+          verdict: verdict.reason as 'pilot_not_live' | 'override_acknowledged',
+        },
         result,
       },
       null,

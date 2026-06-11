@@ -205,10 +205,24 @@ export default function UserDetailScreen() {
           {user.isDelivery &&
             typeof user.deliveryRatingCount === 'number' &&
             user.deliveryRatingCount > 0 && (
-              <Detail
-                label="Delivery rating"
-                value={`${user.deliveryRatingAvg ?? 0} ★ (${user.deliveryRatingCount})`}
-              />
+              /* PR-NEXT-BUNDLE-E §E — tappable → admin moderation view
+                 of ALL this partner's reviews (pre-published included). */
+              <Pressable
+                onPress={() =>
+                  nav.navigate('PartnerReviews', {
+                    partnerUid: user.uid,
+                    partnerName: user.phoneNumber ?? undefined,
+                    mode: 'admin',
+                  })
+                }
+                accessibilityRole="button"
+                accessibilityLabel="View all delivery reviews for this partner"
+              >
+                <Detail
+                  label="Delivery rating"
+                  value={`${user.deliveryRatingAvg ?? 0} ★ (${user.deliveryRatingCount}) ›`}
+                />
+              </Pressable>
             )}
         </View>
 

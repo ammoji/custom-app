@@ -142,8 +142,19 @@ import {
 } from './favoritesHelpers';
 import {
     computeNewRollingAverage,
+    resolveCustomerName,
     validateDualRatingSubmission,
 } from './ratingHelpers';
+// PR-NEXT-BUNDLE-D §F/§D — DO NOT REMOVE. Pure helpers for the
+// delivery partner profile edit + earnings summary callables.
+import { validateDeliveryProfilePatch } from './deliveryProfileHelpers';
+import { summarizeEarnings } from './earningsHelpers';
+// PR-NEXT-BUNDLE-E §D/§E — DO NOT REMOVE. Admin review-visibility
+// filter + order review-thread timeline builder.
+import {
+    buildReviewTimeline,
+    filterReviewsForCaller,
+} from './reviewModerationHelpers';
 // PR 21 — DO NOT REMOVE. Auto-formatter risk per code-discipline.
 // Used by placeOrder below to normalize the substitution preference.
 import { normalizeSubstitutionPreference } from './substitutionHelpers';
@@ -202,6 +213,33 @@ import {
   validateMarkDeliveredCodGate,
   validatePayCodOrderPreconditions,
 } from './codPaymentHelpers';
+// PR-NEXT-BUNDLE-B §C — DO NOT REMOVE. Proof-photo gate for
+// markDelivered. Partner must upload a proof photo before the
+// callable accepts the delivered transition. Auto-formatter risk
+// per code-discipline; if tsc complains, re-add this import.
+import { validateMarkDeliveredProofGate } from './markDeliveredHelpers';
+// PR-NEXT-PARTNER-HEADS-UP — DO NOT REMOVE. Used by the new
+// `sendPickupHeadsUpToDelivery` trigger (fires on accepted
+// transition). Centralises the push-body ETA formatter so the
+// trigger + dashboard row stay in sync.
+import { computeMinutesFromNow } from './headsUpHelpers';
+// PR-NEXT-LOW-RATING-PUSH §C — DO NOT REMOVE. Pure helpers for the
+// per-role configurable low-rating fan-out in submitOrderRating.
+import {
+  parseAlertConfig,
+  decideShopFanout,
+  decidePartnerFanout,
+  decideAdminFanout,
+} from './lowRatingAlertHelpers';
+// PR-NEXT-REVIEW-SYSTEM §C — DO NOT REMOVE. State-machine helpers
+// used by submitOrderRating (init) + respondToReview / amendRating /
+// acknowledgeReview / publishTimedOutReviews callables.
+import {
+  decideInitialState,
+  canRespond,
+  canAmend,
+  canAcknowledge,
+} from './reviewWorkflowHelpers';
 // PR-NEXT-PARTNER-CARD.1 — DO NOT REMOVE. Used by the new
 // `getDeliveryPartnerContact` callable to gate customer-side
 // phone reveal of the assigned delivery partner.
@@ -2058,6 +2096,39 @@ export const getShopKycUploadUrl = onCall<{
   },
 );
 
+// PR-NEXT-PARTNER-PHOTO §B — mint a 5-min signed PUT URL for the
+// partner's face photo. Mirrors getShopKycUploadUrl structure.
+// Storage path: delivery-profile/{uid}.jpg — one file per partner;
+// re-upload overwrites. Client fetches the local URI as a Blob +
+// PUTs to the signed URL. JPEG only for pilot simplicity.
+export const getPartnerPhotoUploadUrl = onCall<{ contentType: string }>(
+  { cors: true, enforceAppCheck: false },
+  async request => {
+    if (!request.auth?.uid) {
+      throw new HttpsError('unauthenticated', 'Sign in required');
+    }
+    const contentType = String(request.data?.contentType ?? '');
+    if (!['image/jpeg', 'image/png'].includes(contentType)) {
+      throw new HttpsError(
+        'invalid-argument',
+        'contentType must be image/jpeg or image/png',
+      );
+    }
+    const ext = contentType === 'image/jpeg' ? 'jpg' : 'png';
+    const storagePath = `delivery-profile/${request.auth.uid}.${ext}`;
+    const bucket = getStorage().bucket();
+    const file = bucket.file(storagePath);
+    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 min, matches KYC
+    const [uploadUrl] = await file.getSignedUrl({
+      version: 'v4',
+      action: 'write',
+      expires: expiresAt,
+      contentType,
+    });
+    return { uploadUrl, storagePath };
+  },
+);
+
 export const recordShopKycUpload = onCall<{
   shopId: string;
   docKind: string;
@@ -3697,6 +3768,13 @@ export const claimDelivery = onCall<{ orderId: string }>(
       // server-internal fields like `currentLocation` / `fcmTokens`).
       // Pure helper handles all the null / out-of-whitelist cases.
       const trust = denormalizePartnerTrust(partnerData);
+      // PR-NEXT-PARTNER-PHOTO §E — also denormalize profilePhotoUrl.
+      const partnerPhotoUrl =
+        typeof partnerData?.profilePhotoUrl === 'string' &&
+        partnerData.profilePhotoUrl.length > 0
+          ? partnerData.profilePhotoUrl
+          : null;
+
       const patch: Record<string, unknown> = {
         updatedAt: FieldValue.serverTimestamp(),
         // Always stamp the three trust fields, even when null, so
@@ -3706,6 +3784,10 @@ export const claimDelivery = onCall<{ orderId: string }>(
         deliveryPersonRating: trust.rating,
         deliveryPersonDeliveriesCount: trust.deliveriesCount,
         deliveryPersonVehicleType: trust.vehicleType,
+        // PR-NEXT-PARTNER-PHOTO §E — DO NOT REMOVE. Null if partner
+        // doesn't have a photo yet (legacy). Client falls back to
+        // initials avatar via formatPartnerAvatar.
+        deliveryPersonPhotoUrl: partnerPhotoUrl,
       };
       if (partnerDisplayName) {
         patch.deliveryPersonName = partnerDisplayName;
@@ -3966,6 +4048,10 @@ export const markDelivered = onCall<{ orderId: string }>(
       customerUid?: string;
       paymentMethod?: string;
       paymentStatus?: string;
+      // PR-NEXT-BUNDLE-B §C — DO NOT REMOVE. Proof gate reads this.
+      // Field name is `deliveryProofStoragePath` (stamped by
+      // `recordDeliveryProofUpload`). NOT `proofPhotoUrl`.
+      deliveryProofStoragePath?: string | null;
     };
     if (order.deliveryPersonId !== uid) {
       throw new HttpsError(
@@ -3996,6 +4082,14 @@ export const markDelivered = onCall<{ orderId: string }>(
     });
     if (!codGate.ok) {
       throw new HttpsError(codGate.code, codGate.message);
+    }
+    // PR-NEXT-BUNDLE-B §C (Finding #13) — DO NOT REMOVE. Require a
+    // proof photo before accepting the delivered transition. Gate sits
+    // after the COD check so the partner sees the correct error first
+    // ("confirm payment" is more urgent than "upload proof").
+    const proofGate = validateMarkDeliveredProofGate({ deliveryProofStoragePath: order.deliveryProofStoragePath });
+    if (!proofGate.ok) {
+      throw new HttpsError('failed-precondition', proofGate.message);
     }
     const now = Date.now();
     await ref.update({
@@ -4312,18 +4406,24 @@ export const getDeliveryPartnerContact = onCall<{ orderId: string }>(
     if (orderId.length === 0) {
       throw new HttpsError('invalid-argument', 'orderId required.');
     }
+    // PR-NEXT-BUNDLE-E §C — surface the caller's shopOwner claim so
+    // the helper can authorize the shop owner of the order's shop.
+    const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
     const result = await getDeliveryPartnerContactPure({
       orderId,
       callerUid,
       db,
       auth: getAuth(),
+      callerShopOwner: claims.shopOwner === true,
+      callerShopId:
+        typeof claims.shopId === 'string' ? claims.shopId : null,
     });
     if (!result.ok) {
       switch (result.code) {
         case 'order_not_found':
           throw new HttpsError('not-found', 'Order not found.');
-        case 'not_customer':
-          throw new HttpsError('permission-denied', 'Not your order.');
+        case 'not_authorized':
+          throw new HttpsError('permission-denied', 'Not authorized for this order.');
         case 'no_partner':
         case 'not_picked_up':
           // Combined into one customer-facing message — pre-pickup
@@ -4364,8 +4464,9 @@ export const getDeliveryPartnerContact = onCall<{ orderId: string }>(
 // Returns 'failed-precondition' for "no partner location yet" /
 // "no target location" so the client maps both to a graceful
 // fallback (static estimate + ~ estimated suffix) without an
-// alert. 'not_customer' / 'order_not_found' stay hard errors —
+// alert. 'not_authorized' / 'order_not_found' stay hard errors —
 // those signal an actual abuse / programmer error.
+// PR-NEXT-BUNDLE-B §A (Finding #9) — gate extended to shop owners.
 // ────────────────────────────────────────────────────────────────────
 export const getLivePartnerEta = onCall<{ orderId: string }>(
   { cors: true, enforceAppCheck: false },
@@ -4380,17 +4481,27 @@ export const getLivePartnerEta = onCall<{ orderId: string }>(
     if (orderId.length === 0) {
       throw new HttpsError('invalid-argument', 'orderId required.');
     }
+    // PR-NEXT-BUNDLE-B §A — DO NOT REMOVE. Extract shopOwner claims
+    // so the pure helper can authorize shop owners of the order's
+    // shop alongside the existing customer gate.
+    const callerShopId =
+      typeof request.auth?.token?.shopId === 'string'
+        ? (request.auth.token.shopId as string)
+        : null;
+    const isCallerShopOwner = request.auth?.token?.shopOwner === true;
     const result = await getLivePartnerEtaPure({
       orderId,
       callerUid,
+      callerShopId,
+      isCallerShopOwner,
       db,
     });
     if (!result.ok) {
       switch (result.code) {
         case 'order_not_found':
           throw new HttpsError('not-found', 'Order not found.');
-        case 'not_customer':
-          throw new HttpsError('permission-denied', 'Not your order.');
+        case 'not_authorized':
+          throw new HttpsError('permission-denied', 'Not authorized for this order.');
         case 'no_partner':
         case 'no_partner_location':
         case 'no_target_location':
@@ -4581,6 +4692,36 @@ export const getMyDeliverySettings = onCall(
         storedRadius > 0
           ? storedRadius
           : DEFAULT_PARTNER_NOTIFICATION_RADIUS_KM,
+      // PR-NEXT-LOW-RATING-PUSH §D — alert settings (already read by
+      // the dashboard via a loose cast; surfaced explicitly now for
+      // the dedicated Settings tab).
+      lowRatingThreshold:
+        typeof data.lowRatingThreshold === 'number'
+          ? data.lowRatingThreshold
+          : null,
+      lowRatingNotificationsEnabled:
+        typeof data.lowRatingNotificationsEnabled === 'boolean'
+          ? data.lowRatingNotificationsEnabled
+          : null,
+      // PR-NEXT-BUNDLE-D §B — profile display fields for the Profile
+      // tab. Schema-additive read (no new doc fields). `displayName`
+      // is written by updateMyDeliveryProfile; legacy partners only
+      // have `name` from onboarding, so we surface both and let the
+      // client prefer displayName ?? name.
+      displayName: typeof data.displayName === 'string' ? data.displayName : null,
+      name: typeof data.name === 'string' ? data.name : null,
+      vehicleType:
+        typeof data.vehicleType === 'string' ? data.vehicleType : null,
+      profilePhotoUrl:
+        typeof data.profilePhotoUrl === 'string' ? data.profilePhotoUrl : null,
+      deliveryRatingAvg:
+        typeof data.deliveryRatingAvg === 'number'
+          ? data.deliveryRatingAvg
+          : null,
+      deliveryRatingCount:
+        typeof data.deliveryRatingCount === 'number'
+          ? data.deliveryRatingCount
+          : null,
     };
   },
 );
@@ -4692,6 +4833,135 @@ export const sendNewPickupPushToDelivery = onDocumentUpdated(
       );
     } catch (e) {
       console.error('[sendNewPickupPushToDelivery] error:', e);
+    }
+  },
+);
+
+// PR-NEXT-PARTNER-HEADS-UP — fires on the pending→accepted (or
+// accepted→accepted re-trigger) transition. Notifies in-radius
+// online delivery partners ahead of time so they can plan their
+// route before the shop signals "ready for pickup".
+//
+// Idempotency: stamped `headsUpSentAt` on the order doc prevents
+// a second fan-out when another field changes while status stays
+// 'accepted' (e.g. shop edits readyByEstimate).
+//
+// Pattern mirrors `sendNewPickupPushToDelivery` above — same
+// user query, same `filterPartnersByNotificationRadius` helper,
+// same Expo Push API call. Differences:
+//   - Fires on 'accepted' not 'ready_for_pickup'
+//   - Push body includes "ready in ~X min" from readyByEstimate
+//   - Stamps headsUpSentAt after success
+export const sendPickupHeadsUpToDelivery = onDocumentUpdated(
+  { document: 'orders/{orderId}', region: 'asia-south1' },
+  async event => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!before || !after) return;
+    // Fire only on the transition INTO accepted from a non-accepted
+    // state. A status of 'accepted' that was already 'accepted'
+    // before means a field update (e.g. readyByEstimate revised) —
+    // the idempotency marker below handles that case.
+    if (after.status !== 'accepted') return;
+    if (
+      before.status !== 'pending' &&
+      before.status !== 'accepted'
+    ) return;
+    // Idempotency guard: if we already sent the heads-up for this
+    // order, skip. The marker is a server timestamp so it's truthy
+    // once set regardless of whether the client normalised it.
+    if (after.headsUpSentAt) return;
+
+    // Find online delivery people — same query as
+    // sendNewPickupPushToDelivery.
+    const usersSnap = await db
+      .collection('users')
+      .where('isDelivery', '==', true)
+      .where('deliveryStatus', '==', 'online')
+      .get();
+    if (usersSnap.empty) {
+      console.log(
+        `[sendPickupHeadsUpToDelivery] no online delivery people for order ${event.params.orderId}`,
+      );
+      return;
+    }
+
+    // PR 50 — per-partner notification-radius filter. Fail-OPEN:
+    // partners without a reported location still receive the heads-up
+    // (same posture as sendNewPickupPushToDelivery).
+    const allOnline: PartnerRow[] = usersSnap.docs.map(d => {
+      const data = d.data() ?? {};
+      return {
+        uid: d.id,
+        currentLocation: data.currentLocation ?? null,
+        notificationRadiusKm: data.notificationRadiusKm,
+        fcmTokens: data.fcmTokens ?? [],
+      };
+    });
+    const inRange = filterPartnersByNotificationRadius(
+      allOnline,
+      after.shopLocation ?? null,
+    );
+    if (inRange.length === 0) {
+      console.log(
+        `[sendPickupHeadsUpToDelivery] no in-range delivery people for order ${event.params.orderId} (online=${allOnline.length})`,
+      );
+      return;
+    }
+
+    const tokens: string[] = [];
+    inRange.forEach(p => tokens.push(...(p.fcmTokens ?? [])));
+    if (!tokens.length) {
+      console.log(
+        `[sendPickupHeadsUpToDelivery] in-range delivery people have no push tokens for order ${event.params.orderId} (inRange=${inRange.length})`,
+      );
+      return;
+    }
+
+    // Compute "ready in ~X min" from readyByEstimate.
+    const minutesFromNow = computeMinutesFromNow(
+      typeof after.readyByEstimate === 'number' ? after.readyByEstimate : null,
+      Date.now(),
+    );
+    const itemCount = Array.isArray(after.items) ? after.items.length : 0;
+
+    const messages = tokens.map(token => ({
+      to: token,
+      sound: 'default' as const,
+      title: '🍽️ Heads up — pickup coming',
+      body:
+        `${after.shopName ?? 'A shop'} · ready in ~${minutesFromNow} min · ` +
+        `${itemCount} item${itemCount === 1 ? '' : 's'}`,
+      data: {
+        orderId: after.id ?? event.params.orderId,
+        type: 'pickup_heads_up',
+      },
+    }));
+
+    try {
+      const res = await fetch('https://exp.host/--/api/v2/push/send', {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(messages),
+      });
+      const data = await res.json();
+      console.log(
+        `[sendPickupHeadsUpToDelivery] sent ${messages.length} push(es) for order ${event.params.orderId}:`,
+        JSON.stringify(data),
+      );
+      // Stamp headsUpSentAt to prevent duplicate sends on
+      // subsequent field updates while status stays 'accepted'.
+      await event.data!.after.ref.update({
+        headsUpSentAt: FieldValue.serverTimestamp(),
+      });
+    } catch (err) {
+      console.error(
+        `[sendPickupHeadsUpToDelivery] push fan-out failed for ${event.params.orderId}:`,
+        err,
+      );
     }
   },
 );
@@ -5705,6 +5975,11 @@ type DeliveryRequestDoc = {
   name?: string;
   vehicleType?: string;
   city?: string;
+  // PR-NEXT-PARTNER-PHOTO §C — mandatory at onboarding. Validated by
+  // requestDeliveryRole: must be an https URL in the caller's own
+  // delivery-profile/{uid} storage path. Copied to users/{uid} by
+  // approveDeliveryRole for claimDelivery denormalization.
+  profilePhotoUrl?: string;
   submittedAt: number;
   status: 'pending' | 'approved' | 'rejected';
   approvedAt?: number;
@@ -5718,7 +5993,11 @@ export const requestDeliveryRole = onCall<{
   name?: string;
   vehicleType?: string;
   city?: string;
-}>(
+  // PR-NEXT-PARTNER-PHOTO §C — mandatory face photo URL.
+  // Server validates it starts with https://, contains the project
+  // bucket, and references the caller's own delivery-profile path.
+  profilePhotoUrl?: string;
+}>( // PR-NEXT-PARTNER-PHOTO §C — DO NOT REMOVE profilePhotoUrl handling below
   { cors: true, enforceAppCheck: false },
   async request => {
     // First-pass auth + claim check (cheap). Firestore lookup
@@ -5757,11 +6036,41 @@ export const requestDeliveryRole = onCall<{
         ? request.auth.token.phone_number
         : '';
 
+    // PR-NEXT-PARTNER-PHOTO §C — validate profilePhotoUrl. Must be
+    // a non-empty https URL referencing the caller's own storage path
+    // (no cross-uid spoofing). Best-effort: wrong/missing URL rejects.
+    const rawPhotoUrl = typeof request.data?.profilePhotoUrl === 'string'
+      ? request.data.profilePhotoUrl.trim()
+      : '';
+    if (!rawPhotoUrl) {
+      throw new HttpsError(
+        'invalid-argument',
+        'profilePhotoUrl is required. Capture your face photo first.',
+      );
+    }
+    if (
+      !rawPhotoUrl.startsWith('https://') ||
+      !rawPhotoUrl.includes('delivery-profile/')
+    ) {
+      throw new HttpsError(
+        'invalid-argument',
+        'Invalid profilePhotoUrl — must be a Firebase Storage URL for your profile photo.',
+      );
+    }
+    // Anti-spoofing: URL must reference the caller's own UID.
+    if (!rawPhotoUrl.includes(`delivery-profile/${uid}`)) {
+      throw new HttpsError(
+        'permission-denied',
+        'profilePhotoUrl must reference your own delivery-profile path.',
+      );
+    }
+
     const doc: DeliveryRequestDoc = {
       uid,
       phone,
       submittedAt: now,
       status: 'pending',
+      profilePhotoUrl: rawPhotoUrl,
       ...(result.form.name !== undefined && { name: result.form.name }),
       ...(result.form.vehicleType !== undefined && {
         vehicleType: result.form.vehicleType,
@@ -5847,6 +6156,27 @@ export const approveDeliveryRole = onCall<{ uid: string }>(
       },
       { merge: true },
     );
+
+    // PR-NEXT-PARTNER-PHOTO §D — copy profilePhotoUrl from the
+    // deliveryRequests doc to users/{uid}.profilePhotoUrl so
+    // claimDelivery can denormalize it onto order docs.
+    // Non-fatal: missing photo (legacy requests) → skip gracefully.
+    try {
+      const reqSnap = await db.doc(`deliveryRequests/${result.targetUid}`).get();
+      const reqPhotoUrl = reqSnap.data()?.profilePhotoUrl;
+      if (typeof reqPhotoUrl === 'string' && reqPhotoUrl.length > 0) {
+        await db.doc(`users/${result.targetUid}`).set(
+          {
+            profilePhotoUrl: reqPhotoUrl,
+            photoVerifiedAt: Date.now(),
+            photoVerifiedBy: result.adminUid,
+          },
+          { merge: true },
+        );
+      }
+    } catch (photoErr) {
+      console.warn('[approveDeliveryRole] photo copy failed (non-fatal):', photoErr);
+    }
 
     pushToUser(
       result.targetUid,
@@ -8365,6 +8695,24 @@ export const submitOrderRating = onCall<{
       ? db.doc(`users/${deliveryPersonId}`)
       : null;
 
+    // PR-NEXT-5.1 §F — denormalize the customer's display name onto
+    // the review doc. Read OUTSIDE the transaction (it's the
+    // customer's own profile, not part of the rating race) so we
+    // don't widen the transaction's read set. Falls back to the
+    // auth token name, then 'Anonymous'.
+    let customerName = 'Anonymous';
+    try {
+      const customerProfileSnap = await db.doc(`users/${auth!.uid}`).get();
+      customerName = resolveCustomerName(
+        customerProfileSnap.exists
+          ? (customerProfileSnap.data() as any)?.displayName
+          : undefined,
+        (auth as any)?.token?.name,
+      );
+    } catch (e) {
+      console.warn('[submitOrderRating] customerName resolve failed:', e);
+    }
+
     await db.runTransaction(async tx => {
       // Re-read inside the transaction so a rapid double-submit
       // hits the prior-rating check on the second invocation
@@ -8415,15 +8763,61 @@ export const submitOrderRating = onCall<{
       // legacy `rating` field at all on new submissions; the
       // historical legacy field remains untouched on pre-PR-42.1
       // orders and is read-only.
+      // PR-NEXT-REVIEW-SYSTEM §C — determine initial correction state.
+      // Uses default thresholds (3★) for the transaction; per-shop/partner
+      // threshold customization is used for push decisions in the fan-out
+      // block below (post-transaction). This keeps the transaction lean
+      // (no extra reads) and consistent — the correction state only
+      // controls visibility, not notifications.
+      const initReview = decideInitialState({
+        shopStars: shopRating,
+        deliveryStars: deliveryRating ?? null,
+        shopThreshold: 3,
+        partnerThreshold: 3,
+      });
+      const ratingId = db.collection('reviews').doc().id;
+      const nowMs = Date.now();
+
       const orderPayload: Record<string, unknown> = {
         shopRating,
+        correctionState: initReview.state,
+        publishedReason:
+          initReview.reason === 'above_threshold' ? 'above_threshold' : null,
+        publishedAt: initReview.state === 'published' ? nowMs : null,
+        ratingId,
         updatedAt: FieldValue.serverTimestamp(),
       };
       if (shopComment) orderPayload.shopComment = shopComment;
       if (deliveryRating) orderPayload.deliveryRating = deliveryRating;
       if (deliveryComment) orderPayload.deliveryComment = deliveryComment;
 
+      // Write the reviews sub-collection document for public listing.
+      const reviewRef = db.doc(`reviews/${ratingId}`);
+      const reviewDoc: Record<string, unknown> = {
+        ratingId,
+        orderId,
+        shopId,
+        customerId: auth!.uid,
+        // PR-NEXT-5.1 §F — denormalized customer identity for the
+        // public review listing. customerUid mirrors customerId for
+        // the Firestore rules `request.auth.uid == resource.data.customerUid`
+        // pre-published read check.
+        customerUid: auth!.uid,
+        customerName,
+        shopStars: shopRating,
+        shopComment: shopComment ?? null,
+        deliveryStars: deliveryRating ?? null,
+        deliveryComment: deliveryComment ?? null,
+        deliveryPersonId: deliveryPersonId ?? null,
+        correctionState: initReview.state,
+        publishedAt: initReview.state === 'published' ? nowMs : null,
+        publishedReason:
+          initReview.reason === 'above_threshold' ? 'above_threshold' : null,
+        submittedAt: nowMs,
+      };
+
       tx.update(orderRef, orderPayload);
+      tx.set(reviewRef, reviewDoc);
       tx.set(
         shopRef,
         {
@@ -8480,6 +8874,91 @@ export const submitOrderRating = onCall<{
     }).catch(e =>
       console.warn('[submitOrderRating] writeAuditLog failed:', e),
     );
+
+    // PR-NEXT-LOW-RATING-PUSH §C — fan-out on low ratings.
+    // Non-fatal: failures here must not block the rating response.
+    // R10-safe: all Firestore reads are inside the fan-out block,
+    // after the transaction has already committed above.
+    try {
+      const [configSnap, shopSnap] = await Promise.all([
+        db.doc('appConfig/ratingAlerts').get(),
+        db.doc(`shops/${shopId}`).get(),
+      ]);
+      const config = parseAlertConfig(
+        configSnap.exists ? configSnap.data() : null,
+      );
+      const shopData = shopSnap.exists ? shopSnap.data() : null;
+      const shopOverride = shopData
+        ? {
+            lowRatingThreshold: shopData.lowRatingThreshold ?? null,
+            lowRatingNotificationsEnabled:
+              shopData.lowRatingNotificationsEnabled ?? null,
+          }
+        : null;
+
+      // Shop owner fan-out
+      const shopFanout = decideShopFanout({ shopStars: shopRating, shopOverride, config });
+      if (shopFanout.notify) {
+        const ownerUid = shopData?.ownerUid as string | undefined;
+        if (ownerUid) {
+          pushToOwner(
+            ownerUid,
+            '⚠️ Low rating received',
+            `${shopRating}★ on order #${orderId.slice(-6)}. Tap to review.`,
+            { orderId, type: 'low_rating_for_shop' },
+          ).catch(e =>
+            console.warn('[submitOrderRating] pushToOwner low-rating failed:', e),
+          );
+        }
+      }
+
+      // Delivery partner fan-out
+      if (deliveryRating && deliveryPersonId) {
+        const partnerSnap = await db.doc(`users/${deliveryPersonId}`).get();
+        const partnerData = partnerSnap.exists ? partnerSnap.data() : null;
+        const partnerOverride = partnerData
+          ? {
+              lowRatingThreshold: partnerData.lowRatingThreshold ?? null,
+              lowRatingNotificationsEnabled:
+                partnerData.lowRatingNotificationsEnabled ?? null,
+            }
+          : null;
+        const partnerFanout = decidePartnerFanout({
+          partnerStars: deliveryRating,
+          partnerOverride,
+          config,
+        });
+        if (partnerFanout.notify) {
+          pushToUser(
+            deliveryPersonId,
+            '⚠️ Low delivery rating',
+            `${deliveryRating}★ on order #${orderId.slice(-6)}. Tap to review.`,
+            { orderId, type: 'low_rating_for_partner' },
+          ).catch(e =>
+            console.warn('[submitOrderRating] pushToUser low-rating failed:', e),
+          );
+        }
+      }
+
+      // Admin fan-out — uses worst of shop + delivery stars
+      const worstStars = Math.min(
+        shopRating,
+        deliveryRating ?? shopRating,
+      );
+      const adminFanout = decideAdminFanout({ worstStars, config });
+      if (adminFanout.notify) {
+        pushToAdmins(
+          '⚠️ Low rating alert',
+          `${worstStars}★ on order #${orderId.slice(-6)}. Shop: ${shopRating}★${deliveryRating ? ` · Partner: ${deliveryRating}★` : ''}.`,
+          { orderId, type: 'low_rating_for_admin' },
+        ).catch(e =>
+          console.warn('[submitOrderRating] pushToAdmins low-rating failed:', e),
+        );
+      }
+    } catch (fanoutErr) {
+      // Non-fatal — rating already persisted; fan-out failure only affects push.
+      console.warn('[submitOrderRating] low-rating fan-out failed (non-fatal):', fanoutErr);
+    }
 
     return {
       ok: true,
@@ -9302,3 +9781,860 @@ export const queryFeatureUsageLog = onCall<{
   },
 );
 
+// ────────────────────────────────────────────────────────────
+// PR-NEXT-LOW-RATING-PUSH §D — per-role rating alert settings
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Shop owner (or admin) sets low-rating push threshold + enabled flag
+ * for a specific shop.
+ */
+export const updateShopRatingAlertSettings = onCall<{
+  shopId?: string;
+  threshold?: number;
+  enabled?: boolean;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
+    const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
+    const isAdmin = claims.isAdmin === true;
+    const isShopOwner = claims.isShopOwner === true;
+    if (!isAdmin && !isShopOwner) {
+      throw new HttpsError('permission-denied', 'Shop owner or admin required');
+    }
+    const { shopId: inputShopId, threshold, enabled } = request.data ?? {};
+
+    // Resolve target shopId
+    let targetShopId: string;
+    if (isAdmin && typeof inputShopId === 'string' && inputShopId.length > 0) {
+      targetShopId = inputShopId;
+    } else if (isShopOwner) {
+      const ownerSnap = await db
+        .collection('shops')
+        .where('ownerUid', '==', uid)
+        .limit(1)
+        .get();
+      if (ownerSnap.empty) {
+        throw new HttpsError('not-found', 'No shop found for this owner');
+      }
+      // Non-admin shop owner may not target another shop
+      if (
+        typeof inputShopId === 'string' &&
+        inputShopId.length > 0 &&
+        ownerSnap.docs[0].id !== inputShopId
+      ) {
+        throw new HttpsError(
+          'permission-denied',
+          'You can only update settings for your own shop',
+        );
+      }
+      targetShopId = ownerSnap.docs[0].id;
+    } else {
+      throw new HttpsError('invalid-argument', 'shopId required for admin path');
+    }
+
+    const patch: Record<string, unknown> = {};
+    if (typeof threshold === 'number' && Number.isFinite(threshold)) {
+      patch.lowRatingThreshold = threshold;
+    }
+    if (typeof enabled === 'boolean') {
+      patch.lowRatingNotificationsEnabled = enabled;
+    }
+    if (Object.keys(patch).length === 0) {
+      throw new HttpsError('invalid-argument', 'At least one of threshold or enabled required');
+    }
+    await db.doc(`shops/${targetShopId}`).set(patch, { merge: true });
+    return { ok: true, shopId: targetShopId, ...patch };
+  },
+);
+
+/**
+ * Delivery partner sets their own low-rating push threshold + enabled flag.
+ * Writes to their own users/{uid} doc.
+ */
+export const updatePartnerRatingAlertSettings = onCall<{
+  threshold?: number;
+  enabled?: boolean;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
+    const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
+    // HOTFIX 2026-06-10 — auth.token uses `delivery: true` (without
+    // `is` prefix). The `isDelivery` field is the mirror on the USER
+    // DOC (users/{uid}.isDelivery), used by Firestore queries that
+    // can't read custom claims. PR-4's original check looked at the
+    // wrong field. Same Rule 5 schema-verification failure class as
+    // the customerUid→customerId bug from PARTNER-CARD.1.
+    if (claims.delivery !== true) {
+      throw new HttpsError('permission-denied', 'Delivery partner role required');
+    }
+    const { threshold, enabled } = request.data ?? {};
+    const patch: Record<string, unknown> = {};
+    if (typeof threshold === 'number' && Number.isFinite(threshold)) {
+      patch.lowRatingThreshold = threshold;
+    }
+    if (typeof enabled === 'boolean') {
+      patch.lowRatingNotificationsEnabled = enabled;
+    }
+    if (Object.keys(patch).length === 0) {
+      throw new HttpsError('invalid-argument', 'At least one of threshold or enabled required');
+    }
+    await db.doc(`users/${uid}`).set(patch, { merge: true });
+    return { ok: true, ...patch };
+  },
+);
+
+/**
+ * PR-NEXT-BUNDLE-D §F — delivery partner edits their own profile
+ * (display name / vehicle type / photo). Writes to users/{uid}.
+ *
+ * HOTFIX-5 lineage — uses the `delivery` custom claim (NOT
+ * `isDelivery`, which is the user-doc mirror). Pure validation
+ * lives in `deliveryProfileHelpers.validateDeliveryProfilePatch`
+ * (Rule 14 discriminated-union Result) so the branch logic is
+ * unit-tested without booting the admin SDK.
+ */
+export const updateMyDeliveryProfile = onCall<{
+  displayName?: string;
+  vehicleType?: 'motorbike' | 'bicycle' | 'on_foot' | 'car';
+  profilePhotoUrl?: string;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
+    const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
+    if (claims.delivery !== true) {
+      throw new HttpsError(
+        'permission-denied',
+        'Delivery partner role required',
+      );
+    }
+    const result = validateDeliveryProfilePatch(request.data ?? {});
+    if (!result.ok) {
+      throw new HttpsError('invalid-argument', result.message);
+    }
+    if (Object.keys(result.patch).length === 0) {
+      return { ok: true, changed: 0 };
+    }
+    await db.doc(`users/${uid}`).set(result.patch, { merge: true });
+    return { ok: true, changed: Object.keys(result.patch).length };
+  },
+);
+
+/**
+ * PR-NEXT-BUNDLE-D §D — delivery partner earnings summary.
+ *
+ * Returns today + this-week rupee sums + count, plus a paginated
+ * list of recent delivered orders. Delivery-role-gated. Pure
+ * summation logic lives in `earningsHelpers.summarizeEarnings`.
+ */
+export const listMyEarnings = onCall<{
+  from?: number;
+  limit?: number;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
+    const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
+    if (claims.delivery !== true) {
+      throw new HttpsError(
+        'permission-denied',
+        'Delivery partner role required',
+      );
+    }
+    const limit = Math.min(
+      typeof request.data?.limit === 'number' ? request.data.limit : 20,
+      50,
+    );
+    const cursor = request.data?.from;
+
+    // Reuse the existing `deliveryPersonId ASC, createdAt DESC`
+    // composite index (no new index needed). We over-fetch and
+    // filter status === 'delivered' in the pure helper, paginating
+    // by createdAt cursor.
+    let query = db
+      .collection('orders')
+      .where('deliveryPersonId', '==', uid)
+      .orderBy('createdAt', 'desc')
+      .limit(limit + 1);
+    if (typeof cursor === 'number') {
+      query = query.startAfter(cursor);
+    }
+    const snap = await query.get();
+    const hasMore = snap.size > limit;
+    const pageRows = snap.docs.slice(0, limit).map(d => {
+      const data = d.data() as Record<string, any>;
+      return {
+        orderId: d.id,
+        shopName: data.shopName ?? null,
+        status: data.status ?? null,
+        deliveryFee:
+          typeof data.deliveryFee === 'number' ? data.deliveryFee : 0,
+        deliveredAt:
+          typeof data.deliveredAt === 'number' ? data.deliveredAt : 0,
+        createdAt: typeof data.createdAt === 'number' ? data.createdAt : 0,
+      };
+    });
+    const deliveries = pageRows
+      .filter(r => r.status === 'delivered')
+      .map(r => ({
+        orderId: r.orderId,
+        shopName: r.shopName,
+        deliveryFee: r.deliveryFee,
+        deliveredAt: r.deliveredAt,
+      }));
+    const nextCursor =
+      hasMore && pageRows.length > 0
+        ? pageRows[pageRows.length - 1].createdAt
+        : null;
+
+    // Today/week sums read a wider recent window (same index) so the
+    // summary cards reflect all recent deliveries, not just this page.
+    const summarySnap = await db
+      .collection('orders')
+      .where('deliveryPersonId', '==', uid)
+      .orderBy('createdAt', 'desc')
+      .limit(500)
+      .get();
+    const summaryRows = summarySnap.docs
+      .map(d => {
+        const data = d.data() as Record<string, any>;
+        return {
+          status: data.status ?? null,
+          deliveryFee:
+            typeof data.deliveryFee === 'number' ? data.deliveryFee : 0,
+          deliveredAt:
+            typeof data.deliveredAt === 'number' ? data.deliveredAt : 0,
+        };
+      })
+      .filter(r => r.status === 'delivered')
+      .map(r => ({ deliveryFee: r.deliveryFee, deliveredAt: r.deliveredAt }));
+    const summary = summarizeEarnings(summaryRows, Date.now());
+
+    return {
+      ok: true,
+      today: summary.today,
+      week: summary.week,
+      deliveries,
+      hasMore,
+      nextCursor,
+    };
+  },
+);
+
+/**
+ * Admin-only: update global `appConfig/ratingAlerts` defaults that
+ * apply when a shop / partner has no per-entity override.
+ */
+export const updateAdminRatingAlertConfig = onCall<{
+  shopDefaultThreshold?: number;
+  partnerDefaultThreshold?: number;
+  adminThreshold?: number;
+  adminNotificationsEnabled?: boolean;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
+    const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
+    if (claims.isAdmin !== true) {
+      throw new HttpsError('permission-denied', 'Admin role required');
+    }
+    const {
+      shopDefaultThreshold,
+      partnerDefaultThreshold,
+      adminThreshold,
+      adminNotificationsEnabled,
+    } = request.data ?? {};
+    const patch: Record<string, unknown> = {};
+    if (
+      typeof shopDefaultThreshold === 'number' &&
+      Number.isFinite(shopDefaultThreshold)
+    ) {
+      patch.shopDefaultThreshold = shopDefaultThreshold;
+    }
+    if (
+      typeof partnerDefaultThreshold === 'number' &&
+      Number.isFinite(partnerDefaultThreshold)
+    ) {
+      patch.partnerDefaultThreshold = partnerDefaultThreshold;
+    }
+    if (
+      typeof adminThreshold === 'number' &&
+      Number.isFinite(adminThreshold)
+    ) {
+      patch.adminThreshold = adminThreshold;
+    }
+    if (typeof adminNotificationsEnabled === 'boolean') {
+      patch.adminNotificationsEnabled = adminNotificationsEnabled;
+    }
+    if (Object.keys(patch).length === 0) {
+      throw new HttpsError('invalid-argument', 'At least one field required');
+    }
+    await db.doc('appConfig/ratingAlerts').set(patch, { merge: true });
+    return { ok: true, ...patch };
+  },
+);
+
+// ────────────────────────────────────────────────────────────
+// PR-NEXT-REVIEW-SYSTEM §D — review correction workflow callables
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Internal helper: publish a review doc + update shop/partner
+ * public review cache. Used by amendRating, acknowledgeReview,
+ * and publishTimedOutReviews.
+ */
+async function _publishReview(args: {
+  ratingId: string;
+  reason: 'customer_acknowledged' | 'customer_amended' | 'timeout' | 'above_threshold';
+  newShopStars?: number;
+  newDeliveryStars?: number;
+  nowMs: number;
+}): Promise<void> {
+  const reviewSnap = await db.doc(`reviews/${args.ratingId}`).get();
+  if (!reviewSnap.exists) return;
+  const rev = reviewSnap.data() as Record<string, any>;
+  const shopId: string = rev.shopId;
+  const deliveryPersonId: string | null = rev.deliveryPersonId ?? null;
+  const finalShopStars: number = args.newShopStars ?? rev.shopStars;
+  const finalDeliveryStars: number | null = args.newDeliveryStars ?? rev.deliveryStars ?? null;
+  const publishedAt = args.nowMs;
+
+  // Update the review doc
+  const reviewPatch: Record<string, unknown> = {
+    correctionState: 'published',
+    publishedAt,
+    publishedReason: args.reason,
+  };
+  if (args.newShopStars !== undefined) reviewPatch.shopStars = args.newShopStars;
+  if (args.newDeliveryStars !== undefined) reviewPatch.deliveryStars = args.newDeliveryStars;
+
+  // Build the public review cache entry
+  const cacheEntry = {
+    ratingId: args.ratingId,
+    stars: finalShopStars,
+    comment: rev.shopComment ?? null,
+    customerName: rev.customerName ?? null,
+    publishedAt,
+    responseText: rev.responseText ?? null,
+  };
+
+  // Read the shop doc for existing publicReviewLatest
+  const shopSnap = await db.doc(`shops/${shopId}`).get();
+  const shopData = shopSnap.exists ? (shopSnap.data() as Record<string, any>) : {};
+  const existingLatest: any[] = Array.isArray(shopData.publicReviewLatest)
+    ? shopData.publicReviewLatest
+    : [];
+  // Prepend new entry, keep top 5 sorted by publishedAt desc
+  const newLatest = [cacheEntry, ...existingLatest.filter((r: any) => r.ratingId !== args.ratingId)]
+    .sort((a: any, b: any) => b.publishedAt - a.publishedAt)
+    .slice(0, 5);
+
+  await db.runTransaction(async tx => {
+    tx.set(db.doc(`reviews/${args.ratingId}`), reviewPatch, { merge: true });
+    tx.set(
+      db.doc(`shops/${shopId}`),
+      {
+        publicReviewCount: FieldValue.increment(1),
+        publicReviewLatest: newLatest,
+      },
+      { merge: true },
+    );
+    // If there's a delivery partner, update their cache too
+    if (deliveryPersonId && finalDeliveryStars !== null) {
+      const partnerCacheEntry = {
+        ...cacheEntry,
+        stars: finalDeliveryStars,
+        comment: rev.deliveryComment ?? null,
+      };
+      const partnerSnap = await tx.get(db.doc(`users/${deliveryPersonId}`));
+      const partnerData = partnerSnap.exists ? (partnerSnap.data() as Record<string, any>) : {};
+      const partnerLatest: any[] = Array.isArray(partnerData.publicReviewLatest)
+        ? partnerData.publicReviewLatest
+        : [];
+      const newPartnerLatest = [
+        partnerCacheEntry,
+        ...partnerLatest.filter((r: any) => r.ratingId !== args.ratingId),
+      ]
+        .sort((a: any, b: any) => b.publishedAt - a.publishedAt)
+        .slice(0, 5);
+      tx.set(
+        db.doc(`users/${deliveryPersonId}`),
+        {
+          publicReviewCount: FieldValue.increment(1),
+          publicReviewLatest: newPartnerLatest,
+        },
+        { merge: true },
+      );
+    }
+  });
+}
+
+/**
+ * Shop owner or delivery partner responds to a low-rating review.
+ * Transitions 'flagged_low' → 'responded'. Notifies the customer.
+ */
+export const respondToReview = onCall<{
+  ratingId: string;
+  responseText: string;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
+    const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
+    const { ratingId, responseText } = request.data ?? {};
+    if (typeof ratingId !== 'string' || ratingId.length === 0) {
+      throw new HttpsError('invalid-argument', 'ratingId required');
+    }
+    if (typeof responseText !== 'string' || responseText.trim().length === 0) {
+      throw new HttpsError('invalid-argument', 'responseText required');
+    }
+
+    const reviewSnap = await db.doc(`reviews/${ratingId}`).get();
+    if (!reviewSnap.exists) throw new HttpsError('not-found', 'Review not found');
+    const rev = reviewSnap.data() as Record<string, any>;
+
+    // Auth: must be the shop owner of rev.shopId OR the delivery partner
+    const isShopOwner = claims.isShopOwner === true;
+    const isDelivery = claims.isDelivery === true;
+    if (!isShopOwner && !isDelivery) {
+      throw new HttpsError('permission-denied', 'Shop owner or delivery partner required');
+    }
+    if (isShopOwner) {
+      const shopSnap = await db.collection('shops').where('ownerUid', '==', uid).limit(1).get();
+      if (shopSnap.empty || shopSnap.docs[0].id !== rev.shopId) {
+        throw new HttpsError('permission-denied', 'Not the owner of this shop');
+      }
+    }
+    if (isDelivery && !isShopOwner && rev.deliveryPersonId !== uid) {
+      throw new HttpsError('permission-denied', 'Not the delivery partner for this order');
+    }
+
+    if (!canRespond(rev.correctionState)) {
+      throw new HttpsError(
+        'failed-precondition',
+        `Cannot respond in state '${rev.correctionState}'`,
+      );
+    }
+
+    const responseBy = isShopOwner ? 'shop' : 'partner';
+    const nowMs = Date.now();
+    await db.doc(`reviews/${ratingId}`).set(
+      {
+        correctionState: 'responded',
+        responseText: responseText.trim().slice(0, 1000),
+        responseBy,
+        responseAt: nowMs,
+      },
+      { merge: true },
+    );
+
+    // Notify the customer
+    const orderSnap = await db.doc(`orders/${rev.orderId}`).get();
+    const orderData = orderSnap.exists ? (orderSnap.data() as any) : null;
+    if (orderData?.customerId || rev.customerId) {
+      const customerId: string = rev.customerId ?? orderData.customerId;
+      pushToUser(
+        customerId,
+        '💬 Shop responded to your review',
+        'Tap to read the response and update your rating.',
+        { ratingId, orderId: rev.orderId, type: 'review_responded' },
+      ).catch(e => console.warn('[respondToReview] push failed:', e));
+    }
+
+    return { ok: true, state: 'responded' };
+  },
+);
+
+/**
+ * Customer amends their stars after a shop/partner response.
+ * Transitions 'responded' → 'amended' → 'published'.
+ * Recomputes rolling averages if stars changed.
+ */
+export const amendRating = onCall<{
+  ratingId: string;
+  newShopStars?: number;
+  newDeliveryStars?: number;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
+    const { ratingId, newShopStars, newDeliveryStars } = request.data ?? {};
+    if (typeof ratingId !== 'string' || ratingId.length === 0) {
+      throw new HttpsError('invalid-argument', 'ratingId required');
+    }
+
+    const reviewSnap = await db.doc(`reviews/${ratingId}`).get();
+    if (!reviewSnap.exists) throw new HttpsError('not-found', 'Review not found');
+    const rev = reviewSnap.data() as Record<string, any>;
+
+    if (rev.customerId !== uid) {
+      throw new HttpsError('permission-denied', 'Not your review');
+    }
+    if (!canAmend(rev.correctionState)) {
+      throw new HttpsError(
+        'failed-precondition',
+        `Cannot amend in state '${rev.correctionState}'`,
+      );
+    }
+
+    const nowMs = Date.now();
+    await db.doc(`reviews/${ratingId}`).set(
+      {
+        correctionState: 'amended',
+        amendedStars: {
+          shopStars: newShopStars ?? null,
+          deliveryStars: newDeliveryStars ?? null,
+        },
+        amendedAt: nowMs,
+      },
+      { merge: true },
+    );
+
+    // Recompute rolling averages if stars changed
+    if (
+      typeof newShopStars === 'number' &&
+      newShopStars !== rev.shopStars
+    ) {
+      const shopSnap = await db.doc(`shops/${rev.shopId}`).get();
+      const shopData = shopSnap.exists ? (shopSnap.data() as any) : {};
+      // Undo old + add new: simple recompute for pilot scale
+      const oldCount: number = shopData.ratingCount ?? 1;
+      const oldAvg: number = shopData.ratingAvg ?? rev.shopStars;
+      const oldSum = oldAvg * oldCount;
+      const newAvg = (oldSum - rev.shopStars + newShopStars) / oldCount;
+      await db.doc(`shops/${rev.shopId}`).set(
+        { ratingAvg: newAvg, updatedAt: FieldValue.serverTimestamp() },
+        { merge: true },
+      );
+    }
+
+    await _publishReview({
+      ratingId,
+      reason: 'customer_amended',
+      newShopStars,
+      newDeliveryStars,
+      nowMs,
+    });
+
+    return { ok: true, state: 'published' };
+  },
+);
+
+/**
+ * Customer acknowledges the response, keeping their original stars.
+ * Transitions 'responded' → 'published'.
+ */
+export const acknowledgeReview = onCall<{ ratingId: string }>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
+    const { ratingId } = request.data ?? {};
+    if (typeof ratingId !== 'string' || ratingId.length === 0) {
+      throw new HttpsError('invalid-argument', 'ratingId required');
+    }
+
+    const reviewSnap = await db.doc(`reviews/${ratingId}`).get();
+    if (!reviewSnap.exists) throw new HttpsError('not-found', 'Review not found');
+    const rev = reviewSnap.data() as Record<string, any>;
+
+    if (rev.customerId !== uid) {
+      throw new HttpsError('permission-denied', 'Not your review');
+    }
+    if (!canAcknowledge(rev.correctionState)) {
+      throw new HttpsError(
+        'failed-precondition',
+        `Cannot acknowledge in state '${rev.correctionState}'`,
+      );
+    }
+
+    await _publishReview({
+      ratingId,
+      reason: 'customer_acknowledged',
+      nowMs: Date.now(),
+    });
+
+    return { ok: true, state: 'published' };
+  },
+);
+
+/**
+ * Scheduled daily: finds all 'flagged_low' reviews older than 7 days
+ * and auto-publishes them (with or without a response from the shop).
+ */
+export const publishTimedOutReviews = onSchedule(
+  { schedule: 'every 24 hours', region: 'asia-south1' },
+  async () => {
+    const cutoffMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const snap = await db
+      .collection('reviews')
+      .where('correctionState', '==', 'flagged_low')
+      .where('submittedAt', '<', cutoffMs)
+      .get();
+
+    if (snap.empty) {
+      console.log('[publishTimedOutReviews] no stale reviews');
+      return;
+    }
+
+    const nowMs = Date.now();
+    const results = await Promise.allSettled(
+      snap.docs.map(d =>
+        _publishReview({
+          ratingId: d.id,
+          reason: 'timeout',
+          nowMs,
+        }),
+      ),
+    );
+    const failed = results.filter(r => r.status === 'rejected').length;
+    console.log(
+      `[publishTimedOutReviews] processed ${snap.size}, failed ${failed}`,
+    );
+  },
+);
+
+/**
+ * Returns published reviews for a shop, paginated.
+ * Reads from `reviews` collection filtered by shopId + state = published.
+ */
+export const listShopReviews = onCall<{
+  shopId: string;
+  limit?: number;
+  cursor?: number;
+  // PR-NEXT-BUNDLE-E §E — admin moderation scope. When true AND the
+  // caller holds the admin claim, ALL reviews for the shop are
+  // returned (including pre-published flagged_low / responded /
+  // amended), each carrying its `correctionState` for the state pill.
+  adminScope?: boolean;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const { shopId, limit: limitParam, cursor, adminScope } = request.data ?? {};
+    if (typeof shopId !== 'string' || shopId.length === 0) {
+      throw new HttpsError('invalid-argument', 'shopId required');
+    }
+    const pageSize = Math.min(typeof limitParam === 'number' ? limitParam : 20, 50);
+
+    // PR-NEXT-BUNDLE-E §E — admin scope path. Validate the admin claim
+    // and return the full set. We use a single-equality query (no
+    // composite index needed) + in-memory sort/filter so this stays
+    // schema-additive (no new index).
+    if (adminScope === true) {
+      const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
+      if (claims.admin !== true) {
+        throw new HttpsError('permission-denied', 'Admin role required');
+      }
+      const snap = await db
+        .collection('reviews')
+        .where('shopId', '==', shopId)
+        .limit(100)
+        .get();
+      const all = snap.docs.map(d => {
+        const data = d.data() as Record<string, any>;
+        return {
+          ratingId: d.id,
+          correctionState: data.correctionState ?? null,
+          shopStars: data.shopStars,
+          shopComment: data.shopComment ?? null,
+          deliveryStars: data.deliveryStars ?? null,
+          customerName: data.customerName ?? null,
+          submittedAt: data.submittedAt ?? null,
+          publishedAt: data.publishedAt ?? null,
+          responseText: data.responseText ?? null,
+          responseBy: data.responseBy ?? null,
+        };
+      });
+      const reviews = filterReviewsForCaller(all, true).sort(
+        (a, b) =>
+          (b.publishedAt ?? b.submittedAt ?? 0) -
+          (a.publishedAt ?? a.submittedAt ?? 0),
+      );
+      return { ok: true, reviews, hasMore: false };
+    }
+
+    let query = db
+      .collection('reviews')
+      .where('shopId', '==', shopId)
+      .where('correctionState', '==', 'published')
+      .orderBy('publishedAt', 'desc')
+      .limit(pageSize + 1);
+
+    if (typeof cursor === 'number') {
+      query = query.startAfter(cursor);
+    }
+
+    const snap = await query.get();
+    const hasMore = snap.size > pageSize;
+    const docs = snap.docs.slice(0, pageSize).map(d => {
+      const data = d.data() as Record<string, any>;
+      return {
+        ratingId: d.id,
+        correctionState: data.correctionState ?? 'published',
+        shopStars: data.shopStars,
+        shopComment: data.shopComment ?? null,
+        deliveryStars: data.deliveryStars ?? null,
+        customerName: data.customerName ?? null,
+        publishedAt: data.publishedAt,
+        responseText: data.responseText ?? null,
+        responseBy: data.responseBy ?? null,
+      };
+    });
+
+    return { ok: true, reviews: docs, hasMore };
+  },
+);
+
+/**
+ * PR-NEXT-5.1 §D — Returns published delivery reviews for a partner,
+ * paginated. Reads from `reviews` collection filtered by
+ * deliveryPersonId + correctionState = published.
+ */
+export const listPartnerReviews = onCall<{
+  partnerUid: string;
+  limit?: number;
+  cursor?: number;
+  // PR-NEXT-BUNDLE-E §E — admin moderation scope (mirrors listShopReviews).
+  adminScope?: boolean;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const { partnerUid, limit: limitParam, cursor, adminScope } =
+      request.data ?? {};
+    if (typeof partnerUid !== 'string' || partnerUid.length === 0) {
+      throw new HttpsError('invalid-argument', 'partnerUid required');
+    }
+    const pageSize = Math.min(typeof limitParam === 'number' ? limitParam : 20, 50);
+
+    // PR-NEXT-BUNDLE-E §E — admin scope: validate the admin claim, then
+    // return ALL of the partner's reviews (no published filter), using
+    // a single-equality query + in-memory sort/filter (no new index).
+    if (adminScope === true) {
+      const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
+      if (claims.admin !== true) {
+        throw new HttpsError('permission-denied', 'Admin role required');
+      }
+      const snap = await db
+        .collection('reviews')
+        .where('deliveryPersonId', '==', partnerUid)
+        .limit(100)
+        .get();
+      const all = snap.docs.map(d => {
+        const data = d.data() as Record<string, any>;
+        return {
+          ratingId: d.id,
+          correctionState: data.correctionState ?? null,
+          deliveryStars: data.deliveryStars,
+          deliveryComment: data.deliveryComment ?? null,
+          customerName: data.customerName ?? null,
+          submittedAt: data.submittedAt ?? null,
+          publishedAt: data.publishedAt ?? null,
+          responseText: data.responseText ?? null,
+          responseBy: data.responseBy ?? null,
+        };
+      });
+      const reviews = filterReviewsForCaller(all, true).sort(
+        (a, b) =>
+          (b.publishedAt ?? b.submittedAt ?? 0) -
+          (a.publishedAt ?? a.submittedAt ?? 0),
+      );
+      return { ok: true, reviews, hasMore: false };
+    }
+
+    let query = db
+      .collection('reviews')
+      .where('deliveryPersonId', '==', partnerUid)
+      .where('correctionState', '==', 'published')
+      .orderBy('publishedAt', 'desc')
+      .limit(pageSize + 1);
+
+    if (typeof cursor === 'number') {
+      query = query.startAfter(cursor);
+    }
+
+    const snap = await query.get();
+    const hasMore = snap.size > pageSize;
+    const docs = snap.docs.slice(0, pageSize).map(d => {
+      const data = d.data() as Record<string, any>;
+      return {
+        ratingId: d.id,
+        correctionState: data.correctionState ?? 'published',
+        deliveryStars: data.deliveryStars,
+        deliveryComment: data.deliveryComment ?? null,
+        customerName: data.customerName ?? null,
+        publishedAt: data.publishedAt,
+        responseText: data.responseText ?? null,
+        responseBy: data.responseBy ?? null,
+      };
+    });
+
+    return { ok: true, reviews: docs, hasMore };
+  },
+);
+
+/**
+ * PR-NEXT-BUNDLE-E §D — admin-only order review thread.
+ *
+ * Reads the order's `ratingId`, fetches the review doc, and returns
+ * a chronological timeline (submitted → response → amended →
+ * published) built by the pure `buildReviewTimeline` helper, plus a
+ * flat summary for the header. Admin claim required.
+ */
+export const getOrderReviewThread = onCall<{ orderId: string }>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
+    const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
+    if (claims.admin !== true) {
+      throw new HttpsError('permission-denied', 'Admin role required');
+    }
+    const orderId = String((request.data as { orderId?: unknown })?.orderId ?? '');
+    if (orderId.length === 0) {
+      throw new HttpsError('invalid-argument', 'orderId required');
+    }
+    const orderSnap = await db.doc(`orders/${orderId}`).get();
+    if (!orderSnap.exists) {
+      throw new HttpsError('not-found', 'Order not found');
+    }
+    const order = orderSnap.data() as Record<string, any>;
+    const ratingId =
+      typeof order.ratingId === 'string' ? order.ratingId : null;
+    if (!ratingId) {
+      // Order has no rating yet — empty thread, not an error.
+      return { ok: true, hasReview: false, review: null, timeline: [] };
+    }
+    const reviewSnap = await db.doc(`reviews/${ratingId}`).get();
+    if (!reviewSnap.exists) {
+      return { ok: true, hasReview: false, review: null, timeline: [] };
+    }
+    const data = reviewSnap.data() as Record<string, any>;
+    const timeline = buildReviewTimeline(data);
+    return {
+      ok: true,
+      hasReview: true,
+      review: {
+        ratingId,
+        correctionState: data.correctionState ?? null,
+        shopStars: data.shopStars ?? null,
+        deliveryStars: data.deliveryStars ?? null,
+        shopComment: data.shopComment ?? null,
+        deliveryComment: data.deliveryComment ?? null,
+        customerName: data.customerName ?? null,
+        responseText: data.responseText ?? null,
+        responseBy: data.responseBy ?? null,
+      },
+      timeline,
+    };
+  },
+);

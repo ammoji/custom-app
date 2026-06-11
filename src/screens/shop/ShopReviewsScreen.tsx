@@ -1,0 +1,257 @@
+/**
+ * PR-NEXT-REVIEW-SYSTEM §F — public reviews for a shop.
+ *
+ * Shows the shop's publicReviewLatest cache (top-5) instantly,
+ * then paginates older reviews via listShopReviews callable.
+ * Only 'published' reviews are surfaced here.
+ */
+import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  ActivityIndicator,
+  FlatList,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import EmptyState from '../../components/common/EmptyState';
+import ScreenHeader from '../../components/common/ScreenHeader';
+import { colors, radii, spacing, typography } from '../../constants/theme';
+import { orderService } from '../../services/orderService';
+import type { RootStackParamList } from '../../navigation/AppNavigator';
+
+type Review = {
+  ratingId: string;
+  correctionState?: string | null;
+  shopStars: number;
+  shopComment: string | null;
+  customerName: string | null;
+  publishedAt: number;
+  responseText: string | null;
+  responseBy: string | null;
+};
+
+// PR-NEXT-BUNDLE-E §E — human-readable state pill for admin mode.
+function stateLabel(state?: string | null): string | null {
+  switch (state) {
+    case 'flagged_low':
+      return 'Flagged (low)';
+    case 'responded':
+      return 'Responded';
+    case 'amended':
+      return 'Amended';
+    case 'published':
+      return null; // no pill needed for the normal case
+    default:
+      return null;
+  }
+}
+
+function StarRow({ count }: { count: number }) {
+  return (
+    <Text style={styles.stars}>
+      {'★'.repeat(Math.min(5, Math.max(1, count)))}
+      {'☆'.repeat(Math.max(0, 5 - count))}
+    </Text>
+  );
+}
+
+function ReviewCard({ item }: { item: Review }) {
+  const ago = Math.floor((Date.now() - item.publishedAt) / (1000 * 60 * 60 * 24));
+  const agoStr =
+    !item.publishedAt || Number.isNaN(ago)
+      ? 'Pending'
+      : ago === 0
+      ? 'Today'
+      : ago === 1
+      ? '1 day ago'
+      : `${ago} days ago`;
+  const pill = stateLabel(item.correctionState);
+  return (
+    <View style={styles.card}>
+      <View style={styles.cardHeader}>
+        <StarRow count={item.shopStars} />
+        <Text style={styles.cardMeta}>
+          {item.customerName ?? 'Customer'} · {agoStr}
+        </Text>
+      </View>
+      {pill && (
+        <View style={styles.statePill}>
+          <Text style={styles.statePillText}>{pill}</Text>
+        </View>
+      )}
+      {!!item.shopComment && (
+        <Text style={styles.commentText}>{item.shopComment}</Text>
+      )}
+      {!!item.responseText && (
+        <View style={styles.responseBox}>
+          <Text style={styles.responseLabel}>
+            Shop response{item.responseBy === 'partner' ? ' (partner)' : ''}:
+          </Text>
+          <Text style={styles.responseText}>{item.responseText}</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+export default function ShopReviewsScreen() {
+  const nav = useNavigation<any>();
+  const route = useRoute<RouteProp<RootStackParamList, 'ShopReviews'>>();
+  const { shopId, shopName, mode } = route.params;
+  const isAdmin = mode === 'admin';
+
+  const [reviews, setReviews] = useState<Review[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [cursor, setCursor] = useState<number | undefined>(undefined);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadReviews = useCallback(async (reset: boolean) => {
+    if (reset) {
+      setLoading(true);
+      setError(null);
+    } else {
+      setLoadingMore(true);
+    }
+    try {
+      const res = await orderService.listShopReviews({
+        shopId,
+        limit: 20,
+        cursor: reset ? undefined : cursor,
+        adminScope: isAdmin,
+      });
+      const next = res.reviews as Review[];
+      setReviews(prev => (reset ? next : [...prev, ...next]));
+      // Admin scope returns the full set in one shot (hasMore=false)
+      // and pre-published reviews have a null publishedAt, so we skip
+      // cursor advancement in that mode.
+      setHasMore(res.hasMore);
+      if (!isAdmin && next.length > 0) {
+        setCursor(next[next.length - 1].publishedAt);
+      }
+    } catch (e: any) {
+      setError(e?.message ?? 'Could not load reviews');
+    } finally {
+      setLoading(false);
+      setLoadingMore(false);
+    }
+  }, [shopId, cursor, isAdmin]);
+
+  useEffect(() => {
+    loadReviews(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shopId]);
+
+  if (loading) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <ScreenHeader title={`${shopName ?? 'Shop'} Reviews`} onBack={() => nav.goBack()} />
+        <ActivityIndicator style={{ marginTop: spacing.xxl ?? spacing.xl }} color={colors.primary} />
+      </SafeAreaView>
+    );
+  }
+
+  if (error) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <ScreenHeader title="Reviews" onBack={() => nav.goBack()} />
+        <EmptyState title="Could not load reviews" subtitle={error} />
+      </SafeAreaView>
+    );
+  }
+
+  return (
+    <SafeAreaView style={styles.container} edges={['top']}>
+      <ScreenHeader title={`${shopName ?? 'Shop'} Reviews`} onBack={() => nav.goBack()} />
+      <FlatList
+        data={reviews}
+        keyExtractor={item => item.ratingId}
+        renderItem={({ item }) => <ReviewCard item={item} />}
+        contentContainerStyle={
+          reviews.length === 0 ? styles.emptyContent : styles.listContent
+        }
+        ListEmptyComponent={
+          <EmptyState title="No reviews yet" subtitle="Published reviews will appear here." />
+        }
+        ListFooterComponent={
+          loadingMore ? (
+            <ActivityIndicator style={{ margin: spacing.lg }} color={colors.primary} />
+          ) : hasMore ? null : null
+        }
+        onEndReached={() => {
+          if (hasMore && !loadingMore) loadReviews(false);
+        }}
+        onEndReachedThreshold={0.3}
+      />
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.bg },
+  listContent: { padding: spacing.lg, paddingBottom: spacing.xxl ?? spacing.xl },
+  emptyContent: { flex: 1 },
+  card: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: spacing.xs,
+  },
+  stars: {
+    fontSize: 16,
+    color: '#F59E0B',
+    letterSpacing: 1,
+  },
+  cardMeta: {
+    ...typography.caption,
+    color: colors.textSecondary,
+  },
+  // PR-NEXT-BUNDLE-E §E — admin-mode state pill.
+  statePill: {
+    alignSelf: 'flex-start',
+    backgroundColor: colors.warning,
+    borderRadius: radii.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    marginBottom: spacing.xs,
+  },
+  statePillText: {
+    ...typography.caption,
+    color: '#fff',
+    fontWeight: '700',
+  },
+  commentText: {
+    ...typography.body,
+    color: colors.textPrimary,
+    marginTop: spacing.xs,
+  },
+  responseBox: {
+    backgroundColor: colors.bg,
+    borderRadius: radii.sm,
+    padding: spacing.sm,
+    marginTop: spacing.sm,
+    borderLeftWidth: 3,
+    borderLeftColor: colors.primary,
+  },
+  responseLabel: {
+    ...typography.caption,
+    color: colors.primary,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  responseText: {
+    ...typography.body,
+    color: colors.textPrimary,
+  },
+});

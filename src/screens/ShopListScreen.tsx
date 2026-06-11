@@ -14,6 +14,13 @@ import { useLocationStore } from '../store/useLocationStore';
 import { useProfileStore } from '../store/useProfileStore';
 import type { Shop } from '../types';
 import { formatRupees } from '../utils/format';
+// PR-NEXT-BUNDLE-F §E — DO NOT REMOVE. Sort dropdown helpers for the
+// dominant nearby-shops list.
+import {
+  SHOP_SORT_LABELS,
+  sortShopsForBrowse,
+  type ShopSortMode,
+} from '../utils/homeRedesignHelpers';
 import { useShopListData } from './ShopListScreen.useShopListData';
 
 // PR 41 hotfix — stable empty-favorites reference. Without this,
@@ -40,6 +47,12 @@ export default function ShopListScreen() {
   // user profile; a shop counts as favorited if its key is
   // present (server normalises empty-array entries away).
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  // PR-NEXT-BUNDLE-F §E — nearby-shops sort. Default 'distance'
+  // (nearest first) preserves the pre-bundle ordering. `sortMenuOpen`
+  // toggles the inline options row (no Modal). Both above the
+  // conditional render below (Rule 2).
+  const [sortMode, setSortMode] = useState<ShopSortMode>('distance');
+  const [sortMenuOpen, setSortMenuOpen] = useState(false);
 
   const itemCount = useCartStore(s => s.itemCount());
   const total = useCartStore(s => s.total());
@@ -93,6 +106,9 @@ export default function ShopListScreen() {
     }
     return true;
   });
+
+  // PR-NEXT-BUNDLE-F §E — apply the chosen sort to the filtered list.
+  const sorted = sortShopsForBrowse(filtered, sortMode);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -157,11 +173,58 @@ export default function ShopListScreen() {
           </Pressable>
         </View>
       )}
+
+      {/* PR-NEXT-BUNDLE-F §E/§F — fixed "Nearby shops" header + sort
+          dropdown. The list below is the only scrollable element. */}
+      {!loading && (
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.sectionHeaderText}>Nearby shops</Text>
+          <Pressable
+            onPress={() => setSortMenuOpen(o => !o)}
+            style={styles.sortControl}
+            accessibilityRole="button"
+            accessibilityLabel={`Sort: ${SHOP_SORT_LABELS[sortMode]}. Tap to change.`}
+          >
+            <Text style={styles.sortControlText}>
+              Sort: {SHOP_SORT_LABELS[sortMode]} {sortMenuOpen ? '▴' : '▾'}
+            </Text>
+          </Pressable>
+        </View>
+      )}
+      {!loading && sortMenuOpen && (
+        <View style={styles.sortMenu}>
+          {(['distance', 'rating', 'reviews'] as ShopSortMode[]).map(mode => (
+            <Pressable
+              key={mode}
+              onPress={() => {
+                setSortMode(mode);
+                setSortMenuOpen(false);
+              }}
+              style={[
+                styles.sortOption,
+                sortMode === mode && styles.sortOptionActive,
+              ]}
+              accessibilityRole="button"
+              accessibilityState={{ selected: sortMode === mode }}
+            >
+              <Text
+                style={[
+                  styles.sortOptionText,
+                  sortMode === mode && styles.sortOptionTextActive,
+                ]}
+              >
+                {SHOP_SORT_LABELS[mode]}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+
       {loading ? (
         <Loader fullScreen />
       ) : (
         <FlatList
-          data={filtered}
+          data={sorted}
           keyExtractor={s => s.id}
           contentContainerStyle={[
             styles.list,
@@ -268,6 +331,35 @@ const styles = StyleSheet.create({
     borderRadius: radii.sm,
   },
   retryText: { ...typography.bodyBold, color: '#fff' },
+  // PR-NEXT-BUNDLE-F §E/§F — nearby-shops section header + sort menu.
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.sm,
+  },
+  sectionHeaderText: { fontSize: 14, fontWeight: '500', color: colors.textPrimary },
+  sortControl: { paddingVertical: spacing.xs, paddingHorizontal: spacing.sm },
+  sortControlText: { fontSize: 12, color: colors.textSecondary },
+  sortMenu: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.sm,
+  },
+  sortOption: {
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.md,
+    borderRadius: radii.pill,
+    backgroundColor: colors.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+  },
+  sortOptionActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  sortOptionText: { fontSize: 12, color: colors.textPrimary },
+  sortOptionTextActive: { color: '#fff' },
   // PR 36.1 — favorites filter pill + empty state.
   filterRow: {
     paddingHorizontal: spacing.lg,

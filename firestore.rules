@@ -246,5 +246,39 @@ service cloud.firestore {
     match /featureUsageLog/{eventId} {
       allow read, write: if false;
     }
+
+    // PR-NEXT-5.1 §G — review correction workflow docs.
+    //
+    // Reads: anyone may read PUBLISHED reviews (publishedAt != null).
+    // Pre-published reviews (flagged_low / responded states) are
+    // readable only by:
+    //   - the customer who wrote it (customerUid)
+    //   - the shop owner of the shop being rated (via order lookup)
+    //   - the delivery partner being rated (via order lookup)
+    //   - admin
+    //
+    // Writes: ALWAYS denied for clients. Every mutation
+    // (submitOrderRating, respondToReview, amendRating,
+    // acknowledgeReview, publishTimedOutReviews) flows through the
+    // Admin SDK in server callables. Defense in depth.
+    match /reviews/{ratingId} {
+      allow read: if
+        resource.data.publishedAt != null
+        || (request.auth != null && request.auth.uid == resource.data.customerUid)
+        || isAdmin()
+        || (
+          request.auth != null
+          && request.auth.token.shopOwner == true
+          && request.auth.token.shopId ==
+             get(/databases/$(database)/documents/orders/$(resource.data.orderId)).data.shopId
+        )
+        || (
+          request.auth != null
+          && request.auth.token.delivery == true
+          && request.auth.uid ==
+             get(/databases/$(database)/documents/orders/$(resource.data.orderId)).data.deliveryPersonId
+        );
+      allow write: if false;
+    }
   }
 }

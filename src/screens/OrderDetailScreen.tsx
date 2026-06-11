@@ -142,7 +142,15 @@ export default function OrderDetailScreen() {
   // and the sheet picks the static `order.deliveryDistanceKm` /
   // `deliveryDurationMin` fallback when the live fields are null
   // (server rejected with `failed-precondition`).
-  const livePartnerEta = useLivePartnerEta(orderId, partnerSheetOpen);
+  // PR-NEXT-BUNDLE-A §C (Finding #12a) — DO NOT REMOVE. Third arg
+  // passes order status so the hook stops polling and clears state
+  // when the order is delivered/cancelled (avoids stale "Arriving
+  // now" from partner→drop ~0 distance after delivery).
+  const livePartnerEta = useLivePartnerEta(
+    orderId,
+    partnerSheetOpen,
+    order?.status,
+  );
 
   // PR 20 — local optimistic rating state. Once the customer
   // submits a rating, we want the UI to flip immediately to a
@@ -271,19 +279,23 @@ export default function OrderDetailScreen() {
     setRevealingPhone(false);
   }, [orderId]);
 
-  // PR-NEXT-PARTNER-CARD.1 (Case 6 retest) — phone-reveal handler.
-  // Calls the server-gated `getDeliveryPartnerContact` callable and
-  // caches the returned number in screen state. Server enforces the
-  // (customer, has-partner, picked-up) gate; client surfaces the
-  // friendly error verbatim — the canonical pre-pickup message is
-  // "Partner phone is shared once the order is picked up." which
-  // matches the muted copy already visible in the sheet pre-pickup.
-  const onRevealPartnerPhone = useCallback(async () => {
+  // PR-NEXT-BUNDLE-B §B (Finding #10) — one-tap call handler.
+  // Collapses the previous two-step reveal-then-call UX into a
+  // single "Call partner" CTA. If the phone is already cached in
+  // `partnerPhone` state, open the dialer immediately. Otherwise
+  // fetch via `getDeliveryPartnerContact`, cache, then dial —
+  // all in one tap. `revealingPhone` gates the button spinner.
+  const onCallPartner = useCallback(async () => {
     if (!order) return;
+    if (partnerPhone) {
+      Linking.openURL(`tel:${partnerPhone}`).catch(() => {});
+      return;
+    }
     setRevealingPhone(true);
     try {
       const { phone } = await orderService.getDeliveryPartnerContact(order.id);
       setPartnerPhone(phone);
+      Linking.openURL(`tel:${phone}`).catch(() => {});
     } catch (e: any) {
       showAlert(
         'Could not load phone',
@@ -292,7 +304,7 @@ export default function OrderDetailScreen() {
     } finally {
       setRevealingPhone(false);
     }
-  }, [order]);
+  }, [order, partnerPhone]);
 
   // PR 17 — customer-side "Call shop" handler. Mirror of the
   // shopkeeper's `onCallCustomer` flow on ShopOrderDetailScreen
@@ -445,7 +457,16 @@ export default function OrderDetailScreen() {
               </Text>
             </View>
           )}
-          {etaDisplay.kind === 'ready_by' && (
+          {/* PR-NEXT-BUNDLE-A §B (Finding #6) — DO NOT REMOVE.
+              Show readyByEstimate block ONLY during accepted/preparing.
+              Finding #17 already suppressed the ETA countdown on
+              ready_for_pickup via orderEtaDisplay returning 'hidden';
+              this explicit status gate also suppresses the sub-message
+              text ("by HH:MM · delivery partner brings it to you") so
+              the two-line pickup row can't appear after the order has
+              moved beyond the preparation phase. */}
+          {etaDisplay.kind === 'ready_by' &&
+            (order.status === 'accepted' || order.status === 'preparing') && (
             <View style={styles.pickupRow}>
               <Text style={styles.pickupPrimary}>
                 {formatRelativeTime(
@@ -974,13 +995,32 @@ export default function OrderDetailScreen() {
             : null
         }
         partnerVehicleType={order.deliveryPersonVehicleType ?? null}
-        partnerPhone={partnerPhone}
+        // PR-NEXT-PARTNER-PHOTO §F — DO NOT REMOVE. Null on legacy
+        // orders; sheet falls back to initials avatar automatically.
+        partnerPhotoUrl={order.deliveryPersonPhotoUrl ?? null}
+        // PR-NEXT-BUNDLE-B §B — DO NOT REMOVE. Single one-tap call;
+        // fetch + dial in one handler (see onCallPartner above).
         revealing={revealingPhone}
-        onRevealPhone={onRevealPartnerPhone}
+        onCallPartner={onCallPartner}
         // PR-NEXT-PARTNER-CARD.2 — live-ETA polling state. Hook
         // auto-pauses when `partnerSheetOpen` is false so the 30s
         // interval doesn't fire while the sheet is closed.
         live={livePartnerEta}
+        // PR-NEXT-BUNDLE-A §C (Finding #12a) — DO NOT REMOVE. Sheet
+        // shows static Delivered/Cancelled copy when order is
+        // finalized, replacing the stale live-ETA rows.
+        orderStatus={order.status}
+        // PR-NEXT-STATIC-MAP-PREVIEW §C — DO NOT REMOVE. Null on
+        // legacy orders (pre-PR-49/46); map slot hides automatically.
+        shopLocation={order.shopLocation ?? null}
+        dropLocation={
+          order.deliveryLocation
+            ? { lat: order.deliveryLocation.lat, lng: order.deliveryLocation.lng }
+            : null
+        }
+        // PR-NEXT-5.1 §E — DO NOT REMOVE. Drives the tappable trust
+        // line → PartnerReviewsScreen. Null on unclaimed orders.
+        partnerUid={order.deliveryPersonId ?? null}
       />
     </SafeAreaView>
   );

@@ -407,13 +407,27 @@ export default function ShopDetailManagementScreen() {
               stats. Customer-facing surfaces got this in PR 20 but
               the admin shop detail was missed. Admins use this to
               spot low-rated shops worth investigating. */}
-          <View style={{ marginTop: 8 }}>
+          {/* PR-NEXT-BUNDLE-E §E — tappable rating → admin moderation
+              view (all reviews, including pre-published flagged_low). */}
+          <Pressable
+            style={{ marginTop: 8 }}
+            onPress={() =>
+              nav.navigate('ShopReviews', {
+                shopId: shop.id,
+                shopName: shop.name,
+                mode: 'admin',
+              })
+            }
+            accessibilityRole="button"
+            accessibilityLabel="View all reviews for this shop"
+          >
             <ShopRatingBadge
               ratingAvg={shop.ratingAvg}
               ratingCount={shop.ratingCount}
               size="md"
             />
-          </View>
+            <Text style={styles.reviewsDrillHint}>Tap to view all reviews ›</Text>
+          </Pressable>
           <View style={[styles.badge, styles[`badge_${status}`]]}>
             <Text style={[styles.badgeText, styles[`badgeText_${status}`]]}>
               {status}
@@ -878,6 +892,12 @@ const styles = StyleSheet.create({
     borderColor: colors.danger,
   },
   name: { ...typography.h2 },
+  // PR-NEXT-BUNDLE-E §E — drill-in hint under the rating badge.
+  reviewsDrillHint: {
+    ...typography.caption,
+    color: colors.primary,
+    marginTop: spacing.xs,
+  },
   address: {
     ...typography.body,
     color: colors.textSecondary,

@@ -4,8 +4,10 @@ import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-nati
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import Button from '../components/common/Button';
 import QuickSwitchModal from '../components/dev/QuickSwitchModal';
-import ActiveOrdersRail from '../components/order/ActiveOrdersRail';
-import OrderAgainRail from '../components/order/OrderAgainRail';
+// PR-NEXT-BUNDLE-F — DO NOT REMOVE. Compact banner + strip replace
+// the old big "Active orders" + "Order again" cards.
+import ActiveOrderBanner from '../components/home/ActiveOrderBanner';
+import RecentShopsStrip from '../components/home/RecentShopsStrip';
 import ReorderModal from '../components/order/ReorderModal';
 import { APP_NAME } from '../constants/branding';
 import { CATEGORIES } from '../constants/categories';
@@ -307,13 +309,6 @@ export default function HomeScreen() {
     [recentOrders],
   );
 
-  const onActiveOrderTap = useCallback(
-    (order: Order) => {
-      nav.navigate('OrderDetail', { orderId: order.id });
-    },
-    [nav],
-  );
-
   // A user has a "non-customer role" when they wear at least one extra
   // hat. We use this to decide whether to render the "Your Roles"
   // section header.
@@ -356,25 +351,33 @@ export default function HomeScreen() {
           <Text style={styles.searchPlaceholder}>🔍  Search for atta, milk, soap...</Text>
         </Pressable>
 
-        {/* PR 15 — "Your active orders" rail. Sits ABOVE the Order
-            Again rail because in-flight orders need glanceable
-            attention more than reorder prompts. Self-hides when
-            empty (first-time / anonymous / all-terminal users). */}
-        <ActiveOrdersRail
+        {/* PR-NEXT-BUNDLE-F §B — compact active-order banner replaces
+            the old big "Active orders" rail. Self-hides when empty.
+            Single order → OrderDetail; multiple → Orders list. */}
+        <ActiveOrderBanner
           orders={activeOrders}
-          onTap={onActiveOrderTap}
           nowMs={nowMs}
+          onPressSingle={orderId => nav.navigate('OrderDetail', { orderId })}
+          onPressMultiple={() => nav.navigate('Orders')}
         />
 
-        {/* PR 14 — "Order again" rail. Sits between the search box
-            and the category chips per the highest-impact slot in
-            the prompt. Returns null internally when entries=[] so
-            it self-hides for first-time + non-customer users. */}
-        <OrderAgainRail
-          entries={frequentShops}
-          loading={false}
-          onTap={onOrderAgainTap}
-        />
+        {/* PR-NEXT-BUNDLE-F §C — recent shops horizontal strip replaces
+            the old big "Order again" card. Tap re-opens the reorder
+            flow (same FrequentShopEntry source). Self-hides when empty. */}
+        {frequentShops.length > 0 && (
+          <View style={styles.recentShopsSection}>
+            <Text style={[styles.sectionTitle, { paddingHorizontal: spacing.lg, marginBottom: spacing.xs }]}>
+              Recent shops
+            </Text>
+            <RecentShopsStrip
+              shops={frequentShops}
+              onPress={shopId => {
+                const entry = frequentShops.find(f => f.shopId === shopId);
+                if (entry) onOrderAgainTap(entry);
+              }}
+            />
+          </View>
+        )}
 
         <ScrollView
           horizontal
@@ -850,18 +853,19 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
   },
   fallbackText: { ...typography.caption, color: colors.primaryDark },
+  // PR-NEXT-BUNDLE-F §D — compact search: 40px tall, muted surface,
+  // no border / no shadow. Visual weight lifted off the search row.
   searchBox: {
-    marginTop: spacing.lg,
+    marginTop: spacing.md,
     backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
     borderRadius: radii.md,
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    minHeight: 48,
+    height: 40,
     justifyContent: 'center',
   },
-  searchPlaceholder: { ...typography.body, color: colors.textMuted },
+  searchPlaceholder: { fontSize: 13, color: colors.textMuted },
+  // PR-NEXT-BUNDLE-F §C — recent shops section wrapper.
+  recentShopsSection: { marginTop: spacing.md },
   chipsScroll: { marginTop: spacing.md },
   chipsContent: { paddingHorizontal: spacing.lg, gap: spacing.sm },
   chip: {
