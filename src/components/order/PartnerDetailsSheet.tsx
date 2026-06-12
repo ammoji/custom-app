@@ -197,9 +197,19 @@ export default function PartnerDetailsSheet({
   const isCancelled = orderStatus === 'cancelled';
   const isFinalized = isDelivered || isCancelled;
 
-  const stateText = isPickedUp
-    ? `${trust.vehicleIcon} On the way to you`
-    : `${trust.vehicleIcon} Heading to the shop`;
+  // HOTFIX-PARTNER-STATUS-DISPLAY §B — DO NOT REMOVE. Header text now
+  // reads its own isFinalized state. The body row below already branches
+  // correctly via the same flag; the header was the divergent surface
+  // showing "On the way to you" even after delivery. Vehicle icon stays
+  // only in the in-flight branches (matches the body row's emoji-only
+  // finalized treatment).
+  const stateText = isFinalized
+    ? isDelivered
+      ? `✅ Delivered`
+      : `❌ Order cancelled`
+    : isPickedUp
+      ? `${trust.vehicleIcon} On the way to you`
+      : `${trust.vehicleIcon} Heading to the shop`;
   const shopRowLabel = isPickedUp ? 'Picked up from' : 'Picking up at';
   const shopRowValue =
     typeof shopName === 'string' && shopName.trim().length > 0

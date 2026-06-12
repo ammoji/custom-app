@@ -53,6 +53,13 @@ import {
     sortPickups,
     type PickupSortMode,
 } from '../../utils/deliverySortHelpers';
+// PR-NEXT-BUNDLE-I §B — DO NOT REMOVE. Top-of-dashboard card grid.
+import DashboardCardGrid from '../../components/dashboard/DashboardCardGrid';
+// PR-NEXT-BUNDLE-I §A — DO NOT REMOVE. Pure helper for card view model.
+import { deriveDeliveryDashboardCards } from '../../utils/deliveryDashboardViewModel';
+// PR-NEXT-BUNDLE-I §D — DO NOT REMOVE. AttentionReviewRow type from
+// orderService (mirrors the callable's return shape).
+import type { AttentionReviewRow } from '../../services/orderService';
 import {
     formatOrderTime,
     formatRelativeDeliveryTime,
@@ -130,6 +137,15 @@ export default function DeliveryDashboardScreen() {
   // action data. The partner shouldn't have to scroll past it to
   // reach the live action lists above.
   const [showHistory, setShowHistory] = useState(false);
+  // PR-NEXT-BUNDLE-I §C — DO NOT REMOVE. Attention queue state must be
+  // declared here (above early returns) per code-discipline Rule 2.
+  const [attentionOrders, setAttentionOrders] = useState<AttentionReviewRow[]>([]);
+  const [attentionLoading, setAttentionLoading] = useState(false);
+  // HOTFIX-SILENT-CATCH-GUARD — DO NOT REMOVE. Error state so a failed
+  // attention fetch (missing callable / building index / IAM denial)
+  // surfaces instead of looking like "count = 0" (Sudhir 2026-06-10).
+  const [attentionError, setAttentionError] = useState<string | null>(null);
+  const [showAttention, setShowAttention] = useState(true);
   const [retryNonce, setRetryNonce] = useState(0);
   // PR 49 — partner's foreground GPS, captured on dashboard focus
   // (best-effort; permission-denial / GPS-timeout leaves this null
@@ -297,6 +313,26 @@ export default function DeliveryDashboardScreen() {
     };
   }, [isDelivery, retryNonce]);
 
+  // PR-NEXT-BUNDLE-I §C — DO NOT REMOVE. Fetch the partner's attention
+  // queue (flagged_low orders) once on mount and on retryNonce bump (so
+  // pull-to-refresh + Retry also refresh the attention section).
+  useEffect(() => {
+    if (!isDelivery) return;
+    let cancelled = false;
+    setAttentionLoading(true);
+    orderService
+      .listMyAttentionReviews()
+      .then(rows => { if (!cancelled) { setAttentionOrders(rows); setAttentionError(null); } })
+      // HOTFIX-SILENT-CATCH-GUARD — DO NOT REMOVE. Report + surface.
+      .catch(e => {
+        if (cancelled) return;
+        Sentry.captureException(e, { tags: { area: 'DeliveryDashboard.listMyAttentionReviews' } });
+        setAttentionError(e?.message ?? 'Could not load reviews. Pull to refresh.');
+      })
+      .finally(() => { if (!cancelled) setAttentionLoading(false); });
+    return () => { cancelled = true; };
+  }, [isDelivery, retryNonce]);
+
   // PR 20.1 fix — bump retryNonce whenever the dashboard regains
   // focus. This addresses the "stale coming-soon card" issue: if
   // partner A is viewing the dashboard while partner B claims one
@@ -333,6 +369,8 @@ export default function DeliveryDashboardScreen() {
           setPartnerLoc(loc);
           // Persist for PR 50's push-fanout filter. Best-effort —
           // a failed write must NEVER break the dashboard.
+          // silent-catch-audit:allow — best-effort telemetry write; the
+          // nearest-first sort uses the live client GPS, not this value.
           orderService.reportDeliveryLocation(loc).catch(() => {});
         } catch {
           // swallow — location is an enhancement, not a requirement.
@@ -442,6 +480,35 @@ export default function DeliveryDashboardScreen() {
         .sort((a, b) => (b.deliveredAt ?? 0) - (a.deliveredAt ?? 0)),
     [mine],
   );
+
+  // PR-NEXT-BUNDLE-I §C — DO NOT REMOVE. Card grid view model.
+  const dashboardCards = useMemo(
+    () =>
+      deriveDeliveryDashboardCards({
+        activeCount: activeMine.length,
+        availableCount: availableNow.length,
+        comingUpCount: headsUp.length,
+        historyCount: deliveredMine.length,
+        attentionCount: attentionOrders.length,
+      }),
+    [activeMine.length, availableNow.length, headsUp.length, deliveredMine.length, attentionOrders.length],
+  );
+
+  // HOTFIX-RESPOND-OWNER-AND-CARD-NAV §G — DO NOT REMOVE. The attention
+  // card navigates to the dedicated AttentionQueueScreen. Previously it
+  // set showAttention(true), but showAttention initializes to true → a
+  // React no-op → tapping the card did nothing visible. Other cards stay
+  // as inline section-toggles for pilot.
+  const handleCardTap = (cardId: string) => {
+    if (cardId === 'attention') {
+      nav.navigate('AttentionQueue', { role: 'delivery' });
+      return;
+    }
+    if (cardId === 'active') setShowMine(true);
+    else if (cardId === 'available') setShowAvailable(true);
+    else if (cardId === 'coming') setShowHeadsUp(true);
+    else if (cardId === 'history') setShowHistory(true);
+  };
 
   const toggleOnline = async (next: boolean) => {
     setTogglingOnline(true);
@@ -764,6 +831,64 @@ export default function DeliveryDashboardScreen() {
         ItemSeparatorComponent={() => <View style={{ height: spacing.md }} />}
         ListHeaderComponent={
           <View>
+            {/* PR-NEXT-BUNDLE-I §B+§C — card grid at top of dashboard.
+                Counts are derived from existing watcher data + the new
+                attention queue fetch. Tapping a card expands its section. */}
+            <DashboardCardGrid
+              cards={dashboardCards}
+              onCardPress={handleCardTap}
+            />
+
+            {/* PR-NEXT-BUNDLE-I §C — Reviews & Ratings attention section.
+                Only rendered when there are flagged_low orders awaiting
+                this partner's response (or while loading). */}
+            {(attentionOrders.length > 0 || attentionLoading || attentionError) && (
+              <View>
+                <SectionHeader
+                  title="Reviews & Ratings"
+                  expanded={showAttention}
+                  onToggle={() => setShowAttention(s => !s)}
+                  count={attentionOrders.length}
+                />
+                {showAttention && attentionLoading && (
+                  <ActivityIndicator
+                    style={{ marginVertical: spacing.md }}
+                    color={colors.primary}
+                  />
+                )}
+                {showAttention && !attentionLoading && attentionError && (
+                  <Text style={{ color: colors.danger, marginVertical: spacing.sm }}>
+                    {attentionError}
+                  </Text>
+                )}
+                {showAttention &&
+                  !attentionLoading &&
+                  attentionOrders.map(row => (
+                    <Pressable
+                      key={row.orderId}
+                      onPress={() =>
+                        nav.navigate('DeliveryOrderDetail', { orderId: row.orderId })
+                      }
+                      style={({ pressed }) => [
+                        styles.attentionRow,
+                        pressed && { opacity: 0.8 },
+                      ]}
+                    >
+                      <Text style={styles.attentionShop} numberOfLines={1}>
+                        {row.shopName ?? 'Order'}
+                      </Text>
+                      <Text style={styles.attentionMeta}>
+                        {'⭐ ' +
+                          (row.deliveryRating != null
+                            ? `${row.deliveryRating}★ delivery`
+                            : 'No delivery rating')}
+                        {row.deliveryComment ? ` — "${row.deliveryComment}"` : ''}
+                      </Text>
+                    </Pressable>
+                  ))}
+              </View>
+            )}
+
             <View
               style={[
                 styles.statusCard,
@@ -1441,6 +1566,10 @@ function ActiveDeliveryCard({
           <Text style={styles.shopName} numberOfLines={1}>
             {order.shopName}
           </Text>
+          {/* partner-status-audit:allow — ActiveDeliveryCard renders ONLY
+              for in-flight deliveries; delivered/cancelled orders move to
+              DeliveryHistoryCard ("✅ Delivered · …"), so this two-state
+              label is never shown after handoff and cannot go stale. */}
           <Text style={styles.subStatus}>
             {pickedUp ? '🚚 On the way to customer' : '🏪 Pickup from shop'}
           </Text>
@@ -1746,6 +1875,18 @@ const styles = StyleSheet.create({
   chipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   chipText: { ...typography.caption, color: colors.textSecondary },
   chipTextActive: { color: '#fff' },
+  attentionRow: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.sm,
+  },
+  attentionShop: { ...typography.bodyBold },
+  attentionMeta: { ...typography.caption, color: colors.textSecondary, marginTop: 2 },
   card: {
     backgroundColor: colors.bg,
     borderRadius: radii.md,

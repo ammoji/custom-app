@@ -178,12 +178,11 @@ export default function AuthBootstrap() {
           // skipped / failed / null → leave lastRegisteredUid
           // unchanged so the next qualifying auth event retries.
         })
-        .catch(() => {
-          // Orchestrator's contract is "never throws" — the inner
-          // try/catch turns thrown errors into `failed` outcomes.
-          // This .catch is a defensive net so a future regression
-          // can't bubble an unhandled rejection out of bootstrap.
-        });
+        // silent-catch-audit:allow — orchestrator's contract is "never
+        // throws" (its inner try/catch turns errors into `failed` outcomes).
+        // This .catch is a defensive net so a future regression can't bubble
+        // an unhandled rejection out of bootstrap.
+        .catch(() => {});
     });
 
     const timer = setTimeout(() => {

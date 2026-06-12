@@ -236,10 +236,50 @@ import {
 // acknowledgeReview / publishTimedOutReviews callables.
 import {
   decideInitialState,
-  canRespond,
-  canAmend,
-  canAcknowledge,
+  // PR-NEXT-BUNDLE-J §A — DO NOT REMOVE. Per-dimension state machine so
+  // shop + delivery review sides transition independently. Legacy
+  // correctionState is computed as worst-of for back-compat.
+  decideInitialPerDimension,
+  computeLegacyState,
+  canRespondPerDimension,
+  canAmendPerDimension,
+  canAcknowledgePerDimension,
+  decidePublishTransition,
+  type PerDimensionState,
 } from './reviewWorkflowHelpers';
+// HOTFIX-REVIEW-DENORM — DO NOT REMOVE. Builds the per-order denorm
+// payload for every review state transition so correctionState /
+// responseText / publishedAt stay in sync on the order doc. Without
+// this cascade, the Respond button stays visible after a successful
+// response and the customer's Amend/Acknowledge CTAs never appear.
+import {
+  buildOrderReviewDenormPayload,
+} from './reviewDenormHelpers';
+// PR-NEXT-BUNDLE-H §D — DO NOT REMOVE. Push title differentiates
+// shop vs delivery partner respondent so the customer's notification
+// copy is accurate (was hardcoded "Shop responded" regardless of who
+// actually responded).
+// PR-NEXT-BUNDLE-J §K — DO NOT REMOVE. deriveResponseDimension carries the
+// responded side into the push data payload for deep-link pre-scoping.
+import { derivePushTitle, deriveResponseDimension } from './respondToReviewPushHelpers';
+// PR-NEXT-BUNDLE-I §D/§E — DO NOT REMOVE. Shared summarizer for
+// listMyAttentionReviews + listShopAttentionReviews attention queue
+// callables. Keeps the callable bodies thin and the math unit-testable.
+import { summarizeAttentionReviewRows } from './attentionReviewHelpers';
+// HOTFIX-RESPOND-OWNER — DO NOT REMOVE. Direct shop-by-id ownership
+// check for respondToReview + rating-alert-config. Replaces the broken
+// `where ownerUid == uid limit 1` indirect lookup (auth direction bug).
+import { validateShopOwnerForReview } from './respondToReviewOwnerCheckHelpers';
+// HOTFIX-AMEND-RECOMPUTE — DO NOT REMOVE. Rolling-average recompute for
+// the amend path; runs INSIDE _publishReview's transaction so the
+// shop+partner avg updates are atomic with the publish state cascade.
+import { recomputeRollingAverageOnAmend } from './recomputeRollingAverageHelpers';
+// PR-NEXT-BUNDLE-H §E — DO NOT REMOVE. Thin Sentry-compatible shim
+// for Cloud Functions. Captures push failures with structured context
+// so silent push misses become queryable in GCP Cloud Logging.
+import { Sentry } from './sentryFunctions';
+// PR-NEXT-BUNDLE-G §C — DO NOT REMOVE. publicRatingCount delta helper.
+import { computePublicCountDelta } from './publicCountHelpers';
 // PR-NEXT-PARTNER-CARD.1 — DO NOT REMOVE. Used by the new
 // `getDeliveryPartnerContact` callable to gate customer-side
 // phone reveal of the assigned delivery partner.
@@ -323,6 +363,12 @@ import {
   buildOrderStatusPushPlan,
   validatePushTokenInput,
 } from './pushHelpers';
+// HOTFIX-PROFILE-PHOTO-4 — DO NOT REMOVE. Builds the Firebase Storage
+// REST download URL + token-echo extension header for partner photos
+// so they respect Storage Rules (vs the old GCS-direct URL).
+import {
+  buildPartnerPhotoUploadPlan,
+} from './partnerPhotoUploadHelpers';
 import { randomUUID } from 'crypto';
 import {
     aggregateShopCustomers,
@@ -2114,18 +2160,44 @@ export const getPartnerPhotoUploadUrl = onCall<{ contentType: string }>(
         'contentType must be image/jpeg or image/png',
       );
     }
-    const ext = contentType === 'image/jpeg' ? 'jpg' : 'png';
-    const storagePath = `delivery-profile/${request.auth.uid}.${ext}`;
+    // HOTFIX-PROFILE-PHOTO-4 — generate a stable download token AND
+    // require the client PUT to echo it back as a metadata header.
+    // Result: the object lands in storage with metadata
+    // `{ firebaseStorageDownloadTokens: <token> }` already set, so the
+    // constructed `firebasestorage.googleapis.com/...&token=...` URL
+    // works as soon as the PUT completes. Same pattern shop storefront
+    // photos use via buildFirebaseStorageDownloadUrl.
+    //
+    // Why not the GCS direct URL: that bypasses Firebase Storage Rules
+    // entirely and requires bucket-level allUsers public read, which
+    // would expose /shop-kyc/ PII.
+    const downloadToken = randomUUID();
     const bucket = getStorage().bucket();
-    const file = bucket.file(storagePath);
+    const plan = buildPartnerPhotoUploadPlan({
+      uid: request.auth.uid,
+      contentType,
+      bucketName: bucket.name,
+      token: downloadToken,
+    });
+    const file = bucket.file(plan.storagePath);
     const expiresAt = Date.now() + 5 * 60 * 1000; // 5 min, matches KYC
     const [uploadUrl] = await file.getSignedUrl({
       version: 'v4',
       action: 'write',
       expires: expiresAt,
       contentType,
+      // Client MUST send this header (same value) on the PUT or the v4
+      // signature won't validate. The value is written into the
+      // object's metadata at storage time, which is what makes the
+      // download-token URL resolve.
+      extensionHeaders: plan.extensionHeaders,
     });
-    return { uploadUrl, storagePath };
+    return {
+      uploadUrl,
+      storagePath: plan.storagePath,
+      downloadUrl: plan.downloadUrl,
+      downloadToken: plan.downloadToken,
+    };
   },
 );
 
@@ -3784,6 +3856,14 @@ export const claimDelivery = onCall<{ orderId: string }>(
         deliveryPersonRating: trust.rating,
         deliveryPersonDeliveriesCount: trust.deliveriesCount,
         deliveryPersonVehicleType: trust.vehicleType,
+        // PR-NEXT-BUNDLE-G §A — denormalize completed-count alongside
+        // rating rollups. Customer-facing partner card uses this.
+        deliveryPersonDeliveriesCompleted:
+          typeof partnerData?.deliveriesCompleted === 'number' &&
+          Number.isFinite(partnerData.deliveriesCompleted) &&
+          partnerData.deliveriesCompleted >= 0
+            ? Math.floor(partnerData.deliveriesCompleted)
+            : 0,
         // PR-NEXT-PARTNER-PHOTO §E — DO NOT REMOVE. Null if partner
         // doesn't have a photo yet (legacy). Client falls back to
         // initials avatar via formatPartnerAvatar.
@@ -4138,6 +4218,13 @@ export const markDelivered = onCall<{ orderId: string }>(
     ).catch(e =>
       console.warn('[markDelivered] pushToAdmins failed:', e),
     );
+    // PR-NEXT-BUNDLE-G §A — increment partner's lifetime delivery count.
+    // Best-effort (non-fatal) so a user-doc miss doesn't block delivery.
+    if (order.deliveryPersonId) {
+      db.doc(`users/${order.deliveryPersonId}`)
+        .set({ deliveriesCompleted: FieldValue.increment(1) }, { merge: true })
+        .catch(e => console.warn('[markDelivered] deliveriesCompleted increment failed (non-fatal):', e));
+    }
     return { ok: true };
   },
 );
@@ -4722,6 +4809,11 @@ export const getMyDeliverySettings = onCall(
         typeof data.deliveryRatingCount === 'number'
           ? data.deliveryRatingCount
           : null,
+      // PR-NEXT-BUNDLE-G §A — lifetime deliveries completed counter.
+      deliveriesCompleted:
+        typeof data.deliveriesCompleted === 'number'
+          ? data.deliveriesCompleted
+          : 0,
     };
   },
 );
@@ -6979,7 +7071,11 @@ export const listAllUsers = onCall(
     );
     const ratingByUid = new Map<
       string,
-      { deliveryRatingAvg?: number; deliveryRatingCount?: number }
+      {
+        deliveryRatingAvg?: number;
+        deliveryRatingCount?: number;
+        profilePhotoUrl?: string | null;
+      }
     >();
     if (deliveryUsers.length > 0) {
       const snaps = await Promise.all(
@@ -6998,6 +7094,11 @@ export const listAllUsers = onCall(
             typeof data?.deliveryRatingCount === 'number'
               ? data.deliveryRatingCount
               : undefined,
+          // PR-NEXT-BUNDLE-G §D — partner photo for admin UserDetailScreen.
+          profilePhotoUrl:
+            typeof data?.profilePhotoUrl === 'string'
+              ? data.profilePhotoUrl
+              : null,
         });
       }
     }
@@ -7026,6 +7127,7 @@ export const listAllUsers = onCall(
         // Firestore mirror has rating fields yet.
         deliveryRatingAvg: rating?.deliveryRatingAvg,
         deliveryRatingCount: rating?.deliveryRatingCount,
+        profilePhotoUrl: rating?.profilePhotoUrl ?? null,
       };
     });
   },
@@ -8775,15 +8877,31 @@ export const submitOrderRating = onCall<{
         shopThreshold: 3,
         partnerThreshold: 3,
       });
+      // PR-NEXT-BUNDLE-J §B — DO NOT REMOVE. Per-dimension initial states.
+      // shop + delivery start independently; legacy correctionState is the
+      // worst-of for back-compat (equals initReview.state at submit time).
+      const initPerDim = decideInitialPerDimension({
+        shopStars: shopRating,
+        deliveryStars: deliveryRating ?? null,
+        shopThreshold: 3,
+        partnerThreshold: 3,
+      });
+      const legacyState = computeLegacyState(
+        initPerDim.shopState,
+        initPerDim.deliveryState,
+      );
       const ratingId = db.collection('reviews').doc().id;
       const nowMs = Date.now();
 
       const orderPayload: Record<string, unknown> = {
         shopRating,
-        correctionState: initReview.state,
+        correctionState: legacyState,
+        // PR-NEXT-BUNDLE-J §B — per-dimension denorm onto the order doc.
+        shopCorrectionState: initPerDim.shopState,
+        deliveryCorrectionState: initPerDim.deliveryState,
         publishedReason:
           initReview.reason === 'above_threshold' ? 'above_threshold' : null,
-        publishedAt: initReview.state === 'published' ? nowMs : null,
+        publishedAt: legacyState === 'published' ? nowMs : null,
         ratingId,
         updatedAt: FieldValue.serverTimestamp(),
       };
@@ -8809,8 +8927,11 @@ export const submitOrderRating = onCall<{
         deliveryStars: deliveryRating ?? null,
         deliveryComment: deliveryComment ?? null,
         deliveryPersonId: deliveryPersonId ?? null,
-        correctionState: initReview.state,
-        publishedAt: initReview.state === 'published' ? nowMs : null,
+        correctionState: legacyState,
+        // PR-NEXT-BUNDLE-J §B — per-dimension state on the review doc.
+        shopCorrectionState: initPerDim.shopState,
+        deliveryCorrectionState: initPerDim.deliveryState,
+        publishedAt: legacyState === 'published' ? nowMs : null,
         publishedReason:
           initReview.reason === 'above_threshold' ? 'above_threshold' : null,
         submittedAt: nowMs,
@@ -8818,11 +8939,21 @@ export const submitOrderRating = onCall<{
 
       tx.update(orderRef, orderPayload);
       tx.set(reviewRef, reviewDoc);
+      // PR-NEXT-BUNDLE-G §C — publicRatingCount only increments when the
+      // review is published at submit time (high-rated reviews above threshold).
+      // PR-NEXT-BUNDLE-J §B — gate on the shop dimension's own state so a
+      // low delivery rating doesn't suppress the shop's public count (and
+      // vice-versa below for the partner).
+      const shopPublicDelta = computePublicCountDelta(
+        null,
+        initPerDim.shopState === 'published' ? 'published' : 'flagged_low',
+      );
       tx.set(
         shopRef,
         {
           ratingAvg: shopAvg,
           ratingCount: shopCount,
+          ...(shopPublicDelta > 0 ? { publicRatingCount: FieldValue.increment(shopPublicDelta) } : {}),
           updatedAt: FieldValue.serverTimestamp(),
         },
         { merge: true },
@@ -8841,11 +8972,21 @@ export const submitOrderRating = onCall<{
           userTxData?.deliveryRatingCount,
           deliveryRating,
         );
+        // PR-NEXT-BUNDLE-G §C — publicDeliveryRatingCount mirrors publicRatingCount
+        // for the partner dimension.
+        // PR-NEXT-BUNDLE-J §B — gate on the delivery dimension's own state.
+        const partnerPublicDelta = computePublicCountDelta(
+          null,
+          initPerDim.deliveryState === 'published' ? 'published' : 'flagged_low',
+        );
         tx.set(
           userRef,
           {
             deliveryRatingAvg: dAvg,
             deliveryRatingCount: dCount,
+            ...(partnerPublicDelta > 0
+              ? { publicDeliveryRatingCount: FieldValue.increment(partnerPublicDelta) }
+              : {}),
           },
           { merge: true },
         );
@@ -9799,8 +9940,11 @@ export const updateShopRatingAlertSettings = onCall<{
     const uid = request.auth?.uid;
     if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
     const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
-    const isAdmin = claims.isAdmin === true;
-    const isShopOwner = claims.isShopOwner === true;
+    // HOTFIX-RATING-RESPONSE — DO NOT REMOVE. claims.admin / claims.shopOwner are
+    // auth-token claim names (not isAdmin/isShopOwner which are user-doc mirror
+    // fields). Audit-grep: grep -rn "claims\.is[A-Z]" functions/src
+    const isAdmin = claims.admin === true;
+    const isShopOwner = claims.shopOwner === true;
     if (!isAdmin && !isShopOwner) {
       throw new HttpsError('permission-denied', 'Shop owner or admin required');
     }
@@ -9811,26 +9955,43 @@ export const updateShopRatingAlertSettings = onCall<{
     if (isAdmin && typeof inputShopId === 'string' && inputShopId.length > 0) {
       targetShopId = inputShopId;
     } else if (isShopOwner) {
-      const ownerSnap = await db
-        .collection('shops')
-        .where('ownerUid', '==', uid)
-        .limit(1)
-        .get();
-      if (ownerSnap.empty) {
-        throw new HttpsError('not-found', 'No shop found for this owner');
+      // HOTFIX-RESPOND-OWNER — DO NOT REMOVE. Same auth-direction bug
+      // class as respondToReview: when a specific shopId is supplied,
+      // validate ownership by reading THAT shop doc directly instead of
+      // resolving an arbitrary `where ownerUid == uid limit 1` shop and
+      // comparing ids (breaks for multi-shop owners).
+      if (typeof inputShopId === 'string' && inputShopId.length > 0) {
+        const ownerCheck = await validateShopOwnerForReview({
+          callerUid: uid,
+          reviewShopId: inputShopId,
+          readShopDoc: async (shopId: string) => {
+            const snap = await db.doc(`shops/${shopId}`).get();
+            return snap.exists ? (snap.data() as { ownerUid?: string | null }) : null;
+          },
+        });
+        if (!ownerCheck.ok) {
+          throw new HttpsError(
+            ownerCheck.code === 'shop_not_found' ? 'not-found' : 'permission-denied',
+            ownerCheck.code === 'shop_not_found'
+              ? 'No shop found for this owner'
+              : 'You can only update settings for your own shop',
+          );
+        }
+        targetShopId = inputShopId;
+      } else {
+        // No specific shop requested — resolve the caller's own shop.
+        // Legitimate "find my shop" lookup (not an auth-direction check).
+        // shop-owner-audit:allow
+        const ownerSnap = await db
+          .collection('shops')
+          .where('ownerUid', '==', uid)
+          .limit(1)
+          .get();
+        if (ownerSnap.empty) {
+          throw new HttpsError('not-found', 'No shop found for this owner');
+        }
+        targetShopId = ownerSnap.docs[0].id;
       }
-      // Non-admin shop owner may not target another shop
-      if (
-        typeof inputShopId === 'string' &&
-        inputShopId.length > 0 &&
-        ownerSnap.docs[0].id !== inputShopId
-      ) {
-        throw new HttpsError(
-          'permission-denied',
-          'You can only update settings for your own shop',
-        );
-      }
-      targetShopId = ownerSnap.docs[0].id;
     } else {
       throw new HttpsError('invalid-argument', 'shopId required for admin path');
     }
@@ -10043,7 +10204,9 @@ export const updateAdminRatingAlertConfig = onCall<{
     const uid = request.auth?.uid;
     if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
     const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
-    if (claims.isAdmin !== true) {
+    // HOTFIX-RATING-RESPONSE — DO NOT REMOVE. claims.admin is the auth-token
+    // claim name (not isAdmin which is a user-doc mirror field).
+    if (claims.admin !== true) {
       throw new HttpsError('permission-denied', 'Admin role required');
     }
     const {
@@ -10096,6 +10259,13 @@ async function _publishReview(args: {
   reason: 'customer_acknowledged' | 'customer_amended' | 'timeout' | 'above_threshold';
   newShopStars?: number;
   newDeliveryStars?: number;
+  // PR-NEXT-BUNDLE-J §F — DO NOT REMOVE. Which dimension(s) this publish
+  // applies to. Omitted ⇒ BOTH (back-compat for ack-both / above_threshold).
+  // amendRating passes only the changed dimension; the timeout cron passes
+  // whichever side(s) are still flagged. The unspecified dimension keeps
+  // its prior per-dimension state so one side resolving never closes the
+  // other (Sudhir 2026-06-10).
+  dimensions?: { shop?: boolean; delivery?: boolean };
   nowMs: number;
 }): Promise<void> {
   const reviewSnap = await db.doc(`reviews/${args.ratingId}`).get();
@@ -10107,69 +10277,235 @@ async function _publishReview(args: {
   const finalDeliveryStars: number | null = args.newDeliveryStars ?? rev.deliveryStars ?? null;
   const publishedAt = args.nowMs;
 
-  // Update the review doc
-  const reviewPatch: Record<string, unknown> = {
-    correctionState: 'published',
-    publishedAt,
-    publishedReason: args.reason,
-  };
-  if (args.newShopStars !== undefined) reviewPatch.shopStars = args.newShopStars;
-  if (args.newDeliveryStars !== undefined) reviewPatch.deliveryStars = args.newDeliveryStars;
+  // PR-NEXT-BUNDLE-J §F — resolve which dimensions to publish. Default both.
+  const hasDelivery = finalDeliveryStars !== null;
+  const applyShop = args.dimensions ? args.dimensions.shop === true : true;
+  const applyDelivery =
+    (args.dimensions ? args.dimensions.delivery === true : true) && hasDelivery;
 
-  // Build the public review cache entry
-  const cacheEntry = {
-    ratingId: args.ratingId,
-    stars: finalShopStars,
-    comment: rev.shopComment ?? null,
-    customerName: rev.customerName ?? null,
-    publishedAt,
-    responseText: rev.responseText ?? null,
-  };
-
-  // Read the shop doc for existing publicReviewLatest
-  const shopSnap = await db.doc(`shops/${shopId}`).get();
-  const shopData = shopSnap.exists ? (shopSnap.data() as Record<string, any>) : {};
-  const existingLatest: any[] = Array.isArray(shopData.publicReviewLatest)
-    ? shopData.publicReviewLatest
-    : [];
-  // Prepend new entry, keep top 5 sorted by publishedAt desc
-  const newLatest = [cacheEntry, ...existingLatest.filter((r: any) => r.ratingId !== args.ratingId)]
-    .sort((a: any, b: any) => b.publishedAt - a.publishedAt)
-    .slice(0, 5);
-
+  // HOTFIX-PUBLISH-TX-ORDER — DO NOT REMOVE. Firestore transactions require
+  // ALL reads before ANY writes. The previous shape read the shop doc outside
+  // the transaction (no conflict detection) and tx.get'd the partner doc AFTER
+  // three tx.set calls — both violations threw INTERNAL on the client.
+  // Shape is now strictly: READ PHASE → COMPUTE PHASE → WRITE PHASE.
   await db.runTransaction(async tx => {
-    tx.set(db.doc(`reviews/${args.ratingId}`), reviewPatch, { merge: true });
-    tx.set(
-      db.doc(`shops/${shopId}`),
-      {
-        publicReviewCount: FieldValue.increment(1),
-        publicReviewLatest: newLatest,
-      },
-      { merge: true },
-    );
-    // If there's a delivery partner, update their cache too
-    if (deliveryPersonId && finalDeliveryStars !== null) {
+    // ─── READ PHASE ────────────────────────────────────────────────────────
+    const shopRef = db.doc(`shops/${shopId}`);
+    const partnerRef =
+      deliveryPersonId && finalDeliveryStars !== null
+        ? db.doc(`users/${deliveryPersonId}`)
+        : null;
+
+    const shopSnap = await tx.get(shopRef);
+    const partnerSnap = partnerRef ? await tx.get(partnerRef) : null;
+
+    // ─── COMPUTE PHASE ─────────────────────────────────────────────────────
+    const shopData = shopSnap.exists ? (shopSnap.data() as Record<string, any>) : {};
+    const partnerData = partnerSnap?.exists ? (partnerSnap.data() as Record<string, any>) : {};
+
+    // PR-NEXT-BUNDLE-J §F — per-dimension transitions. Only the dimension(s)
+    // named in args.dimensions move to 'published'; the other keeps its prior
+    // per-dimension state (fallback to legacy correctionState for un-migrated
+    // reviews, or 'n_a' for an unrated delivery side).
+    const priorShopCS = ((rev.shopCorrectionState as PerDimensionState | undefined) ??
+      (rev.correctionState as PerDimensionState | undefined) ??
+      'published') as Exclude<PerDimensionState, 'n_a'>;
+    const priorDeliveryCS: PerDimensionState =
+      (rev.deliveryCorrectionState as PerDimensionState | undefined) ??
+      (hasDelivery
+        ? ((rev.correctionState as PerDimensionState | undefined) ?? 'published')
+        : 'n_a');
+    const transition = decidePublishTransition({
+      priorShopState: priorShopCS,
+      priorDeliveryState: priorDeliveryCS,
+      applyShop,
+      applyDelivery,
+    });
+    const finalShopCS = transition.finalShopState;
+    const finalDeliveryCS = transition.finalDeliveryState;
+    const legacyState = transition.legacyState;
+
+    const reviewPatch: Record<string, unknown> = {
+      correctionState: legacyState,
+      shopCorrectionState: finalShopCS,
+      deliveryCorrectionState: finalDeliveryCS,
+      publishedReason: args.reason,
+    };
+    // Legacy publishedAt only when the whole review is published (both sides).
+    if (legacyState === 'published') reviewPatch.publishedAt = publishedAt;
+    if (applyShop && args.newShopStars !== undefined) {
+      reviewPatch.shopStars = args.newShopStars;
+    }
+    if (applyDelivery && args.newDeliveryStars !== undefined) {
+      reviewPatch.deliveryStars = args.newDeliveryStars;
+    }
+    // HOTFIX-AMEND-RECOMPUTE — DO NOT REMOVE. Stamp amendedAt onto the
+    // review doc when this publish came via amendRating. Replaces the
+    // redundant amendedStars subfield + separate amendedAt write that
+    // amendRating used to do outside any transaction (now removed §H.2).
+    if (args.reason === 'customer_amended') reviewPatch.amendedAt = args.nowMs;
+
+    // HOTFIX-AMEND-RECOMPUTE — DO NOT REMOVE. Rolling-average recompute
+    // for changed stars belongs INSIDE this transaction so the shop +
+    // partner avg updates are atomic with the publish state cascade.
+    // Previously lived in amendRating OUTSIDE the transaction → race with
+    // these in-tx writes → stale shop.ratingAvg possible.
+    // PR-NEXT-BUNDLE-J §F — gated on applyShop / applyDelivery so a single-
+    // dimension amend only recomputes that dimension's average.
+    let shopAvgRecompute: { ratingAvg: number } | null = null;
+    if (
+      applyShop &&
+      args.newShopStars !== undefined &&
+      typeof rev.shopStars === 'number' &&
+      args.newShopStars !== rev.shopStars
+    ) {
+      const oldCount: number =
+        typeof shopData.ratingCount === 'number' ? shopData.ratingCount : 1;
+      const oldAvg: number =
+        typeof shopData.ratingAvg === 'number' ? shopData.ratingAvg : rev.shopStars;
+      const recompute = recomputeRollingAverageOnAmend({
+        oldAvg,
+        oldCount,
+        oldStars: rev.shopStars,
+        newStars: args.newShopStars,
+      });
+      if (recompute) shopAvgRecompute = { ratingAvg: recompute.newAvg };
+    }
+
+    let partnerAvgRecompute: { deliveryRatingAvg: number } | null = null;
+    if (
+      applyDelivery &&
+      args.newDeliveryStars !== undefined &&
+      typeof rev.deliveryStars === 'number' &&
+      args.newDeliveryStars !== rev.deliveryStars &&
+      partnerRef
+    ) {
+      const oldCount: number =
+        typeof partnerData.deliveryRatingCount === 'number'
+          ? partnerData.deliveryRatingCount
+          : 1;
+      const oldAvg: number =
+        typeof partnerData.deliveryRatingAvg === 'number'
+          ? partnerData.deliveryRatingAvg
+          : rev.deliveryStars;
+      const recompute = recomputeRollingAverageOnAmend({
+        oldAvg,
+        oldCount,
+        oldStars: rev.deliveryStars,
+        newStars: args.newDeliveryStars,
+      });
+      if (recompute) partnerAvgRecompute = { deliveryRatingAvg: recompute.newAvg };
+    }
+
+    const cacheEntry = {
+      ratingId: args.ratingId,
+      stars: finalShopStars,
+      comment: rev.shopComment ?? null,
+      customerName: rev.customerName ?? null,
+      publishedAt,
+      // PR-NEXT-BUNDLE-J §F — shop cache carries the SHOP's response text,
+      // not whichever side responded last.
+      responseText: rev.shopResponseText ?? rev.responseText ?? null,
+    };
+
+    const existingLatest: any[] = Array.isArray(shopData.publicReviewLatest)
+      ? shopData.publicReviewLatest
+      : [];
+    const newLatest = [
+      cacheEntry,
+      ...existingLatest.filter((r: any) => r.ratingId !== args.ratingId),
+    ]
+      .sort((a: any, b: any) => b.publishedAt - a.publishedAt)
+      .slice(0, 5);
+
+    // PR-NEXT-BUNDLE-G §C — computePublicCountDelta guards against
+    // double-increment when the dimension was already 'published'.
+    // PR-NEXT-BUNDLE-J §F — gate on the SHOP dimension's prior state + the
+    // applyShop flag so publishing only the delivery side never bumps the
+    // shop's public counters.
+    const shopPublicDelta = applyShop
+      ? computePublicCountDelta(priorShopCS as any, 'published')
+      : 0;
+
+    let newPartnerLatest: any[] | null = null;
+    let partnerPublicDelta = 0;
+    if (partnerRef && applyDelivery) {
       const partnerCacheEntry = {
         ...cacheEntry,
         stars: finalDeliveryStars,
         comment: rev.deliveryComment ?? null,
+        // PR-NEXT-BUNDLE-J §F — partner cache carries the PARTNER's response.
+        responseText: rev.partnerResponseText ?? rev.responseText ?? null,
       };
-      const partnerSnap = await tx.get(db.doc(`users/${deliveryPersonId}`));
-      const partnerData = partnerSnap.exists ? (partnerSnap.data() as Record<string, any>) : {};
       const partnerLatest: any[] = Array.isArray(partnerData.publicReviewLatest)
         ? partnerData.publicReviewLatest
         : [];
-      const newPartnerLatest = [
+      newPartnerLatest = [
         partnerCacheEntry,
         ...partnerLatest.filter((r: any) => r.ratingId !== args.ratingId),
       ]
         .sort((a: any, b: any) => b.publishedAt - a.publishedAt)
         .slice(0, 5);
+      partnerPublicDelta = computePublicCountDelta(
+        priorDeliveryCS === 'n_a' ? ('flagged_low' as any) : (priorDeliveryCS as any),
+        'published',
+      );
+    }
+
+    // ─── WRITE PHASE ───────────────────────────────────────────────────────
+    tx.set(db.doc(`reviews/${args.ratingId}`), reviewPatch, { merge: true });
+
+    // HOTFIX-REVIEW-DENORM — DO NOT REMOVE. Cascade published state to
+    // the order doc so correctionState / publishedAt / publishedReason /
+    // amended stars are never stale. Covers amendRating, acknowledgeReview,
+    // publishTimedOutReviews (all route through _publishReview).
+    tx.set(
+      db.doc(`orders/${rev.orderId}`),
+      buildOrderReviewDenormPayload({
+        // PR-NEXT-BUNDLE-J §F — legacy worst-of state on the order doc;
+        // per-dimension fields drive the migrated consumers.
+        nextState: legacyState,
+        nowMs: publishedAt,
+        publishedReason: args.reason,
+        shopCorrectionState: finalShopCS,
+        deliveryCorrectionState: finalDeliveryCS,
+        ...(applyShop && args.newShopStars !== undefined
+          ? { newShopStars: args.newShopStars }
+          : {}),
+        ...(applyDelivery && args.newDeliveryStars !== undefined
+          ? { newDeliveryStars: args.newDeliveryStars }
+          : {}),
+      }),
+      { merge: true },
+    );
+
+    // PR-NEXT-BUNDLE-J §F — only touch the shop public cache/counters when
+    // the shop dimension is the one being published.
+    if (applyShop) {
       tx.set(
-        db.doc(`users/${deliveryPersonId}`),
+        shopRef,
+        {
+          ...(shopPublicDelta > 0 ? { publicReviewCount: FieldValue.increment(1) } : {}),
+          publicReviewLatest: newLatest,
+          ...(shopPublicDelta > 0 ? { publicRatingCount: FieldValue.increment(shopPublicDelta) } : {}),
+          // HOTFIX-AMEND-RECOMPUTE — rolling-avg update merged atomically.
+          ...(shopAvgRecompute ?? {}),
+        },
+        { merge: true },
+      );
+    }
+
+    if (partnerRef && applyDelivery && newPartnerLatest !== null) {
+      tx.set(
+        partnerRef,
         {
           publicReviewCount: FieldValue.increment(1),
           publicReviewLatest: newPartnerLatest,
+          ...(partnerPublicDelta > 0
+            ? { publicDeliveryRatingCount: FieldValue.increment(partnerPublicDelta) }
+            : {}),
+          // HOTFIX-AMEND-RECOMPUTE — partner rolling-avg update merged atomically.
+          ...(partnerAvgRecompute ?? {}),
         },
         { merge: true },
       );
@@ -10203,37 +10539,109 @@ export const respondToReview = onCall<{
     const rev = reviewSnap.data() as Record<string, any>;
 
     // Auth: must be the shop owner of rev.shopId OR the delivery partner
-    const isShopOwner = claims.isShopOwner === true;
-    const isDelivery = claims.isDelivery === true;
+    // HOTFIX-RATING-RESPONSE — DO NOT REMOVE. claims.shopOwner / claims.delivery are
+    // auth-token claim names (not isShopOwner/isDelivery which are user-doc mirror
+    // fields). Same bug class as HOTFIX-5. Audit-grep: grep -rn "claims\.is[A-Z]" functions/src
+    const isShopOwner = claims.shopOwner === true;
+    const isDelivery = claims.delivery === true;
     if (!isShopOwner && !isDelivery) {
       throw new HttpsError('permission-denied', 'Shop owner or delivery partner required');
     }
+    // HOTFIX-RESPOND-OWNER — DO NOT REMOVE. Same auth bug class as
+    // HOTFIX-5 + HOTFIX-RATING-RESPONSE. Look up the SPECIFIC shop by
+    // rev.shopId and verify ownerUid matches. The previous indirect
+    // query (`where ownerUid == uid limit 1`) returned an arbitrary
+    // shop when the caller owns multiple, breaking the id comparison.
+    // Worked example: recordShopKycUpload uses this same direct pattern.
     if (isShopOwner) {
-      const shopSnap = await db.collection('shops').where('ownerUid', '==', uid).limit(1).get();
-      if (shopSnap.empty || shopSnap.docs[0].id !== rev.shopId) {
-        throw new HttpsError('permission-denied', 'Not the owner of this shop');
+      const ownerCheck = await validateShopOwnerForReview({
+        callerUid: uid,
+        reviewShopId: rev.shopId,
+        readShopDoc: async (shopId: string) => {
+          const snap = await db.doc(`shops/${shopId}`).get();
+          return snap.exists ? (snap.data() as { ownerUid?: string | null }) : null;
+        },
+      });
+      if (!ownerCheck.ok) {
+        throw new HttpsError('permission-denied', ownerCheck.message);
       }
     }
     if (isDelivery && !isShopOwner && rev.deliveryPersonId !== uid) {
       throw new HttpsError('permission-denied', 'Not the delivery partner for this order');
     }
 
-    if (!canRespond(rev.correctionState)) {
+    const responseBy = isShopOwner ? 'shop' : 'partner';
+    // PR-NEXT-BUNDLE-J §C — DO NOT REMOVE. Per-dimension respond gate.
+    // Read the responder's OWN dimension state (fallback to legacy
+    // correctionState for pre-Bundle-J reviews). This is the structural
+    // fix for Sudhir's 2026-06-10 bug: the shop responding no longer
+    // transitions the delivery side, so the partner's queue keeps the
+    // review until the partner responds independently.
+    const responderState: PerDimensionState =
+      ((responseBy === 'shop'
+        ? rev.shopCorrectionState
+        : rev.deliveryCorrectionState) as PerDimensionState | undefined) ??
+      (rev.correctionState as PerDimensionState);
+    if (!canRespondPerDimension(responderState)) {
       throw new HttpsError(
         'failed-precondition',
-        `Cannot respond in state '${rev.correctionState}'`,
+        `Cannot respond in state '${responderState}'`,
       );
     }
 
-    const responseBy = isShopOwner ? 'shop' : 'partner';
     const nowMs = Date.now();
-    await db.doc(`reviews/${ratingId}`).set(
-      {
-        correctionState: 'responded',
-        responseText: responseText.trim().slice(0, 1000),
+    const trimmedResponse = responseText.trim().slice(0, 1000);
+
+    // PR-NEXT-BUNDLE-J §C — recompute each dimension's state. Only the
+    // responder's side transitions to 'responded'; the other side keeps
+    // its prior state (fallback to legacy for un-migrated reviews).
+    const updatedShopCS = (
+      responseBy === 'shop'
+        ? 'responded'
+        : (rev.shopCorrectionState ?? rev.correctionState ?? 'published')
+    ) as Exclude<PerDimensionState, 'n_a'>;
+    const updatedDeliveryCS: PerDimensionState =
+      responseBy === 'partner'
+        ? 'responded'
+        : ((rev.deliveryCorrectionState as PerDimensionState | undefined) ??
+          (rev.deliveryStars != null
+            ? ((rev.correctionState as PerDimensionState) ?? 'published')
+            : 'n_a'));
+    const legacyState = computeLegacyState(updatedShopCS, updatedDeliveryCS);
+
+    const reviewPatch: Record<string, unknown> = {
+      // Legacy pointers — last responder / worst-of state.
+      responseAt: nowMs,
+      responseBy,
+      responseText: trimmedResponse,
+      correctionState: legacyState,
+      // Per-dimension truth.
+      shopCorrectionState: updatedShopCS,
+      deliveryCorrectionState: updatedDeliveryCS,
+      ...(responseBy === 'shop'
+        ? { shopResponseText: trimmedResponse, shopRespondedAt: nowMs }
+        : { partnerResponseText: trimmedResponse, partnerRespondedAt: nowMs }),
+    };
+    await db.doc(`reviews/${ratingId}`).set(reviewPatch, { merge: true });
+
+    // HOTFIX-REVIEW-DENORM — DO NOT REMOVE. Cascade state transition to
+    // the order doc so client screens see the updated values immediately.
+    // PR-NEXT-BUNDLE-J §C — now writes per-dimension fields too so the
+    // delivery partner reads order.partnerResponseText (not the shop's
+    // response) and vice-versa.
+    await db.doc(`orders/${rev.orderId}`).set(
+      buildOrderReviewDenormPayload({
+        nextState: legacyState,
+        nowMs,
+        responseText: trimmedResponse,
         responseBy,
         responseAt: nowMs,
-      },
+        shopCorrectionState: updatedShopCS,
+        deliveryCorrectionState: updatedDeliveryCS,
+        ...(responseBy === 'shop'
+          ? { shopResponseText: trimmedResponse, shopRespondedAt: nowMs }
+          : { partnerResponseText: trimmedResponse, partnerRespondedAt: nowMs }),
+      }),
       { merge: true },
     );
 
@@ -10242,12 +10650,28 @@ export const respondToReview = onCall<{
     const orderData = orderSnap.exists ? (orderSnap.data() as any) : null;
     if (orderData?.customerId || rev.customerId) {
       const customerId: string = rev.customerId ?? orderData.customerId;
+      // PR-NEXT-BUNDLE-H §D — DO NOT REMOVE. derivePushTitle branches on
+      // responseBy so "Delivery partner responded" reaches the customer
+      // when the partner (not the shop) is the responder.
+      const pushTitle = derivePushTitle(responseBy);
+      // PR-NEXT-BUNDLE-J §K — DO NOT REMOVE. dimension lets the customer's
+      // deep-link open RatingAmendmentScreen pre-scoped to the responded side.
+      const dimension = deriveResponseDimension(responseBy);
       pushToUser(
         customerId,
-        '💬 Shop responded to your review',
+        pushTitle,
         'Tap to read the response and update your rating.',
-        { ratingId, orderId: rev.orderId, type: 'review_responded' },
-      ).catch(e => console.warn('[respondToReview] push failed:', e));
+        { ratingId, orderId: rev.orderId, type: 'review_responded', responseBy, dimension },
+      ).catch(e => {
+        // PR-NEXT-BUNDLE-H §E — DO NOT REMOVE. Structured capture so
+        // silent push failures are queryable in GCP Cloud Logging.
+        // Server does NOT fail the response itself on push error.
+        console.warn('[respondToReview] push failed:', e);
+        Sentry.captureException(e, {
+          tags: { area: 'respondToReview.push' },
+          extra: { ratingId, orderId: rev.orderId, customerId, responseBy },
+        });
+      });
     }
 
     return { ok: true, state: 'responded' };
@@ -10280,49 +10704,50 @@ export const amendRating = onCall<{
     if (rev.customerId !== uid) {
       throw new HttpsError('permission-denied', 'Not your review');
     }
-    if (!canAmend(rev.correctionState)) {
+
+    // PR-NEXT-BUNDLE-J §D — per-dimension amend. Each dimension transitions
+    // only if the customer changed ITS stars AND that dimension's responder
+    // has responded. Amending the shop side never closes the delivery side.
+    const amendShop = newShopStars !== undefined;
+    const amendDelivery = newDeliveryStars !== undefined;
+    if (!amendShop && !amendDelivery) {
+      throw new HttpsError('invalid-argument', 'At least one of newShopStars / newDeliveryStars required');
+    }
+    const shopCS: PerDimensionState =
+      (rev.shopCorrectionState as PerDimensionState | undefined) ??
+      (rev.correctionState as PerDimensionState);
+    const deliveryCS: PerDimensionState =
+      (rev.deliveryCorrectionState as PerDimensionState | undefined) ??
+      (rev.deliveryStars != null
+        ? (rev.correctionState as PerDimensionState)
+        : 'n_a');
+    if (amendShop && !canAmendPerDimension(shopCS)) {
       throw new HttpsError(
         'failed-precondition',
-        `Cannot amend in state '${rev.correctionState}'`,
+        `Cannot amend shop rating in state '${shopCS}'`,
+      );
+    }
+    if (amendDelivery && !canAmendPerDimension(deliveryCS)) {
+      throw new HttpsError(
+        'failed-precondition',
+        `Cannot amend delivery rating in state '${deliveryCS}'`,
       );
     }
 
     const nowMs = Date.now();
-    await db.doc(`reviews/${ratingId}`).set(
-      {
-        correctionState: 'amended',
-        amendedStars: {
-          shopStars: newShopStars ?? null,
-          deliveryStars: newDeliveryStars ?? null,
-        },
-        amendedAt: nowMs,
-      },
-      { merge: true },
-    );
-
-    // Recompute rolling averages if stars changed
-    if (
-      typeof newShopStars === 'number' &&
-      newShopStars !== rev.shopStars
-    ) {
-      const shopSnap = await db.doc(`shops/${rev.shopId}`).get();
-      const shopData = shopSnap.exists ? (shopSnap.data() as any) : {};
-      // Undo old + add new: simple recompute for pilot scale
-      const oldCount: number = shopData.ratingCount ?? 1;
-      const oldAvg: number = shopData.ratingAvg ?? rev.shopStars;
-      const oldSum = oldAvg * oldCount;
-      const newAvg = (oldSum - rev.shopStars + newShopStars) / oldCount;
-      await db.doc(`shops/${rev.shopId}`).set(
-        { ratingAvg: newAvg, updatedAt: FieldValue.serverTimestamp() },
-        { merge: true },
-      );
-    }
-
+    // HOTFIX-AMEND-RECOMPUTE — DO NOT REMOVE. Rolling-average recompute
+    // moved INTO _publishReview's transaction (atomic with the publish
+    // cascade). The redundant `amendedStars` subfield + the racy
+    // outside-tx shop.ratingAvg write are both gone. `amendedAt` is now
+    // stamped on the review doc via reviewPatch inside _publishReview
+    // (gated on reason === 'customer_amended'). One transactional call.
+    // PR-NEXT-BUNDLE-J §D — only the amended dimension(s) publish.
     await _publishReview({
       ratingId,
       reason: 'customer_amended',
       newShopStars,
       newDeliveryStars,
+      dimensions: { shop: amendShop, delivery: amendDelivery },
       nowMs,
     });
 
@@ -10334,15 +10759,24 @@ export const amendRating = onCall<{
  * Customer acknowledges the response, keeping their original stars.
  * Transitions 'responded' → 'published'.
  */
-export const acknowledgeReview = onCall<{ ratingId: string }>(
+export const acknowledgeReview = onCall<{
+  ratingId: string;
+  // PR-NEXT-BUNDLE-J §E — DO NOT REMOVE. Optional dimension scope. Defaults
+  // to 'both' for back-compat with the current client (which sends no
+  // dimension). The migrated client sends 'shop' / 'delivery' so acking one
+  // side never closes the other.
+  dimension?: 'shop' | 'delivery' | 'both';
+}>(
   { cors: true, enforceAppCheck: false, region: 'asia-south1' },
   async request => {
     const uid = request.auth?.uid;
     if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
-    const { ratingId } = request.data ?? {};
+    const { ratingId, dimension } = request.data ?? {};
     if (typeof ratingId !== 'string' || ratingId.length === 0) {
       throw new HttpsError('invalid-argument', 'ratingId required');
     }
+    const scope: 'shop' | 'delivery' | 'both' =
+      dimension === 'shop' || dimension === 'delivery' ? dimension : 'both';
 
     const reviewSnap = await db.doc(`reviews/${ratingId}`).get();
     if (!reviewSnap.exists) throw new HttpsError('not-found', 'Review not found');
@@ -10351,16 +10785,40 @@ export const acknowledgeReview = onCall<{ ratingId: string }>(
     if (rev.customerId !== uid) {
       throw new HttpsError('permission-denied', 'Not your review');
     }
-    if (!canAcknowledge(rev.correctionState)) {
+
+    // PR-NEXT-BUNDLE-J §E — per-dimension ack gate. A dimension can be acked
+    // only while it is 'responded'. With scope 'both', ack whichever side(s)
+    // are currently 'responded' (the other side may be n_a / already published
+    // / still flagged — those are skipped, not rejected).
+    const shopCS: PerDimensionState =
+      (rev.shopCorrectionState as PerDimensionState | undefined) ??
+      (rev.correctionState as PerDimensionState);
+    const deliveryCS: PerDimensionState =
+      (rev.deliveryCorrectionState as PerDimensionState | undefined) ??
+      (rev.deliveryStars != null
+        ? (rev.correctionState as PerDimensionState)
+        : 'n_a');
+
+    const ackShop =
+      (scope === 'shop' || scope === 'both') && canAcknowledgePerDimension(shopCS);
+    const ackDelivery =
+      (scope === 'delivery' || scope === 'both') &&
+      canAcknowledgePerDimension(deliveryCS);
+
+    if (!ackShop && !ackDelivery) {
+      // Nothing actionable. For an explicit single-dimension request, surface
+      // the precondition; for 'both' this means neither side is 'responded'.
+      const offending = scope === 'delivery' ? deliveryCS : shopCS;
       throw new HttpsError(
         'failed-precondition',
-        `Cannot acknowledge in state '${rev.correctionState}'`,
+        `Cannot acknowledge in state '${offending}'`,
       );
     }
 
     await _publishReview({
       ratingId,
       reason: 'customer_acknowledged',
+      dimensions: { shop: ackShop, delivery: ackDelivery },
       nowMs: Date.now(),
     });
 
@@ -10376,31 +10834,159 @@ export const publishTimedOutReviews = onSchedule(
   { schedule: 'every 24 hours', region: 'asia-south1' },
   async () => {
     const cutoffMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    const snap = await db
-      .collection('reviews')
-      .where('correctionState', '==', 'flagged_low')
-      .where('submittedAt', '<', cutoffMs)
-      .get();
+    // PR-NEXT-BUNDLE-J §I — query each flagged dimension independently (no
+    // single-field OR in Firestore) plus a legacy fallback for reviews not
+    // yet backfilled. Merge into a per-review {shop,delivery} flagged map so
+    // the timeout publishes ONLY the still-flagged side(s); a side that has
+    // already responded/published is never touched.
+    const [shopSnap, deliverySnap, legacySnap] = await Promise.all([
+      db
+        .collection('reviews')
+        .where('shopCorrectionState', '==', 'flagged_low')
+        .where('submittedAt', '<', cutoffMs)
+        .get(),
+      db
+        .collection('reviews')
+        .where('deliveryCorrectionState', '==', 'flagged_low')
+        .where('submittedAt', '<', cutoffMs)
+        .get(),
+      db
+        .collection('reviews')
+        .where('correctionState', '==', 'flagged_low')
+        .where('submittedAt', '<', cutoffMs)
+        .get(),
+    ]);
 
-    if (snap.empty) {
+    const flaggedById = new Map<string, { shop: boolean; delivery: boolean }>();
+    const ensure = (id: string) => {
+      let e = flaggedById.get(id);
+      if (!e) {
+        e = { shop: false, delivery: false };
+        flaggedById.set(id, e);
+      }
+      return e;
+    };
+    shopSnap.docs.forEach(d => {
+      ensure(d.id).shop = true;
+    });
+    deliverySnap.docs.forEach(d => {
+      ensure(d.id).delivery = true;
+    });
+    // Legacy fallback: a pre-Bundle-J review has no per-dimension fields.
+    // Treat both sides as flagged (conservative — matches old behavior).
+    legacySnap.docs.forEach(d => {
+      const data = d.data() as Record<string, any>;
+      if (data.shopCorrectionState === undefined && data.deliveryCorrectionState === undefined) {
+        const e = ensure(d.id);
+        e.shop = true;
+        e.delivery = data.deliveryStars != null;
+      }
+    });
+
+    if (flaggedById.size === 0) {
       console.log('[publishTimedOutReviews] no stale reviews');
       return;
     }
 
     const nowMs = Date.now();
     const results = await Promise.allSettled(
-      snap.docs.map(d =>
+      Array.from(flaggedById.entries()).map(([ratingId, dims]) =>
         _publishReview({
-          ratingId: d.id,
+          ratingId,
           reason: 'timeout',
+          dimensions: { shop: dims.shop, delivery: dims.delivery },
           nowMs,
         }),
       ),
     );
     const failed = results.filter(r => r.status === 'rejected').length;
     console.log(
-      `[publishTimedOutReviews] processed ${snap.size}, failed ${failed}`,
+      `[publishTimedOutReviews] processed ${flaggedById.size}, failed ${failed}`,
     );
+  },
+);
+
+/**
+ * PR-NEXT-BUNDLE-I §D — list this delivery partner's orders that have a
+ * flagged_low review awaiting response. Powers the attention queue card
+ * + section on DeliveryDashboardScreen.
+ *
+ * Auth: delivery role required (claims.delivery === true).
+ * Composite index: orders(deliveryPersonId ASC, deliveryCorrectionState ASC, updatedAt DESC)
+ * — added to firestore.indexes.json in this PR.
+ * PR-NEXT-BUNDLE-J §G — DO NOT REMOVE. Filters on deliveryCorrectionState
+ * (not the legacy worst-of correctionState) so a shop responding to its own
+ * 1★ no longer drops the order from the partner's queue (Sudhir 2026-06-10).
+ */
+export const listMyAttentionReviews = onCall(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
+    const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
+    if (claims.delivery !== true) {
+      throw new HttpsError('permission-denied', 'Delivery partner role required');
+    }
+    const snap = await db
+      .collection('orders')
+      .where('deliveryPersonId', '==', uid)
+      .where('deliveryCorrectionState', '==', 'flagged_low')
+      .orderBy('updatedAt', 'desc')
+      .limit(50)
+      .get();
+    return {
+      // HOTFIX-ATTENTION-CALLABLES-MISSING §E — pass 'delivery' so the
+      // helper's secondary filter matches the deliveryCorrectionState query.
+      orders: summarizeAttentionReviewRows(
+        snap.docs.map(d => ({ id: d.id, data: d.data() as Record<string, any> })),
+        'delivery',
+      ),
+    };
+  },
+);
+
+/**
+ * PR-NEXT-BUNDLE-I §E — list this shop's orders that have a flagged_low
+ * review awaiting response. Powers the attention queue card + section on
+ * ShopOwnerDashboardScreen.
+ *
+ * Auth: shop owner role required (resolves shopId from claims.shopId).
+ * Composite index: orders(shopId ASC, shopCorrectionState ASC, updatedAt DESC)
+ * — added to firestore.indexes.json in this PR.
+ * PR-NEXT-BUNDLE-J §G — DO NOT REMOVE. Filters on shopCorrectionState so a
+ * delivery partner responding to its own 1★ no longer drops the order from
+ * the shop's queue.
+ */
+export const listShopAttentionReviews = onCall(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
+    const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
+    if (claims.shopOwner !== true) {
+      throw new HttpsError('permission-denied', 'Shop owner role required');
+    }
+    const shopId = typeof claims.shopId === 'string' && claims.shopId.length > 0
+      ? claims.shopId
+      : null;
+    if (!shopId) {
+      throw new HttpsError('not-found', 'No shop associated with this account');
+    }
+    const snap = await db
+      .collection('orders')
+      .where('shopId', '==', shopId)
+      .where('shopCorrectionState', '==', 'flagged_low')
+      .orderBy('updatedAt', 'desc')
+      .limit(50)
+      .get();
+    return {
+      // HOTFIX-ATTENTION-CALLABLES-MISSING §E — pass 'shop' so the helper's
+      // secondary filter matches the shopCorrectionState query.
+      orders: summarizeAttentionReviewRows(
+        snap.docs.map(d => ({ id: d.id, data: d.data() as Record<string, any> })),
+        'shop',
+      ),
+    };
   },
 );
 
@@ -10506,15 +11092,52 @@ export const listPartnerReviews = onCall<{
   cursor?: number;
   // PR-NEXT-BUNDLE-E §E — admin moderation scope (mirrors listShopReviews).
   adminScope?: boolean;
+  // PR-NEXT-BUNDLE-G §B — partner viewing own reviews (all states visible).
+  mode?: 'public' | 'admin' | 'own';
 }>(
   { cors: true, enforceAppCheck: false, region: 'asia-south1' },
   async request => {
-    const { partnerUid, limit: limitParam, cursor, adminScope } =
+    const { partnerUid, limit: limitParam, cursor, adminScope, mode } =
       request.data ?? {};
     if (typeof partnerUid !== 'string' || partnerUid.length === 0) {
       throw new HttpsError('invalid-argument', 'partnerUid required');
     }
     const pageSize = Math.min(typeof limitParam === 'number' ? limitParam : 20, 50);
+
+    // PR-NEXT-BUNDLE-G §B — own mode: caller must be the partner.
+    // Returns all reviews (same as admin scope) but gated on uid match.
+    if (mode === 'own') {
+      const callerUid = request.auth?.uid;
+      if (!callerUid) throw new HttpsError('unauthenticated', 'Sign in required');
+      if (callerUid !== partnerUid) {
+        throw new HttpsError('permission-denied', 'Can only view your own reviews in own mode');
+      }
+      const snap = await db
+        .collection('reviews')
+        .where('deliveryPersonId', '==', partnerUid)
+        .limit(100)
+        .get();
+      const all = snap.docs.map(d => {
+        const data = d.data() as Record<string, any>;
+        return {
+          ratingId: d.id,
+          correctionState: data.correctionState ?? null,
+          deliveryStars: data.deliveryStars,
+          deliveryComment: data.deliveryComment ?? null,
+          customerName: data.customerName ?? null,
+          submittedAt: data.submittedAt ?? null,
+          publishedAt: data.publishedAt ?? null,
+          responseText: data.responseText ?? null,
+          responseBy: data.responseBy ?? null,
+        };
+      });
+      const reviews = filterReviewsForCaller(all, true).sort(
+        (a, b) =>
+          (b.publishedAt ?? b.submittedAt ?? 0) -
+          (a.publishedAt ?? a.submittedAt ?? 0),
+      );
+      return { ok: true, reviews, hasMore: false };
+    }
 
     // PR-NEXT-BUNDLE-E §E — admin scope: validate the admin claim, then
     // return ALL of the partner's reviews (no published filter), using

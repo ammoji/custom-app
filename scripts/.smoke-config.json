@@ -1,0 +1,14 @@
+{
+  "_comment": "HOTFIX-POST-DEPLOY-SMOKE-SCRIPT — callables checked by `npm run smoke`. Append new onCall callables here as they ship so post-deploy verification stays current. Read by scripts/post-deploy-smoke.ts.",
+  "callables": [
+    "submitOrderRating",
+    "respondToReview",
+    "amendRating",
+    "acknowledgeReview",
+    "listMyAttentionReviews",
+    "listShopAttentionReviews",
+    "listMyOrders",
+    "listShopOrders",
+    "getPartnerPhotoUploadUrl"
+  ]
+}

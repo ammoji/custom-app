@@ -7,7 +7,7 @@
  */
 // PR-NEXT-5.1 §C — DO NOT REMOVE. BottomSheet + inputs for review response.
 import React, { useState } from 'react';
-import { StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, StyleSheet, Text, TextInput, View } from 'react-native';
 import BottomSheet from '../common/BottomSheet';
 import Button from '../common/Button';
 import { colors, radii, spacing, typography } from '../../constants/theme';
@@ -43,6 +43,15 @@ export default function ResponseModal({
     try {
       await onSubmit(trimmed);
       setText('');
+    } catch (e: any) {
+      // HOTFIX-RATING-RESPONSE — surface server errors instead of
+      // silently re-enabling the button. Parent's onSubmit may have
+      // its own Alert; this is defense-in-depth so a future parent
+      // miswiring doesn't reintroduce the silent-fail symptom.
+      Alert.alert(
+        'Could not send response',
+        e?.message || 'Please try again in a moment.',
+      );
     } finally {
       setSubmitting(false);
     }

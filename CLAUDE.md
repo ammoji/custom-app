@@ -108,9 +108,12 @@ regressions to TestFlight before.
    returns.** React's Rules of Hooks. Multiple PRs (12 onward) have
    the lineage of fixes in comments — add to it, don't break it.
 3. **Server-first deploy** for any callable change. Deploy Functions
-   first, verify with `firebase functions:list`, then ship the client
-   that calls the new shape. Never ship a client that calls a function
-   that isn't live yet. See `.windsurf/deploy-discipline.md`.
+   first, verify with `firebase functions:list`, then run **`npm run
+   smoke`** (read-only validator: callable deployed + IAM `allUsers`
+   bound + composite index Enabled — catches the deploy-state failures
+   that masquerade as "empty result / nothing happens"), then ship the
+   client that calls the new shape. Never ship a client that calls a
+   function that isn't live yet. See `.windsurf/deploy-discipline.md`.
 4. **Schema-additive changes only** unless explicitly migrating. New
    optional fields on existing types; no required-field additions
    without a migration plan.
@@ -178,6 +181,13 @@ file (currently PR 23 is the most recent), `docs/pr-N-<slug>-windsurf-prompt.md`
   integration strategy, decisions deferred / out of scope. Read this
   when picking the next PR or evaluating a new feature request.
   Updated when the roadmap shifts, not every session.
+- **`docs/FEATURES.md`** — canonical inventory of "what the app
+  does today" across all four panels + cross-cutting/system. **Every
+  PR prompt must include explicit FEATURES.md update instructions
+  in its doc trail** per PROMPT_AUTHORING_NOTES Rule 8. Read this
+  before answering "do we already do X?" or designing any new
+  feature. Out-of-date answer here means re-built or mis-designed
+  work — keep it current.
 
 ## Resume protocol (do this at the start of every fresh session)
 

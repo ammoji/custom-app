@@ -22,6 +22,9 @@ import { useAuthStore } from '../../store/useAuthStore';
 // PR-NEXT-PARTNER-PHOTO §A — DO NOT REMOVE. Photo capture pipeline
 // (ImagePicker + resize). expo-image-picker is already in deps.
 import { pickAndResizeImage } from '../../utils/imageUpload';
+// HOTFIX-PROFILE-PHOTO — DO NOT REMOVE. formatPartnerAvatar for initials
+// fallback when the uploaded photo URL fails to render.
+import { formatPartnerAvatar } from '../../utils/formatPartnerAvatar';
 
 // PR 1 — security hardening. Rewritten from the one-tap self-service
 // flow to an admin-approval form. Mirrors RegisterShopScreen +
@@ -57,6 +60,9 @@ export default function BecomeDeliveryPartnerScreen() {
   const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [photoUploading, setPhotoUploading] = useState(false);
   const [photoUploadedUrl, setPhotoUploadedUrl] = useState<string | null>(null);
+  // HOTFIX-PROFILE-PHOTO — DO NOT REMOVE. onError fallback so broken
+  // upload URLs show initials instead of a blank circle.
+  const [photoLoadError, setPhotoLoadError] = useState(false);
   const [name, setName] = useState('');
   const [vehicleType, setVehicleType] = useState<string | undefined>(
     undefined,
@@ -112,21 +118,27 @@ export default function BecomeDeliveryPartnerScreen() {
     setPhotoUploadedUrl(null);
     setPhotoUploading(true);
     try {
-      const { uploadUrl, storagePath } =
+      const { uploadUrl, downloadUrl, downloadToken } =
         await orderService.getPartnerPhotoUploadUrl('image/jpeg');
       // Fetch the local file as a Blob, then PUT it to the signed URL.
       const response = await fetch(picked.uri);
       const blob = await response.blob();
       await fetch(uploadUrl, {
         method: 'PUT',
-        headers: { 'Content-Type': 'image/jpeg' },
+        headers: {
+          'Content-Type': 'image/jpeg',
+          // HOTFIX-PROFILE-PHOTO-4 — DO NOT REMOVE. Must match the value
+          // the server baked into the signed URL's extension headers, or
+          // GCS rejects the PUT signature. Also writes the object
+          // metadata that makes the download-token URL resolve.
+          'x-goog-meta-firebasestoragedownloadtokens': downloadToken,
+        },
         body: blob,
       });
-      // Construct the download URL from the storage path.
-      const bucket = 'grocery-mvp-dev.appspot.com'; // project default bucket
-      const encodedPath = encodeURIComponent(storagePath);
-      const downloadUrl = `https://storage.googleapis.com/${bucket}/${encodedPath}`;
+      // HOTFIX-PROFILE-PHOTO-4 — use the server-returned Firebase Storage
+      // REST URL (respects Storage Rules) instead of the GCS-direct URL.
       setPhotoUploadedUrl(downloadUrl);
+      setPhotoLoadError(false);
     } catch (e: any) {
       Alert.alert(
         'Upload failed',
@@ -220,13 +232,23 @@ export default function BecomeDeliveryPartnerScreen() {
         {/* PR-NEXT-PARTNER-PHOTO §A — photo capture */}
         <View style={styles.card}>
           <Text style={styles.label}>Your Face Photo *</Text>
-          {photoUri ? (
+          {photoUri && !photoLoadError ? (
             <Image
               // R9: truthy guard applied (photoUri is non-null here)
               source={{ uri: photoUri }}
               style={styles.photoPreview}
               accessibilityLabel="Your face photo preview"
+              onError={() => setPhotoLoadError(true)}
             />
+          ) : photoUri && photoLoadError ? (
+            <View style={[styles.photoPreview, styles.photoInitialsFallback]}>
+              <Text style={styles.photoInitialsText}>
+                {(() => {
+                  const av = formatPartnerAvatar(name, null);
+                  return av.kind === 'initials' ? av.text : '?';
+                })()}
+              </Text>
+            </View>
           ) : (
             <View style={styles.photoPlaceholder}>
               <Text style={styles.photoPlaceholderText}>No photo yet</Text>
@@ -458,5 +480,14 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.textPrimary,
     fontWeight: '600',
+  },
+  photoInitialsFallback: {
+    backgroundColor: colors.primaryLight,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  photoInitialsText: {
+    ...typography.h2,
+    color: colors.primaryDark,
   },
 });

@@ -510,12 +510,13 @@ export default function CheckoutScreen() {
           durationMin: res.durationMin,
         });
       })
-      .catch(() => {
+      // HOTFIX-SILENT-CATCH-GUARD — DO NOT REMOVE. The estimate line is
+      // hidden on failure (best-effort), but the failure (no shop.location
+      // / IAM problem) is reported so it's not invisible.
+      .catch(e => {
         if (cancelled) return;
-        // Server's haversine fallback means this only triggers on
-        // hard failures (no shop.location, IAM problem). UI hides
-        // the estimate line in that case.
         setDeliveryEstimate(null);
+        Sentry.captureException(e, { tags: { area: 'Checkout.deliveryEstimate' } });
       })
       .finally(() => {
         if (!cancelled) setEstimating(false);

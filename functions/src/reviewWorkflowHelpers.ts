@@ -88,3 +88,129 @@ export function decideTimeoutPublish(args: {
     elapsed > days * 24 * 60 * 60 * 1000
   );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// PR-NEXT-BUNDLE-J §A — per-dimension correction state.
+//
+// A single review doc has ONE correctionState but TWO independently
+// ratable dimensions (shop + delivery). When the shop responded, the
+// single field transitioned flagged_low → responded and the delivery
+// partner's attention queue (filtering correctionState === 'flagged_low')
+// dropped the review — the partner never got to respond to their own 1★.
+//
+// Fix: per-dimension state. Each side has its own state machine; the
+// legacy `correctionState` is computed as the worst-of (most-restrictive)
+// for back-compat with un-migrated consumers.
+// ─────────────────────────────────────────────────────────────────────
+
+export type ReviewDimension = 'shop' | 'delivery';
+
+export type PerDimensionState =
+  | 'flagged_low'
+  | 'responded'
+  | 'amended'
+  | 'published'
+  | 'n_a'; // delivery dimension only — customer didn't rate delivery
+
+/**
+ * PR-NEXT-BUNDLE-J §A — DO NOT REMOVE. Decide each dimension's initial
+ * state independently after a customer submits a rating. A dimension is
+ * 'flagged_low' if its stars ≤ threshold, else 'published'. Delivery is
+ * 'n_a' when the customer didn't rate it (null/undefined).
+ */
+export function decideInitialPerDimension(args: {
+  shopStars: number;
+  deliveryStars: number | null | undefined;
+  shopThreshold: number;
+  partnerThreshold: number;
+}): {
+  shopState: Exclude<PerDimensionState, 'n_a'>;
+  deliveryState: PerDimensionState;
+} {
+  const lowShop = args.shopStars <= args.shopThreshold;
+  const shopState: Exclude<PerDimensionState, 'n_a'> = lowShop
+    ? 'flagged_low'
+    : 'published';
+  let deliveryState: PerDimensionState;
+  if (args.deliveryStars == null) {
+    deliveryState = 'n_a';
+  } else {
+    const lowPartner = args.deliveryStars <= args.partnerThreshold;
+    deliveryState = lowPartner ? 'flagged_low' : 'published';
+  }
+  return { shopState, deliveryState };
+}
+
+/**
+ * PR-NEXT-BUNDLE-J §A — DO NOT REMOVE. Worst-of (most-restrictive) state
+ * for the legacy `correctionState` field. Rank: flagged_low > responded >
+ * amended > published. 'n_a' is skipped — if delivery is n_a, the legacy
+ * state reflects the shop dimension only.
+ */
+export function computeLegacyState(
+  shopState: Exclude<PerDimensionState, 'n_a'>,
+  deliveryState: PerDimensionState,
+): Exclude<PerDimensionState, 'n_a'> {
+  const rank: Record<string, number> = {
+    flagged_low: 4,
+    responded: 3,
+    amended: 2,
+    published: 1,
+  };
+  if (deliveryState === 'n_a') return shopState;
+  const shopRank = rank[shopState];
+  const deliveryRank = rank[deliveryState];
+  return shopRank >= deliveryRank
+    ? shopState
+    : (deliveryState as Exclude<PerDimensionState, 'n_a'>);
+}
+
+/** PR-NEXT-BUNDLE-J §A — a dimension can be responded to only while flagged_low. */
+export function canRespondPerDimension(state: PerDimensionState | undefined | null): boolean {
+  return state === 'flagged_low';
+}
+
+/** PR-NEXT-BUNDLE-J §A — a dimension can be amended only after its responder responded. */
+export function canAmendPerDimension(state: PerDimensionState | undefined | null): boolean {
+  return state === 'responded';
+}
+
+/** PR-NEXT-BUNDLE-J §A — a dimension can be acknowledged only in 'responded' (mirrors amend). */
+export function canAcknowledgePerDimension(state: PerDimensionState | undefined | null): boolean {
+  return state === 'responded';
+}
+
+/**
+ * PR-NEXT-BUNDLE-J §F — DO NOT REMOVE. Pure transition decision for the
+ * publish path (_publishReview). Given each dimension's prior state and
+ * which dimension(s) are being published, returns the resulting per-
+ * dimension states + the legacy worst-of. The unpublished dimension keeps
+ * its prior state — this is the heart of the Sudhir 2026-06-10 fix: acking/
+ * amending/timing-out one side never closes the other.
+ *
+ * `applyDelivery` is expected to already incorporate "has a delivery
+ * rating" (caller AND's it with hasDelivery) — a publish targeting an
+ * absent delivery dimension is a no-op for that side.
+ */
+export function decidePublishTransition(args: {
+  priorShopState: Exclude<PerDimensionState, 'n_a'>;
+  priorDeliveryState: PerDimensionState;
+  applyShop: boolean;
+  applyDelivery: boolean;
+}): {
+  finalShopState: Exclude<PerDimensionState, 'n_a'>;
+  finalDeliveryState: PerDimensionState;
+  legacyState: Exclude<PerDimensionState, 'n_a'>;
+} {
+  const finalShopState: Exclude<PerDimensionState, 'n_a'> = args.applyShop
+    ? 'published'
+    : args.priorShopState;
+  const finalDeliveryState: PerDimensionState = args.applyDelivery
+    ? 'published'
+    : args.priorDeliveryState;
+  return {
+    finalShopState,
+    finalDeliveryState,
+    legacyState: computeLegacyState(finalShopState, finalDeliveryState),
+  };
+}

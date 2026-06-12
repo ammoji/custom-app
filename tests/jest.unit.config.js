@@ -15,6 +15,10 @@
  *     don't get pulled in here.
  */
 module.exports = {
+  // HOTFIX-JEST-PROJECTS-CONFIG — DO NOT REMOVE. displayName lets the
+  // root jest.config.js address this as the 'logic' project
+  // (`npx jest --selectProjects logic`) and labels its output.
+  displayName: 'logic',
   rootDir: '..',
   preset: 'ts-jest',
   testEnvironment: 'node',
@@ -28,6 +32,13 @@ module.exports = {
     '<rootDir>/tests/contracts/**/*.test.ts',
     '<rootDir>/tests/screens/**/*.test.ts',
     '<rootDir>/tests/constants/**/*.test.ts',
+    // HOTFIX-JEST-PROJECTS-CONFIG — DO NOT REMOVE. The permanent
+    // static-source guards (tests/static) + component-logic tests
+    // (tests/components) were NOT in testMatch, so `npm test` never ran
+    // them — they only passed via ad-hoc `npx jest <path>`. Wiring them
+    // in here is the structural fix: every guard runs on every CI run.
+    '<rootDir>/tests/static/**/*.test.ts',
+    '<rootDir>/tests/components/**/*.test.ts',
   ],
   testTimeout: 10000,
   setupFiles: ['<rootDir>/tests/unit-setup.ts'],

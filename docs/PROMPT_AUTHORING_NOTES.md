@@ -292,6 +292,52 @@ verified against the actual production shape. Eliminates the
 "self-confirming test passes a wrong-field bug" class that
 PARTNER-CARD.1 shipped.
 
+### Rule 8 — FEATURES.md update is part of every PR (added 2026-06-10)
+
+**Every PR prompt MUST include an explicit FEATURES.md instruction
+in its doc trail section.** This is mandatory whether the PR is a
+new feature, a UX change, a hotfix, a deprecation, or a rename.
+
+`docs/FEATURES.md` is the canonical inventory of "what the app
+does today" across all four panels (customer / shop / delivery /
+admin) + cross-cutting/system. It is useless if it drifts. Every
+shipped change is a chance for it to drift, so the prompt is the
+mechanism that forces the update at the right moment.
+
+**Standard FEATURES.md instruction block to include in every
+prompt's `Doc trail (Cowork)` section** (copy-paste, customise per
+PR):
+
+```
+- FEATURES.md — concrete update list:
+  - [Panel/Section] — add/edit/strike: <row text>
+  - Source column: <this PR id>
+  - Status column: shipped / dev-only / flagged / deferred
+  - "Last updated" stamp on the affected section(s) → today's date
+```
+
+**Update categories — what kind of update each PR triggers:**
+
+| PR kind | FEATURES.md action |
+| --- | --- |
+| New feature | Add a row in the appropriate section; bump section date |
+| UX change to existing feature | Edit the description column + bump source PR id + bump section date |
+| Hotfix (no behavior change, just fixes a broken feature) | No new row; verify existing row description still accurate; bump source PR id if behavior nuance changed |
+| Removal / deprecation | Strikethrough the row (`~~text~~ — removed in PR-N`), do NOT delete |
+| Schema-additive change with no user-visible surface | Mention in PR's commit message, NOT in FEATURES.md (FEATURES.md is user-facing only) |
+| Operational config flip (e.g. `appConfig/pilotStatus.isLive: true`) | Update the Status column of the affected row in §4.5 Configuration |
+
+**If a prompt doesn't touch user-facing behavior at all** (pure
+refactor, dependency bump, test-only change) — still mention
+"FEATURES.md — no row change; pure internal" in the doc trail
+section so reviewers know it was considered.
+
+**Why this rule exists:** Without it, FEATURES.md drifts. When
+FEATURES.md drifts, a future session asking "do we already do X?"
+gets the wrong answer and either re-builds something we have or
+designs around a capability we shipped. Both are expensive in
+their own ways.
+
 ---
 
 ## How CLAUDE.md should reference this file

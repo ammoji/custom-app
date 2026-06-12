@@ -32,6 +32,19 @@ import type {
     UserInfo,
 } from '../types';
 import type { OrderStatus } from '../utils/orderStateMachine';
+// PR-NEXT-BUNDLE-I §D/§E — DO NOT REMOVE. AttentionReviewRow mirrors the
+// shape returned by the attention-queue callables. Defined locally to
+// avoid a cross-boundary import from functions/src/ into src/.
+export type AttentionReviewRow = {
+  orderId: string;
+  shopName: string | null;
+  deliveryRating: number | null;
+  deliveryComment: string | null;
+  shopRating: number | null;
+  shopComment: string | null;
+  deliveredAt: number | null;
+  submittedAt: number | null;
+};
 import { db, functions, perf } from './firebase';
 import { buildPlaceOrderPayload } from './placeOrderPayload';
 import { Sentry } from './sentry';
@@ -329,6 +342,21 @@ export const orderService = {
   // failure. Screens MUST set their loading state from the callback —
   // never from the success branch alone — so a transient network blip
   // can't leave the loader spinning forever.
+  // HOTFIX-AMEND-RECOMPUTE — DO NOT REMOVE. One-shot fetch-by-id used
+  // by RatingAmendmentScreen to prime the cache after an amend so the
+  // underlying OrderDetailScreen doesn't show stale stars during the
+  // native watcher's poll interval.
+  async getOrder(orderId: string): Promise<Order | null> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('getOrder');
+      const result = await fn({ orderId });
+      return result.data ? toOrder(result.data) : null;
+    }
+    const fn = httpsCallable(functions, 'getOrder');
+    const result = await fn({ orderId });
+    return result.data ? toOrder(result.data as any) : null;
+  },
+
   watchOrder(
     orderId: string,
     cb: (order: Order | null, error?: Error) => void,
@@ -1042,17 +1070,31 @@ export const orderService = {
   // PR-NEXT-PARTNER-PHOTO §B — DO NOT REMOVE.
   async getPartnerPhotoUploadUrl(
     contentType: string,
-  ): Promise<{ uploadUrl: string; storagePath: string }> {
+  ): Promise<{
+    uploadUrl: string;
+    storagePath: string;
+    // HOTFIX-PROFILE-PHOTO-4 — server now returns the Firebase Storage
+    // REST download URL (token embedded) + the token the client must
+    // echo on the PUT extension header.
+    downloadUrl: string;
+    downloadToken: string;
+  }> {
+    type Result = {
+      uploadUrl: string;
+      storagePath: string;
+      downloadUrl: string;
+      downloadToken: string;
+    };
     if (isNative) {
       const fn = getNativeFunctions().httpsCallable(
         'getPartnerPhotoUploadUrl',
       );
       const result = await fn({ contentType });
-      return result.data as { uploadUrl: string; storagePath: string };
+      return result.data as Result;
     }
     const fn = httpsCallable(functions, 'getPartnerPhotoUploadUrl');
     const result = await fn({ contentType });
-    return result.data as { uploadUrl: string; storagePath: string };
+    return result.data as Result;
   },
 
   async requestDeliveryRole(form: {
@@ -1852,6 +1894,8 @@ export const orderService = {
     profilePhotoUrl?: string | null;
     deliveryRatingAvg?: number | null;
     deliveryRatingCount?: number | null;
+    // PR-NEXT-BUNDLE-G §A — lifetime deliveries completed counter.
+    deliveriesCompleted?: number;
   }> {
     if (isNative) {
       const fn = getNativeFunctions().httpsCallable(
@@ -1983,6 +2027,10 @@ export const orderService = {
 
   async acknowledgeReview(input: {
     ratingId: string;
+    // PR-NEXT-BUNDLE-J §L — DO NOT REMOVE. Optional per-dimension scope so
+    // acking one side never closes the other (Sudhir 2026-06-10). Omitted ⇒
+    // server defaults to 'both' (back-compat).
+    dimension?: 'shop' | 'delivery' | 'both';
   }): Promise<{ ok: true; state: string }> {
     if (isNative) {
       const fn = getNativeFunctions().httpsCallable('acknowledgeReview');
@@ -2033,6 +2081,8 @@ export const orderService = {
     cursor?: number;
     // PR-NEXT-BUNDLE-E §E — admin moderation scope.
     adminScope?: boolean;
+    // PR-NEXT-BUNDLE-G §B — own mode for partner viewing own reviews.
+    mode?: 'public' | 'admin' | 'own';
   }): Promise<{
     ok: true;
     reviews: Array<{
@@ -2200,5 +2250,31 @@ export const orderService = {
         cb([], err instanceof Error ? err : new Error(String(err)));
       },
     );
+  },
+
+  // PR-NEXT-BUNDLE-I §D — DO NOT REMOVE. Fetches the delivery partner's
+  // orders that have a flagged_low review awaiting response.
+  async listMyAttentionReviews(): Promise<AttentionReviewRow[]> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('listMyAttentionReviews');
+      const result = await fn();
+      return ((result.data as any)?.orders ?? []) as AttentionReviewRow[];
+    }
+    const fn = httpsCallable(functions, 'listMyAttentionReviews');
+    const result = await fn();
+    return ((result.data as any)?.orders ?? []) as AttentionReviewRow[];
+  },
+
+  // PR-NEXT-BUNDLE-I §E — DO NOT REMOVE. Fetches the shop's orders that
+  // have a flagged_low review awaiting response.
+  async listShopAttentionReviews(): Promise<AttentionReviewRow[]> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('listShopAttentionReviews');
+      const result = await fn();
+      return ((result.data as any)?.orders ?? []) as AttentionReviewRow[];
+    }
+    const fn = httpsCallable(functions, 'listShopAttentionReviews');
+    const result = await fn();
+    return ((result.data as any)?.orders ?? []) as AttentionReviewRow[];
   },
 };

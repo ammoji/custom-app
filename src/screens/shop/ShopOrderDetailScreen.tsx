@@ -46,6 +46,10 @@ import { formatPartnerAvatar } from '../../utils/formatPartnerAvatar';
 // PR-NEXT-BUNDLE-E §A — DO NOT REMOVE. Trust line (rating + vehicle)
 // for the shop-side partner card. Auto-formatter strip risk.
 import { formatPartnerTrust } from '../../utils/formatPartnerTrust';
+// HOTFIX-PARTNER-STATUS-DISPLAY §A — DO NOT REMOVE. Three-state subtitle
+// helper (Bundle H §C) reused so the shop-side partner status label gains
+// the delivered/cancelled branches; was two-state ("On the way" forever).
+import { derivePartnerCardSubtitle } from '../../utils/derivePartnerCardSubtitle';
 // PR-NEXT-5.1 §A — DO NOT REMOVE. Respond-to-review banner + modal.
 import ResponseModal from '../../components/order/ResponseModal';
 import { orderService } from '../../services/orderService';
@@ -262,9 +266,9 @@ export default function ShopOrderDetailScreen() {
     // Web has no useful tel: handler; only attempt on native to
     // avoid a "no app to handle this" toast on the web preview.
     if (Platform.OS === 'web') {
-      Linking.openURL(url).catch(() => {
-        /* ignore — desktop browsers without softphones do nothing */
-      });
+      // silent-catch-audit:allow — desktop browsers without a softphone
+      // simply do nothing; there is no actionable failure to surface.
+      Linking.openURL(url).catch(() => {});
       return;
     }
     Linking.openURL(url).catch(err => {
@@ -355,10 +359,24 @@ export default function ShopOrderDetailScreen() {
                 ratingCount: order.deliveryPersonDeliveriesCount ?? null,
                 vehicleType: order.deliveryPersonVehicleType ?? null,
               });
+              // HOTFIX-PARTNER-STATUS-DISPLAY §A — DO NOT REMOVE. Three-state
+              // via the shared helper from Bundle H §C. Adds 'delivered' and
+              // 'cancelled' branches so the partner section copy doesn't lie
+              // after handoff. Helper returns customer-side phrasing; the
+              // shop-side overrides the two in-flight branches but reuses the
+              // finalized (role-neutral) branches.
               const pickedUp = order.pickedUpAt != null;
-              const statusLabel = pickedUp
-                ? 'On the way to the customer'
-                : 'Heading to your shop';
+              const subtitle = derivePartnerCardSubtitle({
+                orderStatus: order.status ?? null,
+                pickedUpAt:
+                  typeof order.pickedUpAt === 'number' ? order.pickedUpAt : null,
+              });
+              const statusLabel =
+                subtitle === '🛵 On the way to you'
+                  ? '🛵 On the way to the customer'
+                  : subtitle === '📦 Heading to the shop'
+                    ? '📦 Heading to your shop'
+                    : subtitle; // delivered / cancelled — finalized copy
               return (
                 <View style={styles.card}>
                   <View
@@ -408,6 +426,7 @@ export default function ShopOrderDetailScreen() {
                     (partnerPhone ? (
                       <Pressable
                         onPress={() =>
+                          // silent-catch-audit:allow — tel: deep-link best-effort.
                           Linking.openURL(`tel:${partnerPhone}`).catch(() => {})
                         }
                         style={styles.partnerCallBtn}
@@ -506,6 +525,7 @@ export default function ShopOrderDetailScreen() {
                 android: `geo:0,0?q=${lat},${lng}(Delivery%20pin)`,
                 default: `https://maps.google.com/?q=${lat},${lng}`,
               });
+              // silent-catch-audit:allow — maps deep-link best-effort.
               Linking.openURL(url!).catch(() => {});
             }}
             style={styles.gpsPinCard}
@@ -682,60 +702,70 @@ export default function ShopOrderDetailScreen() {
           </View>
         )}
 
-        {/* PR-NEXT-5.1 §A — low-rating review banner. Shown only when
-            the order has a correctionState of 'flagged_low' or
-            'responded' (review is private, correction workflow active). */}
-        {(order.correctionState === 'flagged_low' ||
-          order.correctionState === 'responded') && (
-          <View style={styles.reviewBanner}>
-            <Text style={styles.reviewBannerTitle}>
-              ⚠️ Customer left a {order.shopRating ?? '?'}★ rating
-            </Text>
-            {!!order.shopComment && (
-              <Text style={styles.reviewBannerComment}>
-                "{order.shopComment}"
-              </Text>
-            )}
-            {order.correctionState === 'flagged_low' && (
-              <Pressable
-                onPress={() => setRespondModalOpen(true)}
-                style={styles.respondBtn}
-                accessibilityRole="button"
-                accessibilityLabel="Respond to review"
-                disabled={responseSubmitting}
-              >
-                <Text style={styles.respondBtnText}>
-                  📝 Respond to review
-                </Text>
-              </Pressable>
-            )}
-            {order.correctionState === 'responded' && (
-              <>
-                <Text style={styles.reviewResponseLabel}>
-                  Your response:
-                </Text>
-                <Text style={styles.reviewResponseText}>
-                  {order.responseText}
-                </Text>
-                <Text style={styles.reviewWaiting}>
-                  Waiting on customer to acknowledge or amend
-                  {order.responseAt
-                    ? ` · ${Math.max(0, 7 - Math.floor((Date.now() - order.responseAt) / 86400000))} days left`
-                    : ''}
-                  .
-                </Text>
-              </>
-            )}
-          </View>
-        )}
-        {order.correctionState === 'published' && !!order.shopRating && (
-          <View style={[styles.reviewBanner, styles.reviewBannerDone]}>
-            <Text style={styles.reviewBannerTitle}>
-              ✅ Review published — {order.shopRating}★
-              {order.responseText ? ' with your response' : ''}
-            </Text>
-          </View>
-        )}
+        {/* PR-NEXT-5.1 §A — low-rating review banner.
+            PR-NEXT-BUNDLE-J §L — DO NOT REMOVE. Reads the SHOP dimension's
+            own state + response (fallback to legacy for un-migrated orders)
+            so the delivery partner responding/resolving never changes what
+            the shop sees here (Sudhir 2026-06-10). */}
+        {(() => {
+          const shopCS = order.shopCorrectionState ?? order.correctionState;
+          const shopResp = order.shopResponseText ?? order.responseText;
+          const shopRespAt = order.shopRespondedAt ?? order.responseAt;
+          return (
+            <>
+              {(shopCS === 'flagged_low' || shopCS === 'responded') && (
+                <View style={styles.reviewBanner}>
+                  <Text style={styles.reviewBannerTitle}>
+                    ⚠️ Customer left a {order.shopRating ?? '?'}★ rating
+                  </Text>
+                  {!!order.shopComment && (
+                    <Text style={styles.reviewBannerComment}>
+                      "{order.shopComment}"
+                    </Text>
+                  )}
+                  {shopCS === 'flagged_low' && (
+                    <Pressable
+                      onPress={() => setRespondModalOpen(true)}
+                      style={styles.respondBtn}
+                      accessibilityRole="button"
+                      accessibilityLabel="Respond to review"
+                      disabled={responseSubmitting}
+                    >
+                      <Text style={styles.respondBtnText}>
+                        📝 Respond to review
+                      </Text>
+                    </Pressable>
+                  )}
+                  {shopCS === 'responded' && (
+                    <>
+                      <Text style={styles.reviewResponseLabel}>
+                        Your response:
+                      </Text>
+                      <Text style={styles.reviewResponseText}>
+                        {shopResp}
+                      </Text>
+                      <Text style={styles.reviewWaiting}>
+                        Waiting on customer to acknowledge or amend
+                        {shopRespAt
+                          ? ` · ${Math.max(0, 7 - Math.floor((Date.now() - shopRespAt) / 86400000))} days left`
+                          : ''}
+                        .
+                      </Text>
+                    </>
+                  )}
+                </View>
+              )}
+              {shopCS === 'published' && !!order.shopRating && (
+                <View style={[styles.reviewBanner, styles.reviewBannerDone]}>
+                  <Text style={styles.reviewBannerTitle}>
+                    ✅ Review published — {order.shopRating}★
+                    {shopResp ? ' with your response' : ''}
+                  </Text>
+                </View>
+              )}
+            </>
+          );
+        })()}
 
         {/* Action buttons */}
         {actions.length > 0 && (
@@ -776,7 +806,12 @@ export default function ShopOrderDetailScreen() {
             });
             setRespondModalOpen(false);
           } catch (e: any) {
-            throw e;
+            // HOTFIX-RATING-RESPONSE — Alert so the error is surfaced;
+            // watcher will auto-refresh order state on success path.
+            Alert.alert(
+              'Could not send response',
+              e?.message || 'Please try again.',
+            );
           } finally {
             setResponseSubmitting(false);
           }

@@ -18,6 +18,8 @@ import { colors, radii, shadow, spacing, typography } from '../../constants/them
 import type { RootStackParamList } from '../../navigation/AppNavigator';
 import { useAuthStore } from '../../store/useAuthStore';
 import { formatOrderTime, formatRupees } from '../../utils/format';
+// PR-NEXT-BUNDLE-G §E — DO NOT REMOVE. Payment status badge.
+import PaymentBadge from '../../components/delivery/PaymentBadge';
 // PR-NEXT-COD-UX (Case 8) — DO NOT REMOVE. Hides the Delivered
 // CTA when the server's COD gate would reject it, so the partner
 // never gets the dead-tap-then-error UX. Mirror of the server's
@@ -331,11 +333,11 @@ export default function DeliveryOrderDetailScreen() {
             <Text style={styles.totalLabel}>Total</Text>
             <Text style={styles.totalValue}>{formatRupees(order.total)}</Text>
           </View>
-          <Text style={styles.payHint}>
-            {order.paymentMethod === 'online'
-              ? 'Already paid online — no collection.'
-              : `Collect ${formatRupees(order.total)} cash on delivery.`}
-          </Text>
+          <PaymentBadge
+            paymentMethod={order.paymentMethod as any}
+            paymentStatus={order.paymentStatus as any}
+            paidMethod={(order as any).paidMethod}
+          />
         </View>
 
         {Array.isArray(order.statusHistory) && order.statusHistory.length > 0 && (
@@ -451,54 +453,66 @@ export default function DeliveryOrderDetailScreen() {
           </View>
         )}
 
-        {/* PR-NEXT-5.1 §B — delivery partner low-rating banner. */}
-        {(order.correctionState === 'flagged_low' ||
-          order.correctionState === 'responded') && (
-          <View style={styles.reviewBanner}>
-            <Text style={styles.reviewBannerTitle}>
-              ⚠️ Customer rated delivery {order.deliveryRating ?? '?'}★
-            </Text>
-            {!!order.deliveryComment && (
-              <Text style={styles.reviewBannerComment}>
-                "{order.deliveryComment}"
-              </Text>
-            )}
-            {order.correctionState === 'flagged_low' && (
-              <Pressable
-                onPress={() => setRespondModalOpen(true)}
-                style={styles.respondBtn}
-                accessibilityRole="button"
-                accessibilityLabel="Respond to review"
-                disabled={responseSubmitting}
-              >
-                <Text style={styles.respondBtnText}>
-                  📝 Respond to review
-                </Text>
-              </Pressable>
-            )}
-            {order.correctionState === 'responded' && (
-              <>
-                <Text style={styles.reviewResponseLabel}>Your response:</Text>
-                <Text style={styles.reviewResponseText}>{order.responseText}</Text>
-                <Text style={styles.reviewWaiting}>
-                  Waiting on customer to acknowledge or amend
-                  {order.responseAt
-                    ? ` · ${Math.max(0, 7 - Math.floor((Date.now() - order.responseAt) / 86400000))} days left`
-                    : ''}
-                  .
-                </Text>
-              </>
-            )}
-          </View>
-        )}
-        {order.correctionState === 'published' && !!order.deliveryRating && (
-          <View style={[styles.reviewBanner, styles.reviewBannerDone]}>
-            <Text style={styles.reviewBannerTitle}>
-              ✅ Review published — {order.deliveryRating}★
-              {order.responseText ? ' with your response' : ''}
-            </Text>
-          </View>
-        )}
+        {/* PR-NEXT-5.1 §B — delivery partner low-rating banner.
+            PR-NEXT-BUNDLE-J §L — DO NOT REMOVE. Reads the DELIVERY dimension's
+            own state + partner response (fallback to legacy for un-migrated
+            orders) so the shop responding/resolving never changes what the
+            partner sees here (Sudhir 2026-06-10). */}
+        {(() => {
+          const deliveryCS = order.deliveryCorrectionState ?? order.correctionState;
+          const partnerResp = order.partnerResponseText ?? order.responseText;
+          const partnerRespAt = order.partnerRespondedAt ?? order.responseAt;
+          return (
+            <>
+              {(deliveryCS === 'flagged_low' || deliveryCS === 'responded') && (
+                <View style={styles.reviewBanner}>
+                  <Text style={styles.reviewBannerTitle}>
+                    ⚠️ Customer rated delivery {order.deliveryRating ?? '?'}★
+                  </Text>
+                  {!!order.deliveryComment && (
+                    <Text style={styles.reviewBannerComment}>
+                      "{order.deliveryComment}"
+                    </Text>
+                  )}
+                  {deliveryCS === 'flagged_low' && (
+                    <Pressable
+                      onPress={() => setRespondModalOpen(true)}
+                      style={styles.respondBtn}
+                      accessibilityRole="button"
+                      accessibilityLabel="Respond to review"
+                      disabled={responseSubmitting}
+                    >
+                      <Text style={styles.respondBtnText}>
+                        📝 Respond to review
+                      </Text>
+                    </Pressable>
+                  )}
+                  {deliveryCS === 'responded' && (
+                    <>
+                      <Text style={styles.reviewResponseLabel}>Your response:</Text>
+                      <Text style={styles.reviewResponseText}>{partnerResp}</Text>
+                      <Text style={styles.reviewWaiting}>
+                        Waiting on customer to acknowledge or amend
+                        {partnerRespAt
+                          ? ` · ${Math.max(0, 7 - Math.floor((Date.now() - partnerRespAt) / 86400000))} days left`
+                          : ''}
+                        .
+                      </Text>
+                    </>
+                  )}
+                </View>
+              )}
+              {deliveryCS === 'published' && !!order.deliveryRating && (
+                <View style={[styles.reviewBanner, styles.reviewBannerDone]}>
+                  <Text style={styles.reviewBannerTitle}>
+                    ✅ Review published — {order.deliveryRating}★
+                    {partnerResp ? ' with your response' : ''}
+                  </Text>
+                </View>
+              )}
+            </>
+          );
+        })()}
       </ScrollView>
 
       {/* PR-NEXT-5.1 §B — review response modal for delivery partners. */}
@@ -518,7 +532,12 @@ export default function DeliveryOrderDetailScreen() {
             });
             setRespondModalOpen(false);
           } catch (e: any) {
-            throw e;
+            // HOTFIX-RATING-RESPONSE — Alert so the error is surfaced;
+            // watcher will auto-refresh order state on success path.
+            Alert.alert(
+              'Could not send response',
+              e?.message || 'Please try again.',
+            );
           } finally {
             setResponseSubmitting(false);
           }

@@ -39,6 +39,9 @@ import DeliveryTabNavigator from './DeliveryTabNavigator';
 // PR-NEXT-REVIEW-SYSTEM §F/§G — DO NOT REMOVE. Public reviews + correction.
 import ShopReviewsScreen from '../screens/shop/ShopReviewsScreen';
 import RatingAmendmentScreen from '../screens/customer/RatingAmendmentScreen';
+// HOTFIX-RESPOND-OWNER-AND-CARD-NAV §E/§F — DO NOT REMOVE. Dedicated
+// flagged_low attention queue reached from the dashboard card grid.
+import AttentionQueueScreen from '../screens/AttentionQueueScreen';
 // PR-NEXT-5.1 §D — DO NOT REMOVE. Partner public reviews screen.
 import PartnerReviewsScreen from '../screens/delivery/PartnerReviewsScreen';
 import DeliveryOrderDetailScreen from '../screens/delivery/DeliveryOrderDetailScreen';
@@ -146,7 +149,8 @@ export type RootStackParamList = {
   PartnerReviews: {
     partnerUid: string;
     partnerName?: string;
-    mode?: 'public' | 'admin';
+    // PR-NEXT-BUNDLE-G §B — 'own' mode: partner views all their own reviews.
+    mode?: 'public' | 'admin' | 'own';
   };
   RatingAmendment: {
     ratingId: string;
@@ -155,7 +159,18 @@ export type RootStackParamList = {
     originalShopStars?: number;
     responseText?: string | null;
     responseBy?: string | null;
+    // PR-NEXT-BUNDLE-G §D — partner identity for amendment screen photo.
+    deliveryPersonName?: string | null;
+    deliveryPersonPhotoUrl?: string | null;
+    // PR-NEXT-BUNDLE-J §L — DO NOT REMOVE. Which dimension the customer is
+    // correcting, so amend/ack target the right side independently. Absent ⇒
+    // 'shop' (legacy deep-links). originalDeliveryStars drives delivery amend.
+    dimension?: 'shop' | 'delivery';
+    originalDeliveryStars?: number;
   };
+  // HOTFIX-RESPOND-OWNER-AND-CARD-NAV §F — DO NOT REMOVE. Dedicated
+  // flagged_low attention queue; role selects which callable + OrderDetail.
+  AttentionQueue: { role: 'delivery' | 'shop' };
 };
 
 export type ShopRegistrationPrefill = {
@@ -262,6 +277,7 @@ export default function AppNavigator() {
       <Stack.Screen name="AddressEdit" component={AddressEditScreen} />
       <Stack.Screen name="ShopReviews" component={ShopReviewsScreen} />
       <Stack.Screen name="RatingAmendment" component={RatingAmendmentScreen} />
+      <Stack.Screen name="AttentionQueue" component={AttentionQueueScreen} />
       <Stack.Screen name="PartnerReviews" component={PartnerReviewsScreen} />
     </Stack.Navigator>
   );

@@ -168,8 +168,12 @@ export default function ShopDetailManagementScreen() {
       .then(g => {
         if (!cancelled) setCurrentResolved(formatResolvedAddress(g));
       })
-      .catch(() => {
+      .catch(e => {
+        // HOTFIX-SILENT-CATCH-GUARD — DO NOT REMOVE. Reverse-geocode is a
+        // display nicety; blank fallback but log so a broken geocoder
+        // isn't invisible.
         if (!cancelled) setCurrentResolved('');
+        console.warn('[ShopDetailManagement] resolve current address failed:', e);
       });
     return () => {
       cancelled = true;
@@ -188,8 +192,10 @@ export default function ShopDetailManagementScreen() {
       .then(g => {
         if (!cancelled) setPendingResolved(formatResolvedAddress(g));
       })
-      .catch(() => {
+      .catch(e => {
+        // HOTFIX-SILENT-CATCH-GUARD — DO NOT REMOVE. See note above.
         if (!cancelled) setPendingResolved('');
+        console.warn('[ShopDetailManagement] resolve pending address failed:', e);
       });
     return () => {
       cancelled = true;

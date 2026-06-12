@@ -79,6 +79,26 @@ service firebase.storage {
       allow read: if false;
       allow write: if false;
     }
+    // HOTFIX-PROFILE-PHOTO-2 (2026-06-10) — Delivery partner profile
+    // photos. Same signed-PUT-URL pattern as /menu/ and /shop-kyc/:
+    // writes go through `getPartnerPhotoUploadUrl` which bypasses
+    // rules at sign time. Reads are PUBLIC because the photo is
+    // surfaced to customer + shop on partner cards / live tracking
+    // sheets / review screens — same rationale as /products/,
+    // /shops/, /menu/. Without this rule the catch-all denies the
+    // GCS public URL that DeliveryProfileScreen +
+    // BecomeDeliveryPartnerScreen construct via
+    // buildPartnerPhotoDownloadUrl, and Image renders blank with no
+    // error event. HOTFIX-PROFILE-PHOTO fixed URL encoding; this
+    // fixes the read denial that was masking under the broken
+    // encoding.
+    //
+    // Path scheme: `delivery-profile/{uid}.jpg` (one photo per
+    // partner; re-upload overwrites).
+    match /delivery-profile/{filename} {
+      allow read: if true;
+      allow write: if false;
+    }
     match /{allPaths=**} {
       allow read, write: if false;
     }

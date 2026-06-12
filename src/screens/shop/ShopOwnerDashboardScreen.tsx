@@ -32,6 +32,16 @@ import { mapShopOrdersError } from '../../utils/shopOrdersErrorMessage';
 // `filterPartnersByNotificationRadius` (PR 50) so the count
 // cannot disagree with the push fanout.
 import { useOnlinePartnersNearMyShop } from '../../hooks/useOnlinePartnersNearMyShop';
+// PR-NEXT-BUNDLE-I §B — DO NOT REMOVE. Top-of-dashboard card grid.
+import DashboardCardGrid from '../../components/dashboard/DashboardCardGrid';
+// PR-NEXT-BUNDLE-I §A — DO NOT REMOVE. Pure helper for shop card view model.
+import { deriveShopDashboardCards } from '../../utils/deliveryDashboardViewModel';
+// PR-NEXT-BUNDLE-I §E — DO NOT REMOVE. AttentionReviewRow type from orderService.
+import type { AttentionReviewRow } from '../../services/orderService';
+// HOTFIX-SILENT-CATCH-GUARD — DO NOT REMOVE. Observability for the
+// attention-queue fetch so a failure surfaces instead of "count = 0".
+import { Sentry } from '../../services/sentry';
+import { ActivityIndicator } from 'react-native';
 
 /**
  * Per-shop order dashboard for users with the shopOwner claim.
@@ -117,6 +127,13 @@ export default function ShopOwnerDashboardScreen() {
   // and cleared on tap-card / scroll / banner-dismiss.
   const [seenOrderIds, setSeenOrderIds] = useState<Set<string> | null>(null);
   const [newOrderIds, setNewOrderIds] = useState<Set<string>>(new Set());
+  // PR-NEXT-BUNDLE-I §F — DO NOT REMOVE. Attention queue state. Must stay
+  // above the early-return guards per the Rules-of-Hooks note above.
+  const [attentionOrders, setAttentionOrders] = useState<AttentionReviewRow[]>([]);
+  const [attentionLoading, setAttentionLoading] = useState(false);
+  // HOTFIX-SILENT-CATCH-GUARD — DO NOT REMOVE. Error state so a failed
+  // attention fetch surfaces rather than masquerading as "count = 0".
+  const [attentionError, setAttentionError] = useState<string | null>(null);
 
   // PR-NEXT-7 (finding #9) — trust badge: how many online partners
   // would actually receive a push for a new order at this shop.
@@ -172,9 +189,9 @@ export default function ShopOwnerDashboardScreen() {
             // no-ops — the visual cues still fire.
             Haptics.notificationAsync(
               Haptics.NotificationFeedbackType.Success,
-            ).catch(() => {
-              /* haptics unavailable — visual alert still fires */
-            });
+              // silent-catch-audit:allow — haptics unavailable (web/sim) is
+              // not a failure; the visual alert still fires.
+            ).catch(() => {});
           }
           // Always advance the baseline to the current set so the
           // NEXT tick has the right reference point. On first tick
@@ -197,21 +214,73 @@ export default function ShopOwnerDashboardScreen() {
     return unsubscribe;
   }, [isShopOwner, shopId, retryNonce]);
 
+  // PR-NEXT-BUNDLE-I §F — DO NOT REMOVE. Fetch the shop's attention queue
+  // (flagged_low orders) on mount + retryNonce bump (pull-to-refresh).
+  useEffect(() => {
+    if (!isShopOwner || !shopId) return;
+    let cancelled = false;
+    setAttentionLoading(true);
+    orderService
+      .listShopAttentionReviews()
+      .then(rows => { if (!cancelled) { setAttentionOrders(rows); setAttentionError(null); } })
+      // HOTFIX-SILENT-CATCH-GUARD — DO NOT REMOVE. Report + surface.
+      .catch(e => {
+        if (cancelled) return;
+        Sentry.captureException(e, { tags: { area: 'ShopOwnerDashboard.listShopAttentionReviews' } });
+        setAttentionError(e?.message ?? 'Could not load reviews. Pull to refresh.');
+      })
+      .finally(() => { if (!cancelled) setAttentionLoading(false); });
+    return () => { cancelled = true; };
+  }, [isShopOwner, shopId, retryNonce]);
+
   const stats = useMemo(() => {
     let countToday = 0;
     let revenueToday = 0;
     let pendingCount = 0;
+    // PR-NEXT-BUNDLE-I §F — card-grid counts.
+    let preparingCount = 0;
+    let readyCount = 0;
+    let deliveredTodayCount = 0;
     for (const o of orders) {
       if (isToday(o.createdAt)) {
         countToday += 1;
         // Revenue counts only successfully-flowing orders. Cancelled
         // orders shouldn't inflate today's number.
         if (o.status !== 'cancelled') revenueToday += o.total;
+        if (o.status === 'delivered') deliveredTodayCount += 1;
       }
       if (o.status === 'pending') pendingCount += 1;
+      if (o.status === 'preparing') preparingCount += 1;
+      if (o.status === 'ready_for_pickup') readyCount += 1;
     }
-    return { countToday, revenueToday, pendingCount };
+    return {
+      countToday,
+      revenueToday,
+      pendingCount,
+      preparingCount,
+      readyCount,
+      deliveredTodayCount,
+    };
   }, [orders]);
+
+  // PR-NEXT-BUNDLE-I §F — DO NOT REMOVE. Card grid view model.
+  const dashboardCards = useMemo(
+    () =>
+      deriveShopDashboardCards({
+        pendingCount: stats.pendingCount,
+        preparingCount: stats.preparingCount,
+        readyCount: stats.readyCount,
+        deliveredTodayCount: stats.deliveredTodayCount,
+        attentionCount: attentionOrders.length,
+      }),
+    [
+      stats.pendingCount,
+      stats.preparingCount,
+      stats.readyCount,
+      stats.deliveredTodayCount,
+      attentionOrders.length,
+    ],
+  );
 
   const visibleOrders = useMemo(() => {
     if (showAll) return orders;
@@ -305,6 +374,63 @@ export default function ShopOwnerDashboardScreen() {
         }
         ListHeaderComponent={
           <View>
+            {/* PR-NEXT-BUNDLE-I §B+§F — card grid at top of dashboard. */}
+            <DashboardCardGrid
+              cards={dashboardCards}
+              onCardPress={(cardId) => {
+                // HOTFIX-RESPOND-OWNER-AND-CARD-NAV §G — DO NOT REMOVE.
+                // Attention card opens the dedicated AttentionQueueScreen.
+                // Other shop cards stay no-op for pilot.
+                if (cardId === 'attention') {
+                  nav.navigate('AttentionQueue', { role: 'shop' });
+                }
+              }}
+            />
+
+            {/* PR-NEXT-BUNDLE-I §F — Reviews & Ratings attention section. */}
+            {(attentionOrders.length > 0 || attentionLoading || attentionError) && (
+              <View style={styles.attentionSection}>
+                <Text style={styles.attentionTitle}>
+                  ⚠️ Reviews & Ratings
+                  {attentionOrders.length > 0 ? `  (${attentionOrders.length})` : ''}
+                </Text>
+                {attentionLoading && (
+                  <ActivityIndicator
+                    style={{ marginVertical: spacing.md }}
+                    color={colors.primary}
+                  />
+                )}
+                {!attentionLoading && attentionError && (
+                  <Text style={{ color: colors.danger, marginVertical: spacing.sm }}>
+                    {attentionError}
+                  </Text>
+                )}
+                {!attentionLoading &&
+                  attentionOrders.map(row => (
+                    <Pressable
+                      key={row.orderId}
+                      onPress={() =>
+                        nav.navigate('ShopOrderDetail', { orderId: row.orderId })
+                      }
+                      style={({ pressed }) => [
+                        styles.attentionRow,
+                        pressed && { opacity: 0.8 },
+                      ]}
+                    >
+                      <Text style={styles.attentionShop} numberOfLines={1}>
+                        {row.shopName ?? 'Order'}
+                      </Text>
+                      <Text style={styles.attentionMeta}>
+                        {row.shopRating != null
+                          ? `${row.shopRating}★ shop`
+                          : 'Low rating'}
+                        {row.shopComment ? ` — "${row.shopComment}"` : ''}
+                      </Text>
+                    </Pressable>
+                  ))}
+              </View>
+            )}
+
             <View style={styles.statsCard}>
               <Text style={styles.statsTitle}>Today</Text>
               <View style={styles.statsRow}>
@@ -529,6 +655,23 @@ function Stat({
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg },
   list: { padding: spacing.lg, paddingBottom: spacing.xxl },
+  attentionSection: { marginBottom: spacing.lg },
+  attentionTitle: {
+    ...typography.bodyBold,
+    marginTop: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  attentionRow: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  attentionShop: { ...typography.bodyBold },
+  attentionMeta: { ...typography.caption, color: colors.textSecondary, marginTop: 2 },
   statsCard: {
     backgroundColor: colors.primaryLight,
     borderRadius: radii.lg,

@@ -10,6 +10,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
+  Image,
   StyleSheet,
   Text,
   View,
@@ -20,6 +21,8 @@ import ScreenHeader from '../../components/common/ScreenHeader';
 import { colors, radii, spacing, typography } from '../../constants/theme';
 import { orderService } from '../../services/orderService';
 import type { RootStackParamList } from '../../navigation/AppNavigator';
+// PR-NEXT-BUNDLE-G §D — DO NOT REMOVE. Partner photo header.
+import { buildPartnerHeaderViewModel } from '../../utils/partnerHeaderViewModel';
 
 type Review = {
   ratingId: string;
@@ -97,6 +100,14 @@ export default function PartnerReviewsScreen() {
   const route = useRoute<RouteProp<RootStackParamList, 'PartnerReviews'>>();
   const { partnerUid, partnerName, mode } = route.params;
   const isAdmin = mode === 'admin';
+  const isOwn = mode === 'own';
+  const vm = buildPartnerHeaderViewModel({
+    name: partnerName,
+    photoUrl: null,
+    ratingAvg: null,
+    ratingCount: null,
+  });
+  const [photoLoadError, setPhotoLoadError] = useState(false);
 
   const [reviews, setReviews] = useState<Review[]>([]);
   const [loading, setLoading] = useState(true);
@@ -119,6 +130,7 @@ export default function PartnerReviewsScreen() {
           limit: 20,
           cursor: reset ? undefined : cursor,
           adminScope: isAdmin,
+          mode: isOwn ? 'own' : undefined,
         });
         const next = res.reviews as Review[];
         setReviews(prev => (reset ? next : [...prev, ...next]));
@@ -140,7 +152,7 @@ export default function PartnerReviewsScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [partnerUid]);
 
-  const title = partnerName ? `${partnerName} · Reviews` : 'Partner Reviews';
+  const title = isOwn ? 'Your reviews' : (partnerName ? `${partnerName} · Reviews` : 'Partner Reviews');
 
   if (loading) {
     return (
@@ -163,6 +175,25 @@ export default function PartnerReviewsScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <ScreenHeader title={title} onBack={() => nav.goBack()} />
+      {/* PR-NEXT-BUNDLE-G §D — partner identity header (40×40 avatar + name) */}
+      {!isOwn && (
+        <View style={styles.partnerHeader}>
+          {vm.avatar.kind === 'photo' && !photoLoadError ? (
+            <Image
+              source={{ uri: vm.avatar.uri }}
+              style={styles.partnerAvatar}
+              onError={() => setPhotoLoadError(true)}
+            />
+          ) : (
+            <View style={[styles.partnerAvatar, styles.partnerAvatarInitials]}>
+              <Text style={styles.partnerAvatarText}>
+                {vm.avatar.kind === 'initials' ? vm.avatar.text : '?'}
+              </Text>
+            </View>
+          )}
+          <Text style={styles.partnerName}>{vm.displayName}</Text>
+        </View>
+      )}
       <FlatList
         data={reviews}
         keyExtractor={item => item.ratingId}
@@ -236,4 +267,22 @@ const styles = StyleSheet.create({
     marginBottom: 2,
   },
   responseText: { ...typography.body, color: colors.textPrimary },
+  partnerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    backgroundColor: colors.surface,
+    gap: spacing.sm,
+  },
+  partnerAvatar: { width: 40, height: 40, borderRadius: 20 },
+  partnerAvatarInitials: {
+    backgroundColor: colors.primaryLight,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  partnerAvatarText: { ...typography.caption, color: colors.primaryDark, fontWeight: '700' },
+  partnerName: { ...typography.bodyBold, color: colors.textPrimary, flex: 1 },
 });

@@ -1,5 +1,5 @@
-import { useFocusEffect } from '@react-navigation/native';
-import React, { useCallback, useState } from 'react';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
     Alert,
     Image,
@@ -31,9 +31,6 @@ const VEHICLES: Array<{ value: VehicleType; emoji: string; label: string }> = [
   { value: 'car', emoji: '🚗', label: 'Car' },
 ];
 
-// PR-NEXT-BUNDLE-D §B — default bucket mirrors the onboarding photo
-// flow (BecomeDeliveryPartnerScreen). Kept in sync deliberately.
-const STORAGE_BUCKET = 'grocery-mvp-dev.appspot.com';
 
 /**
  * PR-NEXT-BUNDLE-D §B — delivery partner self-service profile.
@@ -46,6 +43,9 @@ export default function DeliveryProfileScreen() {
   // Rule 2 — all hooks above any conditional return.
   const phoneNumber = useAuthStore(s => s.phoneNumber);
   const isDelivery = useAuthStore(s => s.isDelivery);
+  // PR-NEXT-BUNDLE-G §B — DO NOT REMOVE. uid for own-reviews navigation.
+  const ownUid = useAuthStore(s => s.uid);
+  const nav = useNavigation<any>();
 
   const [loading, setLoading] = useState(true);
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
@@ -59,6 +59,11 @@ export default function DeliveryProfileScreen() {
   const [serverPhoto, setServerPhoto] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [photoUploading, setPhotoUploading] = useState(false);
+  // PR-NEXT-BUNDLE-G §A — DO NOT REMOVE. Separate counter for deliveries completed.
+  const [deliveriesCompleted, setDeliveriesCompleted] = useState<number | null>(null);
+  // HOTFIX-PROFILE-PHOTO — DO NOT REMOVE. onError fallback flag; reset
+  // when photoUrl changes so a fresh upload re-attempts the photo render.
+  const [photoLoadError, setPhotoLoadError] = useState(false);
 
   const hydrate = useCallback((s: Awaited<ReturnType<typeof orderService.getMyDeliverySettings>>) => {
     const name = s.displayName ?? s.name ?? '';
@@ -72,7 +77,13 @@ export default function DeliveryProfileScreen() {
     setServerPhoto(photo);
     setRatingAvg(typeof s.deliveryRatingAvg === 'number' ? s.deliveryRatingAvg : null);
     setRatingCount(typeof s.deliveryRatingCount === 'number' ? s.deliveryRatingCount : null);
+    setDeliveriesCompleted(typeof s.deliveriesCompleted === 'number' ? s.deliveriesCompleted : null);
   }, []);
+
+  // HOTFIX-PROFILE-PHOTO — reset error flag whenever a new URL arrives.
+  useEffect(() => {
+    setPhotoLoadError(false);
+  }, [photoUrl]);
 
   useFocusEffect(
     useCallback(() => {
@@ -108,18 +119,24 @@ export default function DeliveryProfileScreen() {
     }
     setPhotoUploading(true);
     try {
-      const { uploadUrl, storagePath } =
+      const { uploadUrl, downloadUrl, downloadToken } =
         await orderService.getPartnerPhotoUploadUrl('image/jpeg');
       const response = await fetch(picked.uri);
       const blob = await response.blob();
       await fetch(uploadUrl, {
         method: 'PUT',
-        headers: { 'Content-Type': 'image/jpeg' },
+        headers: {
+          'Content-Type': 'image/jpeg',
+          // HOTFIX-PROFILE-PHOTO-4 — DO NOT REMOVE. Must match the value
+          // the server baked into the signed URL's extension headers, or
+          // GCS rejects the PUT signature. Also writes the object
+          // metadata that makes the download-token URL resolve.
+          'x-goog-meta-firebasestoragedownloadtokens': downloadToken,
+        },
         body: blob,
       });
-      const downloadUrl = `https://storage.googleapis.com/${STORAGE_BUCKET}/${encodeURIComponent(
-        storagePath,
-      )}`;
+      // HOTFIX-PROFILE-PHOTO-4 — use the server-returned Firebase Storage
+      // REST URL (respects Storage Rules) instead of the GCS-direct URL.
       setPhotoUrl(downloadUrl);
     } catch (e: any) {
       Alert.alert('Upload failed', e?.message || 'Please try again.');
@@ -187,28 +204,61 @@ export default function DeliveryProfileScreen() {
           <Pressable
             onPress={handleChangePhoto}
             disabled={photoUploading}
-            style={styles.avatarWrap}
+            style={({ pressed }) => [
+              styles.avatarPressable,
+              pressed && { opacity: 0.7 },
+            ]}
             accessibilityRole="button"
             accessibilityLabel="Change profile photo"
+            hitSlop={8}
           >
-            {avatar.kind === 'photo' ? (
-              <Image source={{ uri: avatar.uri }} style={styles.avatarImg} />
-            ) : (
-              <View style={[styles.avatarImg, styles.avatarInitials]}>
-                <Text style={styles.avatarInitialsText}>{avatar.text}</Text>
-              </View>
-            )}
-          </Pressable>
-          <Text style={styles.tapToChange}>
-            {photoUploading ? 'Uploading…' : 'Tap to change'}
-          </Text>
-          {(ratingCount ?? 0) > 0 && ratingAvg != null ? (
-            <Text style={styles.ratingLine}>
-              ⭐ {ratingAvg.toFixed(1)} · {ratingCount} deliveries
+            <View style={styles.avatarWrap}>
+              {avatar.kind === 'photo' && !photoLoadError ? (
+                <Image
+                  source={{ uri: avatar.uri }}
+                  style={styles.avatarImg}
+                  onError={() => setPhotoLoadError(true)}
+                />
+              ) : (
+                <View style={[styles.avatarImg, styles.avatarInitials]}>
+                  <Text style={styles.avatarInitialsText}>
+                    {avatar.kind === 'initials'
+                      ? avatar.text
+                      : formatPartnerAvatar(displayName, null).kind === 'initials'
+                        ? (formatPartnerAvatar(displayName, null) as any).text
+                        : '?'}
+                  </Text>
+                </View>
+              )}
+            </View>
+            <Text style={styles.tapToChange}>
+              {photoUploading ? 'Uploading…' : 'Tap to change'}
             </Text>
+          </Pressable>
+          {(ratingCount ?? 0) > 0 && ratingAvg != null ? (
+            <Pressable
+              onPress={() =>
+                nav.navigate('PartnerReviews', {
+                  partnerUid: ownUid,
+                  partnerName: displayName,
+                  mode: 'own',
+                })
+              }
+              accessibilityRole="button"
+              accessibilityLabel="See your reviews"
+            >
+              <Text style={styles.ratingLine}>
+                ⭐ {ratingAvg.toFixed(1)} · {ratingCount} {ratingCount === 1 ? 'rating' : 'ratings'} ›
+              </Text>
+            </Pressable>
           ) : (
             <Text style={styles.ratingLineMuted}>New partner</Text>
           )}
+          {(deliveriesCompleted ?? 0) > 0 ? (
+            <Text style={styles.deliveriesLine}>
+              {deliveriesCompleted} {deliveriesCompleted === 1 ? 'delivery' : 'deliveries'} completed
+            </Text>
+          ) : null}
         </View>
 
         <View style={styles.divider} />
@@ -265,6 +315,7 @@ const styles = StyleSheet.create({
   muted: { ...typography.body, color: colors.textSecondary },
   body: { padding: spacing.lg, paddingBottom: spacing.xxl },
   avatarBlock: { alignItems: 'center', marginBottom: spacing.lg },
+  avatarPressable: { alignItems: 'center' },
   avatarWrap: { borderRadius: radii.pill },
   avatarImg: { width: 96, height: 96, borderRadius: 48 },
   avatarInitials: {
@@ -274,8 +325,9 @@ const styles = StyleSheet.create({
   },
   avatarInitialsText: { ...typography.h1, color: colors.primaryDark },
   tapToChange: { ...typography.caption, color: colors.primary, marginTop: spacing.sm },
-  ratingLine: { ...typography.bodyBold, marginTop: spacing.xs },
+  ratingLine: { ...typography.bodyBold, marginTop: spacing.xs, color: colors.primary },
   ratingLineMuted: { ...typography.caption, color: colors.textSecondary, marginTop: spacing.xs },
+  deliveriesLine: { ...typography.caption, color: colors.textSecondary, marginTop: 2 },
   divider: { height: 1, backgroundColor: colors.border, marginVertical: spacing.md },
   fieldLabel: {
     ...typography.caption,

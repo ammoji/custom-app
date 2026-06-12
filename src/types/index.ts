@@ -201,6 +201,8 @@ export type UserInfo = {
   // partner doesn't surface a misleading "0★" badge.
   deliveryRatingAvg?: number;
   deliveryRatingCount?: number;
+  // PR-NEXT-BUNDLE-G §D — partner profile photo URL for admin display.
+  profilePhotoUrl?: string | null;
   // PR-NEXT-REVIEW-SYSTEM §A — published delivery partner review cache.
   publicReviewCount?: number;
   publicReviewLatest?: Array<{
@@ -691,6 +693,17 @@ export type Order = {
   responseText?: string | null;
   responseBy?: 'shop' | 'partner' | null;
   responseAt?: number | null;
+  // PR-NEXT-BUNDLE-J §L — DO NOT REMOVE. Per-dimension correction state +
+  // response. The legacy fields above are the worst-of / last-responder
+  // pointers kept for un-migrated readers; these are the per-side truth so
+  // the shop never sees the partner's response (and vice-versa) and one
+  // side resolving never closes the other (Sudhir 2026-06-10).
+  shopCorrectionState?: 'flagged_low' | 'responded' | 'amended' | 'published' | 'n_a' | null;
+  deliveryCorrectionState?: 'flagged_low' | 'responded' | 'amended' | 'published' | 'n_a' | null;
+  shopResponseText?: string | null;
+  partnerResponseText?: string | null;
+  shopRespondedAt?: number | null;
+  partnerRespondedAt?: number | null;
   amendedStars?: { shopStars?: number; deliveryStars?: number } | null;
   amendedAt?: number | null;
   publishedAt?: number | null;

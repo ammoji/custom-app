@@ -2,6 +2,7 @@ import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
     Alert,
+    Image,
     Keyboard,
     KeyboardAvoidingView,
     Modal,
@@ -24,6 +25,8 @@ import { orderService } from '../../services/orderService';
 import { useAuthStore } from '../../store/useAuthStore';
 import type { Shop, UserInfo } from '../../types';
 import { formatOrderTime } from '../../utils/format';
+// PR-NEXT-BUNDLE-G §D — DO NOT REMOVE. Partner photo in admin delivery section.
+import { formatPartnerAvatar } from '../../utils/formatPartnerAvatar';
 
 type ConfirmKind = 'shopOwner' | 'delivery' | 'suspendShop';
 
@@ -202,6 +205,24 @@ export default function UserDetailScreen() {
               Rating count in parens gives admin context for the
               average (4.7★ from 2 ratings is much less reliable
               than 4.7★ from 200). */}
+          {user.isDelivery && (() => {
+            const av = formatPartnerAvatar(null, user.profilePhotoUrl ?? null);
+            return (
+              <View style={styles.partnerPhotoRow}>
+                {av.kind === 'photo' ? (
+                  <Image
+                    // R9: truthy guard — av.uri is non-empty when kind==='photo'
+                    source={{ uri: av.uri }}
+                    style={styles.partnerPhotoThumb}
+                  />
+                ) : (
+                  <View style={[styles.partnerPhotoThumb, styles.partnerPhotoInitials]}>
+                    <Text style={styles.partnerPhotoInitialsText}>{av.text}</Text>
+                  </View>
+                )}
+              </View>
+            );
+          })()}
           {user.isDelivery &&
             typeof user.deliveryRatingCount === 'number' &&
             user.deliveryRatingCount > 0 && (
@@ -502,5 +523,25 @@ const styles = StyleSheet.create({
     textAlignVertical: 'top',
     ...typography.body,
     color: colors.textPrimary,
+  },
+  partnerPhotoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  partnerPhotoThumb: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+  },
+  partnerPhotoInitials: {
+    backgroundColor: colors.primaryLight,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  partnerPhotoInitialsText: {
+    ...typography.bodyBold,
+    color: colors.primaryDark,
   },
 });

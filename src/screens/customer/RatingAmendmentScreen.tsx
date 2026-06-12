@@ -11,12 +11,15 @@ import React, { useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Image,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+// PR-NEXT-BUNDLE-G §D — DO NOT REMOVE.
+import { buildPartnerHeaderViewModel } from '../../utils/partnerHeaderViewModel';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Button from '../../components/common/Button';
 import ScreenHeader from '../../components/common/ScreenHeader';
@@ -29,16 +32,37 @@ export default function RatingAmendmentScreen() {
   const route = useRoute<RouteProp<RootStackParamList, 'RatingAmendment'>>();
   const {
     ratingId,
+    orderId,
     shopName: shopNameParam,
     originalShopStars: originalShopStarsParam,
+    originalDeliveryStars: originalDeliveryStarsParam,
     responseText: responseTextParam,
     responseBy: responseByParam,
+    deliveryPersonName,
+    deliveryPersonPhotoUrl,
+    dimension: dimensionParam,
   } = route.params;
+  // PR-NEXT-BUNDLE-J §L — DO NOT REMOVE. Which side is being corrected.
+  // Amend/ack target ONLY this dimension so resolving one side never closes
+  // the other (Sudhir 2026-06-10). Absent ⇒ 'shop' (legacy deep-links).
+  const dimension: 'shop' | 'delivery' = dimensionParam === 'delivery' ? 'delivery' : 'shop';
+  const isDelivery = dimension === 'delivery';
+  const partnerVm = buildPartnerHeaderViewModel({
+    name: deliveryPersonName ?? null,
+    photoUrl: deliveryPersonPhotoUrl ?? null,
+    ratingAvg: null,
+    ratingCount: null,
+  });
+  const [partnerPhotoError, setPartnerPhotoError] = useState(false);
 
   const [responseText] = useState<string | null>(responseTextParam ?? null);
   const [responseBy] = useState<string | null>(responseByParam ?? null);
   const [originalShopStars] = useState<number>(originalShopStarsParam ?? 1);
+  const [originalDeliveryStars] = useState<number>(originalDeliveryStarsParam ?? 1);
   const [shopName] = useState<string>(shopNameParam ?? 'the shop');
+  // PR-NEXT-BUNDLE-J §L — the stars + party for THIS dimension.
+  const originalStars = isDelivery ? originalDeliveryStars : originalShopStars;
+  const partyLabel = isDelivery ? 'your delivery partner' : shopName;
   const [newStars, setNewStars] = useState<number | null>(null);
   const [loading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -46,7 +70,15 @@ export default function RatingAmendmentScreen() {
   const handleKeepOriginal = async () => {
     setSaving(true);
     try {
-      await orderService.acknowledgeReview({ ratingId });
+      await orderService.acknowledgeReview({ ratingId, dimension });
+      // HOTFIX-AMEND-RECOMPUTE — DO NOT REMOVE. Prime the order cache so
+      // the underlying OrderDetailScreen renders fresh data on return
+      // instead of waiting out the native watcher's poll interval.
+      try {
+        await orderService.getOrder(orderId);
+      } catch {
+        // Best-effort — watcher will eventually catch up.
+      }
       Alert.alert(
         'Review published',
         'Your original rating and the response are now public.',
@@ -66,7 +98,20 @@ export default function RatingAmendmentScreen() {
     }
     setSaving(true);
     try {
-      await orderService.amendRating({ ratingId, newShopStars: newStars });
+      await orderService.amendRating({
+        ratingId,
+        ...(isDelivery ? { newDeliveryStars: newStars } : { newShopStars: newStars }),
+      });
+      // HOTFIX-AMEND-RECOMPUTE — DO NOT REMOVE. Force an explicit re-fetch
+      // of the order so the underlying OrderDetailScreen doesn't show
+      // stale stars during the native watcher's poll interval. The order
+      // doc has order.shopRating denormalized; refetching primes the
+      // cache so the watcher's first callback on return delivers fresh data.
+      try {
+        await orderService.getOrder(orderId);
+      } catch {
+        // Best-effort — watcher will eventually catch up.
+      }
       Alert.alert(
         'Rating updated',
         `Your rating has been updated to ${newStars}★ and is now public.`,
@@ -90,11 +135,29 @@ export default function RatingAmendmentScreen() {
       ) : (
         <ScrollView contentContainerStyle={styles.content}>
           <Text style={styles.intro}>
-            You rated {shopName}{' '}
-            <Text style={styles.bold}>{originalShopStars}★</Text> on a recent
+            You rated {partyLabel}{' '}
+            <Text style={styles.bold}>{originalStars}★</Text> on a recent
             order.
           </Text>
 
+          {responseBy === 'partner' && (
+            <View style={styles.partnerRow}>
+              {partnerVm.avatar.kind === 'photo' && !partnerPhotoError ? (
+                <Image
+                  source={{ uri: partnerVm.avatar.uri }}
+                  style={styles.partnerAvatar}
+                  onError={() => setPartnerPhotoError(true)}
+                />
+              ) : (
+                <View style={[styles.partnerAvatar, styles.partnerAvatarInitials]}>
+                  <Text style={styles.partnerAvatarText}>
+                    {partnerVm.avatar.kind === 'initials' ? partnerVm.avatar.text : '?'}
+                  </Text>
+                </View>
+              )}
+              <Text style={styles.partnerName}>{partnerVm.displayName}</Text>
+            </View>
+          )}
           {responseText ? (
             <View style={styles.responseBox}>
               <Text style={styles.responseLabel}>
@@ -140,13 +203,14 @@ export default function RatingAmendmentScreen() {
 
           <Text style={styles.disclaimer}>
             Either way, your review will go public after this. You can keep
-            your original {originalShopStars}★ or update to a new rating —
-            the shop's response will be visible alongside it.
+            your original {originalStars}★ or update to a new rating —
+            the {isDelivery ? "partner's" : "shop's"} response will be visible
+            alongside it.
           </Text>
 
           <View style={styles.ctaRow}>
             <Button
-              title={`Keep my original ${originalShopStars}★`}
+              title={`Keep my original ${originalStars}★`}
               variant="secondary"
               onPress={handleKeepOriginal}
               loading={saving}
@@ -251,4 +315,18 @@ const styles = StyleSheet.create({
   ctaRow: {
     marginBottom: spacing.md,
   },
+  partnerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: spacing.sm,
+    gap: spacing.sm,
+  },
+  partnerAvatar: { width: 40, height: 40, borderRadius: 20 },
+  partnerAvatarInitials: {
+    backgroundColor: colors.primaryLight,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  partnerAvatarText: { ...typography.caption, color: colors.primaryDark, fontWeight: '700' },
+  partnerName: { ...typography.bodyBold, color: colors.textPrimary },
 });

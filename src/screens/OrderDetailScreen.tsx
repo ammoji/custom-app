@@ -20,6 +20,15 @@ import PartnerIdentityCard from '../components/order/PartnerIdentityCard';
 // modal triggered by the now-tappable PartnerIdentityCard.
 import PartnerDetailsSheet from '../components/order/PartnerDetailsSheet';
 import RateOrderCard from '../components/order/RateOrderCard';
+// PR-NEXT-BUNDLE-H §A — DO NOT REMOVE. Customer-side review correction
+// panel. Closes the loop where the customer had no in-app surface for
+// the shop/partner response — previously only reachable via push deep-link.
+import CustomerReviewResponsePanel from '../components/order/CustomerReviewResponsePanel';
+// PR-NEXT-BUNDLE-H §A — DO NOT REMOVE. Pure view-model derivation for
+// CustomerReviewResponsePanel. Keeps the screen logic testable.
+// PR-NEXT-BUNDLE-J §H — DO NOT REMOVE. deriveCustomerReviewPanels splits the
+// single panel into independent shop + delivery panels.
+import { deriveCustomerReviewPanels } from '../utils/deriveCustomerReviewResponseView';
 import { colors, radii, spacing, typography } from '../constants/theme';
 import { Analytics } from '../services/analytics';
 import { orderService } from '../services/orderService';
@@ -248,8 +257,11 @@ export default function OrderDetailScreen() {
       .then(s => {
         if (!cancelled) setShop(s);
       })
-      .catch(() => {
+      // HOTFIX-SILENT-CATCH-GUARD — DO NOT REMOVE. Report the fetch
+      // failure; the screen still degrades gracefully to no-shop.
+      .catch(e => {
         if (!cancelled) setShop(null);
+        Sentry.captureException(e, { tags: { area: 'OrderDetail.getShop' } });
       });
     return () => {
       cancelled = true;
@@ -288,6 +300,8 @@ export default function OrderDetailScreen() {
   const onCallPartner = useCallback(async () => {
     if (!order) return;
     if (partnerPhone) {
+      // silent-catch-audit:allow — tel: deep-link; OS handles the no-op
+      // when no dialer exists. Nothing actionable to log or surface.
       Linking.openURL(`tel:${partnerPhone}`).catch(() => {});
       return;
     }
@@ -295,6 +309,7 @@ export default function OrderDetailScreen() {
     try {
       const { phone } = await orderService.getDeliveryPartnerContact(order.id);
       setPartnerPhone(phone);
+      // silent-catch-audit:allow — tel: deep-link best-effort, see above.
       Linking.openURL(`tel:${phone}`).catch(() => {});
     } catch (e: any) {
       showAlert(
@@ -505,9 +520,11 @@ export default function OrderDetailScreen() {
           order.status !== 'cancelled' && (
             <PartnerIdentityCard
               name={order.deliveryPersonName}
+              photoUrl={order.deliveryPersonPhotoUrl ?? null}
               pickedUpAt={
                 typeof order.pickedUpAt === 'number' ? order.pickedUpAt : null
               }
+              orderStatus={order.status ?? null}
               onPress={() => setPartnerSheetOpen(true)}
             />
           )}
@@ -949,6 +966,63 @@ export default function OrderDetailScreen() {
                   </View>
                 ) : null}
               </View>
+            );
+          })()}
+
+        {/* PR-NEXT-BUNDLE-H §A — customer-side review correction loop.
+            Mirror of the shop / delivery response sections; closes the
+            UX gap where the customer had no in-app surface for the
+            response. Gated on delivered + ratingId + correctionState so
+            unrated orders and legacy orders without the denorm fields
+            render nothing (safe no-op). */}
+        {order.status === 'delivered' &&
+          order.ratingId &&
+          (order.correctionState ||
+            order.shopCorrectionState ||
+            order.deliveryCorrectionState) &&
+          (() => {
+            // PR-NEXT-BUNDLE-J §H/§L — render the shop + delivery panels
+            // independently. Each carries its own dimension so amend/ack hit
+            // the correct side (Sudhir 2026-06-10: one side resolving must not
+            // close the other). Falls back to a single shop panel for legacy
+            // orders without per-dimension fields.
+            const panels = deriveCustomerReviewPanels(order);
+            const baseParams = {
+              ratingId: order.ratingId!,
+              orderId: order.id,
+              shopName: order.shopName,
+              originalShopStars: order.shopRating ?? 0,
+              originalDeliveryStars: order.deliveryRating ?? 0,
+              deliveryPersonName: order.deliveryPersonName ?? null,
+              deliveryPersonPhotoUrl: order.deliveryPersonPhotoUrl ?? null,
+            };
+            const shopParams = {
+              ...baseParams,
+              dimension: 'shop' as const,
+              responseText: order.shopResponseText ?? order.responseText ?? null,
+              responseBy: 'shop' as const,
+            };
+            const deliveryParams = {
+              ...baseParams,
+              dimension: 'delivery' as const,
+              responseText: order.partnerResponseText ?? order.responseText ?? null,
+              responseBy: 'partner' as const,
+            };
+            return (
+              <>
+                <CustomerReviewResponsePanel
+                  view={panels.shop}
+                  dimensionLabel="shop"
+                  onAmendPress={() => nav.navigate('RatingAmendment', shopParams)}
+                  onAcknowledgePress={() => nav.navigate('RatingAmendment', shopParams)}
+                />
+                <CustomerReviewResponsePanel
+                  view={panels.delivery}
+                  dimensionLabel="delivery"
+                  onAmendPress={() => nav.navigate('RatingAmendment', deliveryParams)}
+                  onAcknowledgePress={() => nav.navigate('RatingAmendment', deliveryParams)}
+                />
+              </>
             );
           })()}
       </ScrollView>

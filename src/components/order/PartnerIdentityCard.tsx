@@ -2,20 +2,26 @@
  * PR-NEXT-13a — partner identity card on customer's `OrderDetailScreen`.
  *
  * Renders the assigned delivery partner's display name + a circular
- * initials avatar (NOT a real photo — partner profile photo flow
- * doesn't exist yet; deferred to a future PR). Falls back to "Your
- * delivery partner" when name is absent (legacy orders pre-PR-NEXT-13a
- * or partners whose user doc has no `displayName`).
+ * avatar. Photo support added in PR-NEXT-BUNDLE-H §B — shows the
+ * partner's profile photo when available; falls back to initials on
+ * broken URL, missing photo, or load failure.
  *
  * Phone number is intentionally NOT rendered here. The customer's
  * partner-phone access stays gated to post-pickup as it was pre-PR.
  *
- * Subtitle distinguishes "heading to the shop" (partner has claimed,
- * not yet picked up) from "on the way to you" (picked up, in
- * transit). Both states are derived from the order's `pickedUpAt`.
+ * Subtitle is three-state via derivePartnerCardSubtitle (§C):
+ *   heading to shop → picked up (on the way) → delivered / cancelled.
+ * Previously two-state and stayed "On the way" even after delivery.
  */
-import React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+// PR-NEXT-BUNDLE-H §B — DO NOT REMOVE. Image for partner photo avatar.
+import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
+// PR-NEXT-BUNDLE-H §B — DO NOT REMOVE. formatPartnerAvatar for
+// photo-or-initials logic; matches the pattern used in ShopOrderDetailScreen,
+// DeliveryProfileScreen, UserDetailScreen, and PartnerReviewsScreen.
+import { formatPartnerAvatar } from '../../utils/formatPartnerAvatar';
+// PR-NEXT-BUNDLE-H §C — DO NOT REMOVE. Three-state subtitle.
+import { derivePartnerCardSubtitle } from '../../utils/derivePartnerCardSubtitle';
 import { colors, radii, spacing, typography } from '../../constants/theme';
 // PR-NEXT-13a — DO NOT REMOVE. `initialsFor` lives in its own pure
 // file so `tests/components/partnerIdentityCard.initials.test.ts`
@@ -27,26 +33,35 @@ export { initialsFor };
 
 export default function PartnerIdentityCard({
   name,
+  photoUrl,
   pickedUpAt,
+  orderStatus,
   onPress,
 }: {
   name?: string | null;
+  // PR-NEXT-BUNDLE-H §B — partner profile photo. Null/undefined falls
+  // back to the initials avatar (same onError pattern as DeliveryProfileScreen).
+  photoUrl?: string | null;
   pickedUpAt: number | null;
+  // PR-NEXT-BUNDLE-H §C — order status drives the third subtitle state.
+  orderStatus?: string | null;
   // PR-NEXT-PARTNER-CARD (Case 6) — optional tap handler. When
   // omitted the card renders as a static read-only treatment with
   // no chevron and no press affordance, preserving back-compat for
   // any future caller that wants the static behavior.
   onPress?: () => void;
 }) {
+  // PR-NEXT-BUNDLE-H §B — DO NOT REMOVE. photoLoadError must be declared
+  // before any conditional returns (Rule 2 — hooks above early returns).
+  const [photoLoadError, setPhotoLoadError] = useState(false);
+  useEffect(() => { setPhotoLoadError(false); }, [photoUrl]);
+
   const displayName =
     typeof name === 'string' && name.trim().length > 0
       ? name.trim()
       : 'Your delivery partner';
-  const initials = initialsFor(name);
-  const subtitle =
-    pickedUpAt != null
-      ? '🛵 On the way to you'
-      : '📦 Heading to the shop';
+  const avatar = formatPartnerAvatar(name, photoUrl ?? null);
+  const subtitle = derivePartnerCardSubtitle({ orderStatus, pickedUpAt });
 
   return (
     <Pressable
@@ -62,7 +77,17 @@ export default function PartnerIdentityCard({
       ]}
     >
       <View style={styles.avatar}>
-        <Text style={styles.avatarText}>{initials}</Text>
+        {avatar.kind === 'photo' && !photoLoadError ? (
+          <Image
+            source={{ uri: avatar.uri }}
+            style={styles.avatarImg}
+            onError={() => setPhotoLoadError(true)}
+          />
+        ) : (
+          <Text style={styles.avatarText}>
+            {avatar.kind === 'initials' ? avatar.text : initialsFor(name)}
+          </Text>
+        )}
       </View>
       <View style={styles.body}>
         <Text style={styles.name} numberOfLines={1}>
@@ -99,6 +124,12 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primaryLight,
     alignItems: 'center',
     justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  avatarImg: {
+    width: AVATAR_SIZE,
+    height: AVATAR_SIZE,
+    borderRadius: AVATAR_SIZE / 2,
   },
   avatarText: {
     ...typography.bodyBold,
