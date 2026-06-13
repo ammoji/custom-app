@@ -600,6 +600,18 @@ export default function HomeScreen() {
                 <Text style={styles.adminChevron}>›</Text>
               </Pressable>
             )}
+            {/* PR-NEXT-BUNDLE-K §G — pending catalog item review queue. */}
+            {isAdmin && (
+              <Pressable
+                style={styles.adminRow}
+                onPress={() => nav.navigate('PendingCatalogQueue')}
+                accessibilityRole="button"
+                accessibilityLabel="Pending catalog items"
+              >
+                <Text style={styles.adminText}>🗂️  Pending catalog items</Text>
+                <Text style={styles.adminChevron}>›</Text>
+              </Pressable>
+            )}
             {/* PR 8 Part A — admin audit log tile. */}
             {isAdmin && (
               <Pressable

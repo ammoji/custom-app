@@ -266,6 +266,99 @@ is missing / null / nonconforming.
   type but no call site read it; SHOP-LOCATION-REQUIRED's
   validator silently accepted the degraded fallback value)
 
+**Worked examples accumulated (2026-06-10 → 2026-06-12 pilot-prep wave):**
+
+- **#10 Auth direction bugs (HOTFIX-OWNER-CARD-AMEND).** Auth
+  pattern bugs come in TWO classes: shape bugs (wrong field name —
+  caught by `authClaimNamesAudit`) AND direction bugs (asking
+  "does user own SOME matching shop?" instead of "does THIS shop
+  have user as owner?"). The direction bug requires its own audit
+  pattern — `shopOwnerCheckAudit` bans `where(ownerUid).limit(1)`.
+- **#11 Denormalization recompute in the same transaction
+  (HOTFIX-OWNER-CARD-AMEND §H).** When state transitions cascade
+  to N denormalized fields, all updates belong inside ONE
+  transaction. `amendRating`'s outside-tx ratingAvg recompute
+  raced `_publishReview`'s in-tx writes; consolidated by moving
+  the recompute INSIDE `_publishReview`. Same lesson as
+  HOTFIX-REVIEW-DENORM at a deeper level — not just "cascade the
+  field" but "cascade the recompute too."
+- **#12 Audit-grep enumeration for missing-feature-across-surfaces
+  (HOTFIX-PARTNER-STATUS-DISPLAY).** Bundle H §C added a
+  three-state subtitle to PartnerIdentityCard; the audit-grep
+  targeted `formatPartnerAvatar` consumers but missed two more
+  surfaces (ShopOrderDetailScreen + PartnerDetailsSheet header)
+  that hit the literal string "On the way" via different code
+  paths. Static guard `partnerStatusAudit` enumerates every literal
+  usage, not just helper consumers.
+- **#13 Per-party state machine split (Bundle J).** When a single
+  field models a state machine for N independently-actionable
+  parties (shop + delivery), split into N per-party fields. Keep
+  the legacy field as computed worst-of for back-compat until
+  consumers migrate. Same pattern applies to any future
+  same-entity multi-party state — escalation responses, multi-
+  approver workflows, etc.
+- **#14 PR completion verification (HOTFIX-ATTENTION-CALLABLES-
+  MISSING).** `tsc --noEmit clean` does NOT verify implementation
+  existence when the type is declared separately. Bundle I §D/§E
+  callables were reported shipped THREE TIMES (Bundle I report,
+  Bundle J §G report, cross-check report with confabulated
+  specific line numbers like `index.ts:10921` that exceeded the
+  file's actual 10494 lines). PR completion verification must
+  include `grep "export const <name>"` output in the completion
+  report, NOT just a typecheck-pass claim. **Required completion-
+  report verification block is now standard at the top of every
+  prompt** (see "Required completion-report verification block"
+  section below).
+- **#15 Silent catch antipattern (HOTFIX-SILENT-CATCH-GUARD).**
+  `.catch(() => {})` is indistinguishable from success-with-empty-
+  data. Every screen / service data-fetch catch must EITHER
+  `Sentry.captureException(e)` OR rethrow OR set an error state
+  that surfaces to UI. Static guard `noSilentCatchAudit` enforces
+  with `// silent-catch-audit:allow` inline-comment allowlist for
+  legitimate fire-and-forgets.
+- **#16 Deploy state ≠ code state (HOTFIX-POST-DEPLOY-SMOKE-
+  SCRIPT).** Three structurally-different post-deploy failures
+  share the same symptom (empty result): callable not deployed,
+  composite index still Building, IAM allUsers stripped (ACAB).
+  None visible in deploy-command exit codes. `npm run smoke`
+  catches all three in seconds via `gcloud functions describe` +
+  `firebase firestore:indexes` + `gcloud run services get-iam-
+  policy`. Run after every server deploy.
+
+---
+
+### Required completion-report verification block (added 2026-06-12)
+
+Every prompt that creates new files / exports / callables MUST
+include a block near the top demanding raw command-output evidence
+in Devin's completion report. Sample:
+
+> **Required completion-report verification block.** In your final
+> report, paste the literal output of:
+> ```
+> wc -l <expected-new-file>
+> grep -n "export const <expected-symbol>" <expected-file>
+> grep -n "<expected-helper>" <expected-consumer-file>
+> npx jest <expected-test-file> 2>&1 | tail -10
+> ```
+> Numeric line numbers must be within file bounds (verify with
+> `wc -l <file>`). If a line number you cite exceeds the file
+> length, the export does not exist.
+
+Adapt the exact commands per prompt's scope. The point is raw CLI
+output — not "tsc clean," not "tests pass," not a summary claim.
+Line counts + grep hits are the verification primitive Devin can't
+hallucinate around without their own report contradicting them.
+
+This rule emerged from three sequential confabulated reports on
+the Bundle I §D/§E attention-queue callables across Bundle I →
+Bundle J §G → cross-check. Each report added more confidence
+(specific line numbers, specific function names) without any
+actual code existing in the file. The verification block makes
+the hallucination structurally impossible — Devin's own `wc -l`
+output in their report contradicts an out-of-bounds line number
+before Sudhir or Claude sees the report.
+
 ### Rule 6 — ASCII mockup + design lens for new UX surfaces
 
 Before drafting a prompt for any new/redesigned UX surface:

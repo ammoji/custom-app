@@ -115,7 +115,21 @@ service cloud.firestore {
     }
 
     match /products/{productId} {
-      allow read: if true;
+      // PR-NEXT-BUNDLE-K §A — only 'approved' products are public.
+      // Pending and rejected items are admin-only reads (admin console
+      // + admin callable `listPendingCatalogItems`). Server callables
+      // that query pending items use the Admin SDK (bypasses rules).
+      allow read: if resource.data.status == 'approved' || isAdmin();
+      allow write: if false;
+    }
+
+    // PR-NEXT-BUNDLE-K §F — per-shop onboarding progress.
+    // The owner writes this doc via `commitShopMenuItem(s)` callables
+    // (Admin SDK). The owner reads it via the BuildCatalogScreen;
+    // only the owner's claim-matching rule is needed — no one else
+    // needs this subcollection outside Cloud Functions.
+    match /shops/{shopId}/onboardingState/{docId} {
+      allow read: if isShopOwnerOf(shopId) || isAdmin();
       allow write: if false;
     }
 

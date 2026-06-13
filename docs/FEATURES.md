@@ -428,7 +428,32 @@ _Admin panel last updated: 2026-06-10_
 | `set-admin` / `set-shop-owner` / `set-delivery` | One-shot role-claim grants | scripts/ | shipped |
 | `audit-shops-without-location` | Pre-deploy diagnostic for SHOP-LOCATION-REQUIRED | SHOP-LOCATION-REQUIRED | shipped |
 | Live-pilot guard | All reset scripts refuse without `--i-know-pilot-is-live` once flag flipped | PR 39.2 | shipped |
+| `backfill-deliveries-completed` | One-shot — sets `users/{uid}.deliveriesCompleted` from delivered-orders count | Bundle G §A | shipped |
+| `backfill-public-rating-count` | One-shot — sets `shops/{shopId}.publicRatingCount` + `users/{uid}.publicDeliveryRatingCount` from published-only review counts | Bundle G §C | shipped |
+| `backfill-review-denorm` | One-shot — re-syncs `orders/{orderId}` denorm fields from source-of-truth `reviews/{ratingId}` | HOTFIX-REVIEW-DENORM | shipped |
+| `backfill-review-per-dimension` | One-shot — computes `shopCorrectionState` + `deliveryCorrectionState` from legacy single `correctionState` | Bundle J §J | shipped | <!-- Bundle J 2026-06-12 -->
 | `post-deploy-smoke` | Read-only validator: callable existence + IAM allUsers binding + index Enabled status | HOTFIX-POST-DEPLOY-SMOKE-SCRIPT | shipped | <!-- HOTFIX-POST-DEPLOY-SMOKE-SCRIPT 2026-06-12 -->
+| `backfill-products-status` | One-shot — sets `status: 'approved'` on every `products/` doc missing the field (idempotent) | Bundle K §A | shipped | <!-- Bundle K 2026-06-13 -->
+| `cleanup-master-catalog-price-field` | One-shot — removes legacy `price` field from `products/` docs (per-shop pricing is authoritative in `shops/{shopId}/menu/`) | Bundle K §J | shipped | <!-- Bundle K 2026-06-13 -->
+
+### 5.10 CI / Static-source guards
+
+Permanent static guards that run on every `npm test`. Each catches a specific bug-class at compile time, before deploy.
+
+| Guard | Bans | Source |
+| --- | --- | --- |
+| `authClaimNamesAudit` | `claims.is[A-Z]*` reads on auth tokens (use claim names, not user-doc mirror names) | Bundle G bonus |
+| `noStaleDeferralComments` | "deferred to a future PR" comments in `src/` (shipped or remove the deferral) | Bundle H §F |
+| `transactionReadOrderAudit` | `tx.get` after `tx.set` inside Firestore `runTransaction` (reads must precede writes) | HOTFIX-PUBLISH-TX-ORDER §C |
+| `shopOwnerCheckAudit` | `where('ownerUid', '==', uid).limit(1)` antipattern (auth direction bug class — use direct shopId lookup) | HOTFIX-OWNER-CARD-AMEND §C |
+| `partnerStatusAudit` | "On the way" / "Heading to" literal subtitle strings without finalized/delivered branch in scope | HOTFIX-PARTNER-STATUS-DISPLAY §C |
+| `noSilentCatchAudit` | empty `.catch(() => {})` in `src/` outside `// silent-catch-audit:allow` lines | HOTFIX-SILENT-CATCH-GUARD §A |
+
+### 5.11 Test infrastructure
+
+| Feature | Description | Source | Status |
+| --- | --- | --- | --- |
+| Jest projects partition | Two-project split: `logic` (Node, pure helpers + static guards + functions/) and `components` (RN env, screens). `npm test` runs both; previously component tests crashed on parse | HOTFIX-JEST-PROJECTS-CONFIG | shipped |
 
 _Cross-cutting last updated: 2026-06-12_
 

@@ -1073,6 +1073,71 @@ callables piecemeal.
       `listMyOrders` deployed + IAM bound, all indexes Enabled. Wired into
       CLAUDE.md server-first deploy protocol. [HOTFIX-POST-DEPLOY-SMOKE-SCRIPT]
 
+## Shop catalog onboarding (Bundle K)
+
+- [x] **6 catalog callables + pure helpers** — `listMasterCatalogByCategory`,
+      `commitShopMenuItem`, `commitShopMenuItemsBulk`,
+      `proposeMasterCatalogItem`, `reviewPendingCatalogItem`,
+      `listPendingCatalogItems` in `functions/src/index.ts`. Validation +
+      page-building logic extracted to `functions/src/catalogHelpers.ts`
+      (`validatePrice`, `partitionBulkCommitItems`,
+      `validateMasterCatalogProposal`, `validateCatalogReviewAction`,
+      `buildCatalogPage`, `summarizePendingItems`,
+      `buildShopMenuItemFromMasterProduct`, `isCustomerVisibleProduct`).
+      Auth: shop-owner callables gate on `claims.shopOwner` + `claims.shopId`;
+      admin callables gate on `claims.admin`. Bulk commit capped at 100 items;
+      proposals rate-limited to 20 pending per owner. [Bundle K §B/§G]
+- [x] **Schema migration + indexes** — `status: 'approved'|'pending'|'rejected'`
+      field on `products/` (schema-additive). `backfill-products-status.ts`
+      sets 'approved' on legacy docs missing the field (idempotent;
+      `needsStatusBackfill` pure helper + tests). Seed script
+      (`seed-master-catalog.ts`) now writes `status: 'approved'`. Two composite
+      indexes added: `status+category+name` (browse) and `status+proposedAt`
+      (admin queue). `audit:indexes` confirms both backed. [Bundle K §A]
+- [x] **Firestore rules** — `products/` public read now gated on
+      `status == 'approved'` (admin reads all; server callables use Admin SDK).
+      New `shops/{shopId}/onboardingState/{docId}` rule: owner + admin read,
+      writes server-only. [Bundle K §A]
+- [x] **Shop-owner UI** — `BuildCatalogScreen` hub (10 category tiles + items-
+      added counter, reads `onboardingState/catalog`) then `CategoryBrowseScreen`
+      (swipe right/tap to add, swipe left/tap to skip; inline price input +
+      `VoicePriceCapture` modal) then `CatalogReviewScreen` (bulk commit, edit /
+      remove drafts). Reachable via "Build catalog (guided)" CTA on
+      `ShopMenuScreen`. Pure helpers in `src/utils/catalogBrowseHelpers.ts`
+      (`deriveCardAction`, `nextItemIndex`, `partitionDraftsForBulkCommit`,
+      `computeCategoryProgress`, `isCategoryComplete`, `formatPackLabel`).
+      [Bundle K §C/§E/§F]
+- [x] **Voice price capture** — `src/components/catalog/VoicePriceCapture.tsx`
+      reuses PR-34 `VoiceInputButton` (single_field STT) then applies pure
+      `parseVoicePriceInput(text, lang)` (`src/utils/voicePriceHelpers.ts`)
+      — Hindi + English spoken-number + transliteration + Arabic-digit
+      parsing, confidence scoring, price 1-99999 range guard. [Bundle K §D]
+- [x] **Custom item proposal + admin review** — `ProposeCustomItemScreen`
+      (shop owner) then `PendingCatalogQueueScreen` (admin approve/reject with
+      reason). Admin queue reachable via "Pending catalog items" HomeScreen
+      tile. [Bundle K §G/§H]
+- [x] **Cleanup + customer verification** — `cleanup-master-catalog-price-field.ts`
+      removes legacy `price` field from `products/` (per-shop pricing is
+      authoritative in `shops/{shopId}/menu/`; `hasLegacyPriceField` pure helper
+      + tests). `filterCustomerVisibleProducts` / `isCustomerVisibleProduct`
+      mirror the rule predicate so pending/rejected proposals never leak to a
+      customer surface (+ tests). +62 tests total across the bundle. [Bundle K §I/§J]
+- [ ] **Server-first deploy + IAM verify** — deploy order: `firestore:rules` then
+      `firestore:indexes` (wait for Enabled) then `functions` (6 callables) then
+      `npm run smoke` then client OTA. Verify `allUsers` invoker binding on all 6
+      new callables via gcloud. Run `backfill-products-status.ts --execute` and
+      `cleanup-master-catalog-price-field.ts --execute` against dev AFTER rules
+      deploy. [Bundle K deploy]
+- [ ] **Catalog browse pagination at scale** — `listMasterCatalogByCategory`
+      pages at 50 with cursor; current master catalog is ~33 items so single
+      page. Revisit cursor UX in `CategoryBrowseScreen` if any category crosses
+      ~100 items. [Bundle K follow-up / post-MVP]
+- [ ] **Onboarding progress per-category %** — `computeCategoryProgress` helper
+      is built + tested but `BuildCatalogScreen` tiles currently show only the
+      global items-added count, not per-category bars. Wire per-tile progress
+      once `listMasterCatalogByCategory` totals are cached client-side.
+      [Bundle K follow-up]
+
 ## ðŸ“ Compliance & Distribution
 
 - [x] **Privacy Policy** drafted, hosted at a public URL, linked in app
@@ -10680,6 +10745,90 @@ Sudhir's 2026-06-10 post-Bundle-I retest surfaced three bugs: (1) shop owner get
 - [x] **§G — Dashboard card tap handlers** — Delivery `handleCardTap` and shop `onCardPress` now navigate to `AttentionQueue` on the attention card (was a no-op: `setShowAttention(true)` where `showAttention` already initialized `true`; shop side was an explicit no-op). Other cards keep inline section-toggle behavior. `[Phase HOTFIX-RESPOND-OWNER-AND-CARD-NAV]`
 - [x] **§H — Amend denorm consolidation (atomic)** — (H.1) Rolling-average recompute moved INTO `_publishReview`'s transaction (COMPUTE phase computes `shopAvgRecompute`/`partnerAvgRecompute`, WRITE phase merges them into the existing shop/partner `tx.set`) via pure `@c:\Users\dahiy\grocery-mvp\functions\src\recomputeRollingAverageHelpers.ts`. Read-before-write order preserved (passes `transactionReadOrderAudit`). (H.2) Removed the redundant `amendedStars` subfield write + racy outside-tx `shop.ratingAvg` recompute from `amendRating` — now a single transactional `_publishReview` call. (H.3) `amendedAt` stamped on the review doc inside `_publishReview` (gated on `reason==='customer_amended'`). (H.4) `RatingAmendmentScreen.handleAmend`/`handleKeepOriginal` force `orderService.getOrder(orderId)` after success to prime the cache (new public `getOrder` wrapper added to `orderService.ts`). **+6 tests** on the recompute math (2→4, weighted increase, decrease path, no-op null, oldCount=0 null, chained round-trip). `[Phase HOTFIX-AMEND-RECOMPUTE]`
 - [x] **tsc + functions build + tests** — Root `npx tsc --noEmit` clean; `functions npm run build` clean. New suites: **20/20** (§B 5 + §C 3 + §D 5 + §H 6 + §C detect already counted). Full `tests/functions tests/utils tests/static`: **1268 tests pass**; 4 pre-existing suite-load failures (openLegal/openSupport/openMapsForCoords/uploadDeliveryProof) are unrelated `@react-native-firebase/app` import errors at `orderService.ts:2` (not modified by this work). `[Phase HOTFIX-RESPOND-OWNER]`
-- [ ] **Deploy (server first)** — `cd functions; npm run build; cd ..` then `firebase deploy --only "functions:respondToReview,functions:amendRating"` (rating-alert-config callable also modified — include its deploy target if separate). `[Phase HOTFIX-RESPOND-OWNER-deploy]`
-- [ ] **Cloud Run IAM verify** — `respondtoreview` AND `amendrating` (+ rating-alert-config service) need `allUsers / run.invoker`. Re-bind if `etag: ACAB`. `[Phase HOTFIX-RESPOND-OWNER-deploy]`
-- [ ] **OTA after server** — `eas update --branch production --message "HOTFIX-RESPOND-OWNER-AND-CARD-NAV-AND-AMEND — owner check + AttentionQueueScreen + amend atomicity"`. New screen + nav route + amend refetch depend on the modified callables being live. `[Phase HOTFIX-RESPOND-OWNER-deploy]`
+- [x] **Deploy (server first)** — Deployed 2026-06-12 alongside the rest of the pilot-prep wave. `[Phase HOTFIX-RESPOND-OWNER-deploy]`
+- [x] **Cloud Run IAM verify** — `respondtoreview` + `amendrating` + rating-alert-config services confirmed `allUsers / run.invoker`. `[Phase HOTFIX-RESPOND-OWNER-deploy]`
+- [x] **OTA after server** — Shipped 2026-06-12 in the consolidated client OTA. `[Phase HOTFIX-RESPOND-OWNER-deploy]`
+
+---
+
+## HOTFIX-PARTNER-STATUS-DISPLAY — Stale "On the way" on delivered orders
+
+Sudhir's 2026-06-10 post-amend-fix retest: shop's order detail partner section + customer's PartnerDetailsSheet header both displayed "On the way to..." after delivery. Bundle H §C's three-state subtitle was applied only to PartnerIdentityCard; the same two-state pattern leaked through two more surfaces because the audit-grep targeted `formatPartnerAvatar` consumers, not literal "On the way" strings.
+
+- [x] **§A — ShopOrderDetailScreen partner status** — Migrated to three-state via `derivePartnerCardSubtitle` (delivered/cancelled branches added). `[Phase HOTFIX-PARTNER-STATUS]`
+- [x] **§B — PartnerDetailsSheet header `stateText`** — Reads its own `isFinalized` flag (was only used in body row). `[Phase HOTFIX-PARTNER-STATUS]`
+- [x] **§C — 5th static guard `partnerStatusAudit`** — Walks `src/**/*.{tsx,ts}` for literal "On the way" / "Heading to" and verifies a delivered/cancelled branch (or `derivePartnerCardSubtitle`/`isFinalized`/`isDelivered`/`isCancelled` reference) in the surrounding window. **+3 tests** (guard + 2 detection-unit). `[Phase HOTFIX-PARTNER-STATUS]`
+- [x] **Deploy** — Pure client OTA (no server). Shipped 2026-06-12. `[Phase HOTFIX-PARTNER-STATUS-deploy]`
+
+---
+
+## PR-NEXT-BUNDLE-J — Per-dimension review correction state
+
+Sudhir's 2026-06-10 observation: shop and delivery both got 1★, customer corrected shop side to 4★ — but the delivery partner's review item auto-closed without the partner having a chance to respond. Single `correctionState` per review covered BOTH dimensions; whichever side responded first terminated the other side's response window. Plus the shop's response text was visible on the delivery side.
+
+- [x] **§A — Per-dimension state machine** — `decideInitialPerDimension`, `computeLegacyState`, `canRespondPerDimension`, `canAmendPerDimension`, `canAcknowledgePerDimension` + `decidePublishTransition` in `functions/src/reviewWorkflowHelpers.ts`. Legacy `correctionState` retained as computed worst-of for back-compat. `[Phase Bundle J]`
+- [x] **§B — submitOrderRating per-dimension** — Writes `shopCorrectionState` + `deliveryCorrectionState` on both review and order. Per-dimension `publicReviewCount`/`publicRatingCount` deltas. `[Phase Bundle J]`
+- [x] **§C — respondToReview per-dimension** — Gates on responder's own dimension; writes `shopResponseText` / `partnerResponseText` separately; recomputes legacy worst-of. `[Phase Bundle J]`
+- [x] **§D + §E — amendRating + acknowledgeReview per-dimension** — Each transitions only the affected dimension. `acknowledgeReview` accepts optional `dimension` arg (default 'both' for back-compat). `[Phase Bundle J]`
+- [x] **§F — `_publishReview` per-dimension transitions** — Takes `applyShop`/`applyDelivery` flags; only the targeted side(s) get state transitions, public caches/counts updates, and (HOTFIX-AMEND-RECOMPUTE) rolling-average recompute. `[Phase Bundle J]`
+- [x] **§G — Attention queue per-dimension queries** — `listMyAttentionReviews` filters `deliveryCorrectionState == 'flagged_low'`; `listShopAttentionReviews` filters `shopCorrectionState == 'flagged_low'`. 4 new composite indexes in `firestore.indexes.json` (2 on orders + 2 on reviews for the timeout cron). `[Phase Bundle J]`
+- [x] **§H — Customer panel rewrite** — `deriveCustomerReviewPanels` + dual shop/delivery sections on `OrderDetailScreen`. Per-dimension Amend / Acknowledge CTAs. `[Phase Bundle J]`
+- [x] **§I — 7-day timeout cron per-dimension** — Publishes each flagged side independently. `[Phase Bundle J]`
+- [x] **§J — Backfill** — `deriveBackfillPerDimension` pure helper + `scripts/backfill-review-per-dimension.ts`. Computes per-dimension states from legacy single state. Dry-run default + admin-uid required + project allowlist. `[Phase Bundle J]`
+- [x] **§K — Per-dimension push** — `derivePushTitle` extended with `dimension` argument; push payload includes the dimension that responded. `[Phase Bundle J]`
+- [x] **§L — Consumer migration** — `Order` type extended; `ShopOrderDetailScreen` reads `shopCorrectionState` + `shopResponseText`; `DeliveryOrderDetailScreen` reads `deliveryCorrectionState` + `partnerResponseText`; `RatingAmendmentScreen` dimension-aware; `acknowledgeReview` client wrapper accepts `dimension`. **Cross-check item (Sudhir 2026-06-10):** shop's comment no longer visible on delivery side; one side closing doesn't close the other. `[Phase Bundle J]`
+- [x] **Deploy** — Indexes → 5 callables + IAM verify → backfill (dry-run, then `--execute`) → client OTA. Shipped 2026-06-12. `[Phase Bundle J-deploy]`
+
+---
+
+## HOTFIX-ATTENTION-CALLABLES-MISSING — Implement Bundle I §D/§E callables (third time's the charm)
+
+Sudhir's 2026-06-10 retest: dashboard "Reviews & Ratings" cards showed count = 0 despite flagged_low orders existing. Investigation: Bundle I §D/§E callables (`listMyAttentionReviews` / `listShopAttentionReviews`) had been reported shipped TWICE (Bundle I, then Bundle J §G) but never actually implemented — only the type + helper landed. Devin's cross-check report confabulated specific line numbers (`index.ts:10921`) that exceeded the file's actual length (10494 lines). The `.catch(() => { /* silent */ })` in three dashboard surfaces swallowed the "is not a function" error.
+
+- [x] **§A — `listMyAttentionReviews` callable** — Per-dimension filter `where('deliveryCorrectionState', '==', 'flagged_low')`. Delivery role gate via `claims.delivery`. `[Phase HOTFIX-ATTENTION-CALLABLES]`
+- [x] **§B — `listShopAttentionReviews` callable** — Per-dimension filter `where('shopCorrectionState', '==', 'flagged_low')`. Shop owner gate; multi-shop fallback line-allowlisted with `// shop-owner-audit:allow`. `[Phase HOTFIX-ATTENTION-CALLABLES]`
+- [x] **§C — Client wrappers** — `orderService.listMyAttentionReviews()` + `listShopAttentionReviews()` with RNFB native + Web SDK branches; unwraps `{ orders }` or `{ rows }` payload defensively. `[Phase HOTFIX-ATTENTION-CALLABLES]`
+- [x] **§D — Composite indexes verified** — `(deliveryPersonId, deliveryCorrectionState, updatedAt)` + `(shopId, shopCorrectionState, updatedAt)` already in `firestore.indexes.json` from Bundle J §G. `[Phase HOTFIX-ATTENTION-CALLABLES]`
+- [x] **§E — Helper dimension-aware** — `summarizeAttentionReviewRows` extended with optional `dimension: 'shop' | 'delivery'` arg. Both callables pass their dimension. `[Phase HOTFIX-ATTENTION-CALLABLES]`
+- [x] **Deploy** — 2 new callables + IAM verify + client OTA. Shipped 2026-06-12. `[Phase HOTFIX-ATTENTION-CALLABLES-deploy]`
+
+---
+
+## HOTFIX-JEST-PROJECTS-CONFIG — Make the full test suite actually runnable
+
+Devin's 2026-06-10 framing: "test discipline is theater" until `npx jest` runs to completion. Pre-fix: ~27 RN-dependent suites crashed on `react-native` parse; 4 `@react-native-firebase/app` suite-load failures (`openLegal`, `openSupport`, `openMapsForCoords`, `uploadDeliveryProof`) hid regressions.
+
+- [x] **Two-project jest split** — `logic` (Node, pure helpers + static guards + functions/) and `components` (RN env, screens). `npm test` runs both; per-project scripts (`test:logic`, `test:components`) for targeted runs. `[Phase HOTFIX-JEST-PROJECTS]`
+- [x] **Mock harness for RN/Firebase imports in logic project** — `tests/__mocks__/` stubs for `@react-native-firebase/*` + `react-native` so logic tests don't pull RN parse path. `[Phase HOTFIX-JEST-PROJECTS]`
+- [x] **All 5 (now 6) existing static guards run on every `npm test`** — verified by selecting the logic project alone. `[Phase HOTFIX-JEST-PROJECTS]`
+- [x] **Commit only — no deploy** — Dev-only config change. `[Phase HOTFIX-JEST-PROJECTS]`
+
+---
+
+## HOTFIX-SILENT-CATCH-GUARD — 6th static guard banning silent catches
+
+Devin's root-cause framing of the dashboard count = 0 bug: `.catch(() => { /* silent */ })` in DeliveryDashboardScreen, ShopOwnerDashboardScreen, AttentionQueueScreen turned three structurally-different failures (missing callable, building index, IAM ACAB) into a single silent symptom with zero diagnostics.
+
+- [x] **§A — `noSilentCatchAudit` static guard** — `tests/static/noSilentCatchAudit.test.ts` + detector `tests/static/noSilentCatchDetect.ts`. Detector scans contiguous comment block above each `.catch` (multi-line justifications now supported). **12 tests passing.** `[Phase HOTFIX-SILENT-CATCH-GUARD]`
+- [x] **§B+§C — Silent-catch remediation** — Migrated `DeliveryDashboardScreen`, `ShopOwnerDashboardScreen`, `AttentionQueueScreen` data-fetch catches to Sentry + error UI. Allowlisted with one-line reason: `ShopOrderDetailScreen` (tel:/maps:), `ShopOwnerDashboardScreen` (haptics), `DeliveryDashboardScreen` (`reportDeliveryLocation`), `AuthBootstrap` (orchestrator net), `OrderDetailScreen` (tel:), admin `ShopDetailManagementScreen` geocode fallbacks. Every remaining bare `.catch(() => {})` in `src/` is allowlisted with one-line reason. `[Phase HOTFIX-SILENT-CATCH-GUARD]`
+- [x] **Deploy** — Client OTA bundling silent-catch remediation. Shipped 2026-06-12. `[Phase HOTFIX-SILENT-CATCH-GUARD-deploy]`
+
+---
+
+## HOTFIX-POST-DEPLOY-SMOKE-SCRIPT — `npm run smoke` after every server deploy
+
+Devin's framing: most pilot-prep wave bugs were deploy-state, not code. `npm run smoke` catches the three classes in <30 seconds — callable not deployed, index still Building, IAM ACAB.
+
+- [x] **§A — `scripts/post-deploy-smoke.ts`** — Read-only validator (220 lines). Project allowlist (`grocery-mvp-dev` only). `[Phase HOTFIX-POST-DEPLOY-SMOKE]`
+- [x] **§B — `.smoke-config.json`** — Pre-populated with the callables touched in the pilot-prep wave; developers append as they ship new ones. `[Phase HOTFIX-POST-DEPLOY-SMOKE]`
+- [x] **§C — `npm run smoke` / `smoke:indexes` / `smoke:iam` scripts** + CLAUDE.md protocol updated. `[Phase HOTFIX-POST-DEPLOY-SMOKE]`
+- [x] **§D + §E — Pure parsers `parsesmokeOutput.ts`** (87 lines) + `parseIamPolicyOutput` / `parseIndexesOutput` unit-tested with sample CLI outputs. **+9 tests.** `[Phase HOTFIX-POST-DEPLOY-SMOKE]`
+- [x] **Live run against grocery-mvp-dev** — Read-only, passed. `[Phase HOTFIX-POST-DEPLOY-SMOKE]`
+- [ ] **IAM deliberate-break demo (acceptance #5)** — Strip allUsers from `listMyEarnings` via `gcloud run services remove-iam-policy-binding`, run smoke (expect fail + exit 1), re-bind, run smoke (expect pass). 1-minute PowerShell sequence — Sudhir to run at convenience. Mutating command, not Devin-run. `[Phase HOTFIX-POST-DEPLOY-SMOKE-deploy]`
+- [x] **Commit only — no deploy** — Dev-only tooling. `[Phase HOTFIX-POST-DEPLOY-SMOKE-deploy]`
+
+---
+
+## End of pilot-prep wave — 2026-06-12
+
+The pilot-prep wave is complete. End-to-end retest (customer rates 1★ → both sides respond independently → customer amends per-dimension → review publishes correctly with no cross-contamination) passed all 9 acceptance steps on real devices. Dev side is unblocked for real-shop onboarding. Remaining items are operational (Razorpay LIVE keys, prod project creation, App Check, PR 39.2 flag flip on launch day, HOTFIX-4 FCM reinstall, smoke IAM demo). See CLAUDE.md Current state + SESSION_LOG 2026-06-10 → 2026-06-12 paragraph for the full wave summary.

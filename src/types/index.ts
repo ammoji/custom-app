@@ -844,3 +844,49 @@ export type ShopCustomer = {
   firstOrderAt: number; // epoch ms
   lastOrderAt: number; // epoch ms
 };
+
+// PR-NEXT-BUNDLE-K — DO NOT REMOVE. Master catalog product shape.
+// Lives in `products/{productId}` (global, not per-shop).
+// `status` defaults to 'approved' for admin-seeded items and is
+// 'pending' for shop-proposed items awaiting admin review.
+// `proposedBy` / `proposedAt` are only set for pending items.
+export type ProductStatus = 'approved' | 'pending' | 'rejected';
+
+export type MasterProduct = {
+  id: string;
+  name: string;
+  brand?: string | null;
+  category: CategoryId;
+  packSize: { value: number; unit: string };
+  mrp: number;
+  imageUrl?: string | null;
+  // PR-NEXT-BUNDLE-K §A — status field (schema-additive; seeded
+  // items default to 'approved' via backfill-products-status.ts).
+  status: ProductStatus;
+  // PR-NEXT-BUNDLE-K §B.4 — only set when status == 'pending'.
+  proposedBy?: string | null;
+  proposedAt?: number | null;
+  reviewedAt?: number | null;
+  reviewedBy?: string | null;
+  rejectionReason?: string | null;
+};
+
+// PR-NEXT-BUNDLE-K — DO NOT REMOVE. Per-shop onboarding progress
+// doc at `shops/{shopId}/onboardingState/catalog`.
+export type OnboardingCatalogState = {
+  categoriesCompleted: string[];
+  lastCategoryViewed: string | null;
+  lastItemViewedInCategory: string | null;
+  itemsAdded: number;
+  startedAt: number;
+  updatedAt: number;
+};
+
+// PR-NEXT-BUNDLE-K — DO NOT REMOVE. Price draft for in-memory
+// catalog browse (flushed to Firestore via commitShopMenuItemsBulk
+// on the review screen).
+export type PriceDraft = {
+  productId: string;
+  price: number;
+  product: MasterProduct;
+};

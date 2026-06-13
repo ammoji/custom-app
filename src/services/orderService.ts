@@ -2277,4 +2277,108 @@ export const orderService = {
     const result = await fn();
     return ((result.data as any)?.orders ?? []) as AttentionReviewRow[];
   },
+
+  // PR-NEXT-BUNDLE-K §B.1 — DO NOT REMOVE. Shop owner lists approved
+  // catalog items by category for the browse + price-set flow.
+  async listMasterCatalogByCategory(payload: {
+    category: string;
+    cursor?: string | null;
+    pageSize?: number;
+  }): Promise<{ items: any[]; hasMore: boolean; cursor: string | null }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('listMasterCatalogByCategory');
+      const result = await fn(payload);
+      const d = result.data as any;
+      return { items: d?.items ?? [], hasMore: d?.hasMore ?? false, cursor: d?.cursor ?? null };
+    }
+    const fn = httpsCallable(functions, 'listMasterCatalogByCategory');
+    const result = await fn(payload);
+    const d = result.data as any;
+    return { items: d?.items ?? [], hasMore: d?.hasMore ?? false, cursor: d?.cursor ?? null };
+  },
+
+  // PR-NEXT-BUNDLE-K §B.2 — DO NOT REMOVE. Commit single item to menu.
+  async commitShopMenuItem(payload: {
+    productId: string;
+    price: number;
+  }): Promise<{ menuItemId: string }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('commitShopMenuItem');
+      const result = await fn(payload);
+      return { menuItemId: (result.data as any)?.menuItemId ?? '' };
+    }
+    const fn = httpsCallable(functions, 'commitShopMenuItem');
+    const result = await fn(payload);
+    return { menuItemId: (result.data as any)?.menuItemId ?? '' };
+  },
+
+  // PR-NEXT-BUNDLE-K §B.3 — DO NOT REMOVE. Bulk commit up to 100 items.
+  async commitShopMenuItemsBulk(payload: {
+    items: Array<{ productId: string; price: number }>;
+  }): Promise<{ written: number; skipped: number; tooLarge: boolean }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('commitShopMenuItemsBulk');
+      const result = await fn(payload);
+      const d = result.data as any;
+      return { written: d?.written ?? 0, skipped: d?.skipped ?? 0, tooLarge: d?.tooLarge ?? false };
+    }
+    const fn = httpsCallable(functions, 'commitShopMenuItemsBulk');
+    const result = await fn(payload);
+    const d = result.data as any;
+    return { written: d?.written ?? 0, skipped: d?.skipped ?? 0, tooLarge: d?.tooLarge ?? false };
+  },
+
+  // PR-NEXT-BUNDLE-K §B.4 — DO NOT REMOVE. Propose new catalog item.
+  async proposeMasterCatalogItem(payload: {
+    name: string;
+    brand?: string | null;
+    category: string;
+    mrp: number;
+    packSizeValue: number;
+    packSizeUnit: string;
+  }): Promise<{ productId: string }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('proposeMasterCatalogItem');
+      const result = await fn(payload);
+      return { productId: (result.data as any)?.productId ?? '' };
+    }
+    const fn = httpsCallable(functions, 'proposeMasterCatalogItem');
+    const result = await fn(payload);
+    return { productId: (result.data as any)?.productId ?? '' };
+  },
+
+  // PR-NEXT-BUNDLE-K §B.5 — DO NOT REMOVE. Admin reviews pending item.
+  async reviewPendingCatalogItem(payload: {
+    productId: string;
+    action: 'approved' | 'rejected';
+    rejectionReason?: string;
+  }): Promise<{ productId: string; action: string }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('reviewPendingCatalogItem');
+      const result = await fn(payload);
+      const d = result.data as any;
+      return { productId: d?.productId ?? '', action: d?.action ?? '' };
+    }
+    const fn = httpsCallable(functions, 'reviewPendingCatalogItem');
+    const result = await fn(payload);
+    const d = result.data as any;
+    return { productId: d?.productId ?? '', action: d?.action ?? '' };
+  },
+
+  // PR-NEXT-BUNDLE-K §G — DO NOT REMOVE. Admin lists pending catalog items.
+  async listPendingCatalogItems(payload?: { limit?: number }): Promise<{
+    items: any[];
+    summary: { total: number; byCategory: Record<string, number>; oldestProposedAt: number | null };
+  }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('listPendingCatalogItems');
+      const result = await fn(payload ?? {});
+      const d = result.data as any;
+      return { items: d?.items ?? [], summary: d?.summary ?? { total: 0, byCategory: {}, oldestProposedAt: null } };
+    }
+    const fn = httpsCallable(functions, 'listPendingCatalogItems');
+    const result = await fn(payload ?? {});
+    const d = result.data as any;
+    return { items: d?.items ?? [], summary: d?.summary ?? { total: 0, byCategory: {}, oldestProposedAt: null } };
+  },
 };

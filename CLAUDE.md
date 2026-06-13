@@ -205,7 +205,59 @@ file (currently PR 23 is the most recent), `docs/pr-N-<slug>-windsurf-prompt.md`
 7. Ask Sudhir what he wants to work on. Don't assume — even if context
    suggests an obvious next step, confirm before doing anything destructive.
 
-## Current state — 2026-06-02 — Major testing-findings wave + multi-region test fleet rebuilt + SHOP-LOCATION-EDIT shipped
+## Current state — 2026-06-12 — Pilot-prep wave closed (Bundles G→J + 9 HOTFIXes + 4 process improvements + 6 static guards)
+
+**Where we are:** dev-side pilot-readiness is **complete**. End-to-end retest (customer rates 1★ → both sides respond independently → customer amends per-dimension → review publishes correctly with no cross-contamination) passed all 9 acceptance steps on real devices. The structural per-dimension review state machine (Bundle J) is in production. The discoverability surface (dashboard "Reviews & Ratings" cards + AttentionQueueScreen) works end-to-end. Test suite 1458 → 1639 (+181 across the wave); `tsc --noEmit` clean on both `src/` and `functions/` throughout; full unit suite at **158 suites / 1639 tests** with `npx jest` now running both logic + components projects to completion (HOTFIX-JEST-PROJECTS-CONFIG fixed the "test discipline is theater" issue Devin called out).
+
+**Wave summary (chronological):**
+
+- **Bundle G** — Reviews polish + payment receipt + partner photo audit. Three new schema-additive fields (deliveriesCompleted, publicRatingCount, publicDeliveryRatingCount) + two backfill scripts + payment status badge derived from per-order paymentMethod/paymentStatus/paidMethod. **Bonus catch by Devin:** found two more callables of the `claims.is*` auth-bug class (updateShopRatingAlertSettings + updateAdminRatingAlertConfig) + added the **1st permanent static guard** `authClaimNamesAudit` scanning `/claims\.is[A-Z]/` across src. +24 tests exactly.
+- **HOTFIX-PROFILE-PHOTO (4 layers)** — Delivery partner profile photo not visible after upload. Peeled four root causes: (1) `encodeURIComponent(storagePath)` encoded `/` as `%2F`; (2) storage.rules had no rule for `/delivery-profile/`; (3) bucket hardcoded as old `.appspot.com` (Firebase changed default naming April 2024); (4) wrong URL scheme entirely — GCS direct `storage.googleapis.com/...` bypasses Firebase Storage Rules. Final fix: Firebase Storage REST URL with embedded `firebaseStorageDownloadTokens` metadata token via `extensionHeaders` on signed PUT URL.
+- **HOTFIX-RATING-RESPONSE** — Same Rule 5 class as HOTFIX-5. Server `respondToReview` checked `claims.isShopOwner` / `claims.isDelivery` instead of auth-token `claims.shopOwner` / `claims.delivery`. ResponseModal had `try/finally` with no `catch` → silent failure. Auth-claim static guard added. +7 tests.
+- **HOTFIX-REVIEW-DENORM** — `respondToReview` / `amendRating` / `acknowledgeReview` / 7-day auto-publish cron all updated the source-of-truth review doc but NOT the denormalized `correctionState` on the order. Customer/shop/partner OrderDetail screens read stale denorm. Fix: cascade transitions into order doc inside the same transaction via `_publishReview`. +11 tests.
+- **Bundle H — Customer review loop + Partner card finish** — Closed 5 dots: customer OrderDetailScreen had no review-response section at all (RatingAmendmentScreen reachable only via push deep-link); PartnerIdentityCard had no photo prop + two-state subtitle; push title hardcoded "Shop responded" regardless of responseBy. Bundle G §D audit-grep missed PartnerIdentityCard because it used `initialsFor` directly (not `formatPartnerAvatar`). **2nd static guard** `noStaleDeferralComments` added. +22 tests.
+- **HOTFIX-PUBLISH-TX-ORDER** — Customer taps amend or acknowledge → INTERNAL error. Firestore transaction "reads must precede writes" rule violated by `tx.get(partnerRef)` sitting after three `tx.set` calls inside `_publishReview`. Latent across Bundle G + HOTFIX-REVIEW-DENORM + Bundle H (each added a write but no read). Fix: strict READ → COMPUTE → WRITE phase structure. **3rd static guard** `transactionReadOrderAudit` with string/comment/template-literal-aware brace tokenizer. +3 tests (emulator infra not available; static guard + detection units sufficient).
+- **Bundle I — Attention queue + dashboard cards** — 5-card grid at top of delivery + shop dashboards (Active / Available / Coming Up / History / Reviews & Ratings) with counts + urgent variant for non-zero attention items + new AttentionQueueScreen. +18 tests.
+- **HOTFIX-OWNER-CARD-AMEND** — Three-bug bundle. (1) `respondToReview` shop ownership check used `where(ownerUid).limit(1)` taking arbitrary first shop → fails for multi-shop owners; **4th static guard** `shopOwnerCheckAudit` bans the antipattern with line-scoped allowlist. (2) Card tap was no-op (state already true); fix: navigate to dedicated AttentionQueueScreen. (3) `amendRating` had redundant `amendedStars` subfield + outside-tx shop ratingAvg recompute (race with `_publishReview`) + no partner deliveryRatingAvg recompute; fix: consolidate inside the transaction. +20 tests.
+- **HOTFIX-PARTNER-STATUS-DISPLAY** — Shop's order detail partner section + customer's PartnerDetailsSheet header both showed stale "On the way to..." after delivered. Bundle H §C's `derivePartnerCardSubtitle` audit missed these two surfaces. **5th static guard** `partnerStatusAudit` enumerates every literal "On the way" / "Heading to" usage and verifies a delivered/cancelled branch exists in the surrounding window. +3 tests.
+- **Bundle J — Per-dimension review correction state** — Structural fix. Single `correctionState` per review covered BOTH shop + delivery dimensions; one side responding terminated the other side's response window. Split into `shopCorrectionState` + `deliveryCorrectionState` with independent state machines; legacy `correctionState` kept as computed worst-of for back-compat. 5 callables migrated + 4 composite indexes + backfill script + customer panel rewrite + ShopOrderDetailScreen + DeliveryOrderDetailScreen + RatingAmendmentScreen all dimension-aware. Three new Firestore fields denormalized on order (shop/deliveryCorrectionState + shopResponseText/partnerResponseText). +46 tests.
+- **HOTFIX-ATTENTION-CALLABLES-MISSING** — Bundle I §D/§E callables (`listMyAttentionReviews` / `listShopAttentionReviews`) + client wrappers in orderService.ts had been reported shipped twice (Bundle I + Bundle J §G) but were never actually implemented — only the type + helper landed. Devin's confabulated line numbers in cross-check reports drove **strengthened Rule 5 worked example #14** (PR completion verification requires grep for export, not just typecheck pass). Required completion-report verification block now in every prompt forces raw command output in reports.
+- **HOTFIX-JEST-PROJECTS-CONFIG** — Split into logic project (Node, pure helpers + static guards + functions/) and components project (RN env, screens). 27 RN-dependent suites that crashed on parse now report pass/fail. The "full suite green" signal becomes real.
+- **HOTFIX-SILENT-CATCH-GUARD** — Devin's observation: `.catch(() => {})` blocks were the #1 bug-amplifier across the wave (count = 0 with no Sentry, no UI error state). **6th static guard** `noSilentCatchAudit` bans empty catch bodies in `src/` outside of explicit allowlist (`// silent-catch-audit:allow` inline comments with one-line justification). Detector scans contiguous comment block above each `.catch`. Migrated DeliveryDashboardScreen, ShopOwnerDashboardScreen, AttentionQueueScreen + AuthBootstrap + OrderDetailScreen + ShopOrderDetailScreen + admin ShopDetailManagementScreen. Every remaining bare catch is allowlisted with a one-line reason.
+- **HOTFIX-POST-DEPLOY-SMOKE-SCRIPT** — `scripts/post-deploy-smoke.ts` + `parsesmokeOutput.ts` (pure parsers, +9 tests). Read-only validator: callable existence via `gcloud functions describe` + IAM allUsers binding via `gcloud run services get-iam-policy` (catches ACAB) + composite index Enabled state via `firebase firestore:indexes` (catches Building). `npm run smoke` + `smoke:indexes` + `smoke:iam` script entries. Project allowlist (grocery-mvp-dev only). Script ran live read-only against grocery-mvp-dev — passed.
+- **Bundle K — Shop catalog onboarding** — Server-first deploy with 6 new callables (`listMasterCatalogByCategory`, `commitShopMenuItem`, `commitShopMenuItemsBulk`, `proposeMasterCatalogItem`, `reviewPendingCatalogItem`, `listPendingCatalogItems`) + 2 composite indexes on `products/` (status+category+name, status+proposedAt). New `status: 'approved'|'pending'|'rejected'` field on master catalog products (schema-additive; `backfill-products-status.ts` backfills 'approved' on legacy docs, seed script writes it on new). Firestore rule on `products/` now gates public reads to `status == 'approved'` (admin sees all); new `shops/{shopId}/onboardingState/catalog` progress doc. Shop-owner UI: `BuildCatalogScreen` hub (10 category tiles) → `CategoryBrowseScreen` (swipe-or-tap add/skip with `react-native-gesture-handler` + inline numeric price + `VoicePriceCapture` modal reusing PR-34 voice infra) → `CatalogReviewScreen` (bulk commit). Custom-item flow `ProposeCustomItemScreen` → admin `PendingCatalogQueueScreen`. Pure helpers: `functions/src/catalogHelpers.ts`, `src/utils/voicePriceHelpers.ts` (Hindi+English spoken-number parser), `src/utils/catalogBrowseHelpers.ts`. `cleanup-master-catalog-price-field.ts` removes legacy `price` field (per-shop pricing is authoritative). +62 tests.
+
+**Discipline locked in (PROMPT_AUTHORING_NOTES Rule 5 worked examples #10–#16, required completion-report verification block as standard):**
+
+- #10 Auth direction bugs (shape vs direction — separate audits)
+- #11 Denormalization recompute belongs in the state-change transaction
+- #12 Audit-grep enumeration for missing-feature-across-surfaces (static guard)
+- #13 Per-party state machine split when single field models N parties
+- #14 PR completion verification requires `grep "export const NAME"` not just `tsc clean`
+- #15 Silent catch antipattern — `.catch(() => {})` is indistinguishable from success-with-empty-data
+- #16 Deploy state ≠ code state — `npm run smoke` after every server deploy
+
+**Static guard inventory — 6 permanent CI guards:**
+
+1. `authClaimNamesAudit` — bans `claims.is[A-Z]*` reads on auth tokens (Bundle G bonus)
+2. `noStaleDeferralComments` — bans "deferred to a future PR" comments in src/ (Bundle H §F)
+3. `transactionReadOrderAudit` — bans tx.get after tx.set in Firestore transactions (HOTFIX-PUBLISH-TX-ORDER §C)
+4. `shopOwnerCheckAudit` — bans `where(ownerUid).limit(1)` direction-bug pattern (HOTFIX-OWNER-CARD-AMEND §C)
+5. `partnerStatusAudit` — bans "On the way" / "Heading to" strings without finalized branch in scope (HOTFIX-PARTNER-STATUS-DISPLAY §C)
+6. `noSilentCatchAudit` — bans empty `.catch(() => {})` in src/ outside allowlist (HOTFIX-SILENT-CATCH-GUARD §A)
+
+**No pending Sudhir deploy.** All wave PRs deployed + retested. The IAM deliberate-break demo for `post-deploy-smoke` acceptance #5 remains for Sudhir to run at convenience (1-minute PowerShell sequence — see HOTFIX-POST-DEPLOY-SMOKE-SCRIPT prompt or my prior chat message).
+
+**Next priorities (post-pilot-prep):**
+
+1. **Real shop onboarding for pilot.** Dev side is unblocked. Operational tasks: Razorpay LIVE keys, Production Firebase project decision, App Check enforcement, PR 39.2 flag flip on pilot launch day.
+2. **HOTFIX-4 Android FCM** — operational (clear data + reinstall). Not Devin work.
+3. **Phase B features deferred from prior waves** — admin order-comment surfacing (PR 42.1.2), partner vehicleType picker UI, PR 44 category photos (blocked on Pexels assets), STATIC-MAP-PREVIEW (#12b), LOW-RATING-PUSH (#15 already shipped — verify), REVIEW-SYSTEM (#16 superseded by Bundle H + J).
+4. **4 admin BottomSheet migrations** (Rule 13 audit-grep — next admin-touching PR).
+
+---
+
+## Prior state — 2026-06-02 — Major testing-findings wave + multi-region test fleet rebuilt + SHOP-LOCATION-EDIT shipped (archived)
 
 **Where we are:** dev-side pilot-readiness is one PR-39.2 lock + one Android FCM reinstall away from complete. The June 2 testing-findings wave (10 observations from Sudhir's end-to-end retest) is fully closed via four Windsurf PRs (HOTFIX-9 / HOTFIX-10 / SHOP-LOCATION-REQUIRED / SHOP-LOCATION-EDIT) + two direct Claude edits (HOTFIX-FALLBACK-LEAK + the QuickSwitch / HomeScreen polish) + one operational flip (`appConfig/shopVisibility.showAllShops` → false; IAM verify on `listShopsPublic`). Test suite trajectory across the wave: 1241 → 1282 → 1299 → 1327 (+86). `tsc --noEmit` clean on both `src/` and `functions/` throughout.
 
@@ -322,32 +374,43 @@ lineage that the active state above doesn't already cover.
   `not_authorized` swap; 1 test failed; restored). Pending deploy:
   server-first (2 callables) + IAM verify both + client OTA
   bundling Bundle A + B together.
-- **PR-NEXT-PARTNER-PHOTO (Phase B, #11)** — drafted at
-  `docs/pr-next-partner-photo-windsurf-prompt.md`. Queued for
-  Cascade-on-Sonnet after Bundle A+B deploy + retest. Mandatory
-  delivery partner photo at onboarding; signed URL upload to
-  `delivery-profile/{uid}.jpg`; denormalized onto order at
-  `claimDelivery` (extends PARTNER-CARD.2's block); customer
-  sheet + shop order detail render photo (initials fallback for
-  legacy). Server-first (4 callables IAM-verified); ASCII
-  mockups for all 4 affected surfaces; +9 tests forecast.
-- **Phase B not yet drafted:** STATIC-MAP-PREVIEW (#12b),
-  LOW-RATING-PUSH (#15), REVIEW-SYSTEM (#16). Drafts deferred
-  until retest informs requirements. None are pilot-blockers.
+- ~~**PR-NEXT-PARTNER-PHOTO (Phase B, #11)**~~ — ✅ **SHIPPED across
+  HOTFIX-PROFILE-PHOTO 1→4 wave** (encoding → storage.rules →
+  bucket name → URL scheme). Partner photo flow works end-to-end.
+- ~~**Phase B drafts deferred**~~ — LOW-RATING-PUSH (#15) shipped
+  in Bundle G era. REVIEW-SYSTEM (#16) superseded by Bundle H +
+  Bundle J (per-dimension review correction state). STATIC-MAP-
+  PREVIEW (#12b) still deferred; not pilot-blocking.
 - **HOTFIX-4 Android FCM** — operational fix (clear data +
   reinstall, rebuild Android via `eas build --profile production
   --platform android` if reinstall doesn't refresh the token). Not
-  Windsurf work.
-- **Deferred to Phase B:** 4 admin-screen BottomSheet migrations
-  (Rule 13 audit-grep catches them on next admin-touching PR), PR
-  42.1.2 admin order-comment surfacing, partner `vehicleType`
-  picker UI, PR 44 category photos (blocked on Sudhir sourcing
-  Pexels assets).
+  Devin work.
+- **Deferred to post-pilot:** 4 admin-screen BottomSheet
+  migrations (Rule 13 audit-grep catches them on next admin-
+  touching PR), PR 42.1.2 admin order-comment surfacing, partner
+  `vehicleType` picker UI, PR 44 category photos (blocked on
+  Sudhir sourcing Pexels assets).
 - **Production Firebase project (`grocery-mvp-prod`)** not yet
   created. Trigger: pilot stability signal + commit to launch date.
 - **App Check enforcement** intentionally deferred. Debug token
   active for dev.
 - **Razorpay LIVE keys** not yet configured — test keys only.
+- **PR 39.2 flag flip** — operational reminder. On the day shop #1
+  takes a real money order, flip `appConfig/pilotStatus.isLive:
+  true` in Firebase Console. After flip, all three reset scripts
+  refuse without `--i-know-pilot-is-live`. See
+  PRELAUNCH_CHECKLIST.md PR 39.2 section.
+- **IAM deliberate-break demo for `npm run smoke`** acceptance
+  item 5 — 1-minute PowerShell sequence using `listMyEarnings`
+  (strip → smoke fails → re-bind → smoke passes). Closes
+  HOTFIX-POST-DEPLOY-SMOKE-SCRIPT's last acceptance item. Not
+  pilot-blocking.
+- **Test-suite pre-existing failures** — 4 `@react-native-firebase
+  /app` suite-load failures (openLegal, openSupport, openMapsForCoords,
+  uploadDeliveryProof) and ~27 RN-dependent suites that crashed on
+  parse pre-HOTFIX-JEST-PROJECTS-CONFIG. Post-projects-split, they
+  either run cleanly in the components project or are pinned with
+  explicit mocks. Surface, don't hide.
 
 ## How to update this file
 

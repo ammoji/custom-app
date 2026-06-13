@@ -15,6 +15,8 @@
     "set-delivery": "tsx scripts/set-delivery.ts",
     "revoke-extra-roles": "tsx scripts/revoke-extra-roles.ts",
     "backfill-menus": "tsx scripts/backfill-shop-menus.ts",
+    "backfill:products-status": "tsx scripts/backfill-products-status.ts",
+    "cleanup:catalog-price": "tsx scripts/cleanup-master-catalog-price-field.ts",
     "reset:test-data": "tsx scripts/reset-test-data.ts",
     "reset:pilot-data": "tsx scripts/reset-pilot-data.ts",
     "update-order": "tsx scripts/update-order.ts",

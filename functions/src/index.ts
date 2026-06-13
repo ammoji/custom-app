@@ -91,6 +91,20 @@ import {
   VOICE_ONBOARDING_SYSTEM_PROMPT,
   parseVoiceOnboardingResponse,
 } from './voiceOnboardingHelpers';
+// PR-NEXT-BUNDLE-K — DO NOT REMOVE. Catalog onboarding helpers.
+// Used by listMasterCatalogByCategory, commitShopMenuItem,
+// commitShopMenuItemsBulk, proposeMasterCatalogItem,
+// reviewPendingCatalogItem, listPendingCatalogItems.
+import {
+  buildCatalogPage,
+  buildShopMenuItemFromMasterProduct,
+  partitionBulkCommitItems,
+  summarizePendingItems,
+  validateCatalogReviewAction,
+  validateMasterCatalogProposal,
+  validatePrice,
+  type MasterProductDoc,
+} from './catalogHelpers';
 // PR 34 — DO NOT REMOVE. Cloud Speech-to-Text client. STT uses
 // Application Default Credentials (the function's runtime SA),
 // so there's no API key + no `defineSecret` like Anthropic.
@@ -11202,6 +11216,412 @@ export const listPartnerReviews = onCall<{
     });
 
     return { ok: true, reviews: docs, hasMore };
+  },
+);
+
+/**
+ * PR-NEXT-BUNDLE-K §B.1 — List approved master catalog items by category.
+ *
+ * Auth: shopOwner claim required.
+ * Reads `products/` filtered by status='approved' + category.
+ * Supports cursor pagination (after itemId) for large categories.
+ */
+export const listMasterCatalogByCategory = onCall<{
+  category: string;
+  cursor?: string | null;
+  pageSize?: number;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
+    const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
+    if (claims.shopOwner !== true && claims.admin !== true) {
+      throw new HttpsError('permission-denied', 'Shop owner or admin required');
+    }
+    const { category, cursor, pageSize } = request.data ?? {};
+    if (typeof category !== 'string' || category.trim().length === 0) {
+      throw new HttpsError('invalid-argument', 'category required');
+    }
+    const limit = typeof pageSize === 'number' && pageSize > 0
+      ? Math.min(pageSize, 100)
+      : 50;
+
+    // Fetch one extra to detect hasMore.
+    let q = db
+      .collection('products')
+      .where('status', '==', 'approved')
+      .where('category', '==', category.trim())
+      .orderBy('name', 'asc')
+      .limit(limit + 1);
+
+    if (typeof cursor === 'string' && cursor.trim().length > 0) {
+      const cursorSnap = await db.doc(`products/${cursor.trim()}`).get();
+      if (cursorSnap.exists) {
+        q = q.startAfter(cursorSnap) as typeof q;
+      }
+    }
+
+    const snap = await q.get();
+    const docs = snap.docs.map(d => ({ id: d.id, ...(d.data() as object) } as MasterProductDoc));
+    const page = buildCatalogPage(docs, limit);
+    return { ok: true, ...page };
+  },
+);
+
+/**
+ * PR-NEXT-BUNDLE-K §B.2 — Commit a single master catalog item into the
+ * shop's menu at the caller's price.
+ *
+ * Auth: shopOwner claim + shopId. Ownership verified via direct shop doc
+ * read (HOTFIX-RESPOND-OWNER pattern). Writes to
+ * `shops/{shopId}/menu/{productId}` and upserts onboardingState.
+ */
+export const commitShopMenuItem = onCall<{
+  productId: string;
+  price: number;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
+    const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
+    if (claims.shopOwner !== true) {
+      throw new HttpsError('permission-denied', 'Shop owner required');
+    }
+    const shopId =
+      typeof claims.shopId === 'string' && claims.shopId.length > 0
+        ? claims.shopId
+        : null;
+    if (!shopId) {
+      throw new HttpsError('failed-precondition', 'No shopId in claims');
+    }
+
+    const { productId, price } = request.data ?? {};
+    if (typeof productId !== 'string' || productId.trim().length === 0) {
+      throw new HttpsError('invalid-argument', 'productId required');
+    }
+    const priceResult = validatePrice(price);
+    if (!priceResult.ok) {
+      throw new HttpsError('invalid-argument', `price invalid: ${priceResult.code}`);
+    }
+
+    // Verify product exists and is approved.
+    const productSnap = await db.doc(`products/${productId.trim()}`).get();
+    if (!productSnap.exists) {
+      throw new HttpsError('not-found', 'Product not found');
+    }
+    const product = { id: productSnap.id, ...(productSnap.data() as object) } as MasterProductDoc;
+    if (product.status !== 'approved') {
+      throw new HttpsError('failed-precondition', 'Product is not approved');
+    }
+
+    const nowMs = Date.now();
+    const menuItem = buildShopMenuItemFromMasterProduct(product, shopId, price as number, nowMs);
+
+    // Upsert into shop menu (merge keeps existing stock/availability tweaks).
+    await db
+      .doc(`shops/${shopId}/menu/${productId.trim()}`)
+      .set(menuItem, { merge: true });
+
+    // Update onboarding state doc. Read once, then merge-write the
+    // derived counters so itemsAdded increments correctly.
+    const stateRef = db.doc(`shops/${shopId}/onboardingState/catalog`);
+    const stateSnap = await stateRef.get();
+    const prev = stateSnap.data() as Record<string, unknown> | undefined;
+    await stateRef.set(
+      {
+        lastCategoryViewed: product.category,
+        lastItemViewedInCategory: productId.trim(),
+        itemsAdded:
+          (typeof prev?.itemsAdded === 'number' ? prev.itemsAdded : 0) + 1,
+        updatedAt: nowMs,
+        startedAt: prev?.startedAt ?? nowMs,
+        categoriesCompleted: prev?.categoriesCompleted ?? [],
+      },
+      { merge: true },
+    );
+
+    return { ok: true, menuItemId: productId.trim() };
+  },
+);
+
+/**
+ * PR-NEXT-BUNDLE-K §B.3 — Bulk-commit up to 100 master catalog items
+ * into the shop's menu in a single Firestore batch.
+ *
+ * Auth: shopOwner claim + shopId. Input validation via
+ * `partitionBulkCommitItems`. Returns counts of written/skipped.
+ */
+export const commitShopMenuItemsBulk = onCall<{
+  items: Array<{ productId: string; price: number }>;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
+    const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
+    if (claims.shopOwner !== true) {
+      throw new HttpsError('permission-denied', 'Shop owner required');
+    }
+    const shopId =
+      typeof claims.shopId === 'string' && claims.shopId.length > 0
+        ? claims.shopId
+        : null;
+    if (!shopId) {
+      throw new HttpsError('failed-precondition', 'No shopId in claims');
+    }
+
+    const { items } = request.data ?? {};
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new HttpsError('invalid-argument', 'items array required');
+    }
+
+    const partition = partitionBulkCommitItems(items);
+    if (partition.valid.length === 0) {
+      return {
+        ok: true,
+        written: 0,
+        skipped: partition.skipped.length,
+        skippedItems: partition.skipped,
+        tooLarge: partition.tooLarge,
+      };
+    }
+
+    // Fetch product docs for valid items.
+    const productIds = partition.valid.map(v => v.productId);
+    const productSnaps = await Promise.all(
+      productIds.map(pid => db.doc(`products/${pid}`).get()),
+    );
+
+    const nowMs = Date.now();
+    const batch = db.batch();
+    let written = 0;
+    const additionalSkipped: Array<{ productId: string; price: number; reason: string }> = [];
+
+    for (let i = 0; i < partition.valid.length; i++) {
+      const { productId, price } = partition.valid[i];
+      const snap = productSnaps[i];
+      if (!snap.exists) {
+        additionalSkipped.push({ productId, price, reason: 'product_not_found' });
+        continue;
+      }
+      const product = { id: snap.id, ...(snap.data() as object) } as MasterProductDoc;
+      if (product.status !== 'approved') {
+        additionalSkipped.push({ productId, price, reason: 'product_not_approved' });
+        continue;
+      }
+      const menuItem = buildShopMenuItemFromMasterProduct(product, shopId, price, nowMs);
+      batch.set(
+        db.doc(`shops/${shopId}/menu/${productId}`),
+        menuItem,
+        { merge: true },
+      );
+      written++;
+    }
+
+    if (written > 0) {
+      await batch.commit();
+    }
+
+    // Upsert onboarding state.
+    if (written > 0) {
+      const stateRef = db.doc(`shops/${shopId}/onboardingState/catalog`);
+      const stateSnap = await stateRef.get();
+      const prev = stateSnap.data() as Record<string, unknown> | undefined;
+      await stateRef.set(
+        {
+          itemsAdded: ((typeof prev?.itemsAdded === 'number' ? prev.itemsAdded : 0) + written),
+          updatedAt: nowMs,
+          startedAt: prev?.startedAt ?? nowMs,
+          categoriesCompleted: prev?.categoriesCompleted ?? [],
+          lastCategoryViewed: prev?.lastCategoryViewed ?? null,
+          lastItemViewedInCategory: prev?.lastItemViewedInCategory ?? null,
+        },
+        { merge: true },
+      );
+    }
+
+    const allSkipped = [...partition.skipped, ...additionalSkipped];
+    return {
+      ok: true,
+      written,
+      skipped: allSkipped.length,
+      skippedItems: allSkipped,
+      tooLarge: partition.tooLarge,
+    };
+  },
+);
+
+/**
+ * PR-NEXT-BUNDLE-K §B.4 — Propose a new master catalog item.
+ *
+ * Auth: shopOwner claim. Writes a `products/` doc with
+ * `status: 'pending'` for admin review. Rate-limited: max 20
+ * pending proposals per shop (prevents spam).
+ */
+export const proposeMasterCatalogItem = onCall<{
+  name: string;
+  brand?: string | null;
+  category: string;
+  mrp: number;
+  packSizeValue: number;
+  packSizeUnit: string;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
+    const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
+    if (claims.shopOwner !== true) {
+      throw new HttpsError('permission-denied', 'Shop owner required');
+    }
+
+    const input = request.data ?? {};
+    const validation = validateMasterCatalogProposal(input);
+    if (!validation.ok) {
+      throw new HttpsError('invalid-argument', validation.code);
+    }
+
+    // Rate-limit: max 20 pending proposals per shop owner.
+    const existing = await db
+      .collection('products')
+      .where('status', '==', 'pending')
+      .where('proposedBy', '==', uid)
+      .limit(21)
+      .get();
+    if (existing.size >= 20) {
+      throw new HttpsError(
+        'resource-exhausted',
+        'Maximum 20 pending proposals per shop owner',
+      );
+    }
+
+    const nowMs = Date.now();
+    const { name, brand, category, mrp, packSizeValue, packSizeUnit } = input as {
+      name: string;
+      brand?: string | null;
+      category: string;
+      mrp: number;
+      packSizeValue: number;
+      packSizeUnit: string;
+    };
+    const newDocRef = db.collection('products').doc();
+    await newDocRef.set({
+      name: name.trim(),
+      brand: brand ? brand.trim() : null,
+      category,
+      mrp,
+      packSize: { value: packSizeValue, unit: packSizeUnit.trim() },
+      imageUrl: null,
+      status: 'pending',
+      proposedBy: uid,
+      proposedAt: nowMs,
+      reviewedAt: null,
+      reviewedBy: null,
+      rejectionReason: null,
+    });
+
+    return { ok: true, productId: newDocRef.id };
+  },
+);
+
+/**
+ * PR-NEXT-BUNDLE-K §B.5 — Admin review of a pending catalog item.
+ *
+ * Auth: admin claim required.
+ * Sets `status` to 'approved' or 'rejected' + stamps reviewedAt/By.
+ * If approved, the item immediately becomes queryable by shop owners.
+ */
+export const reviewPendingCatalogItem = onCall<{
+  productId: string;
+  action: 'approved' | 'rejected';
+  rejectionReason?: string;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
+    const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
+    if (claims.admin !== true) {
+      throw new HttpsError('permission-denied', 'Admin required');
+    }
+
+    const input = request.data ?? {};
+    const validation = validateCatalogReviewAction(input);
+    if (!validation.ok) {
+      throw new HttpsError('invalid-argument', validation.code);
+    }
+
+    const { productId, action, rejectionReason } = input as {
+      productId: string;
+      action: 'approved' | 'rejected';
+      rejectionReason?: string;
+    };
+
+    const productRef = db.doc(`products/${productId.trim()}`);
+    const snap = await productRef.get();
+    if (!snap.exists) {
+      throw new HttpsError('not-found', 'Product not found');
+    }
+    const current = snap.data() as Record<string, unknown>;
+    if (current.status !== 'pending') {
+      throw new HttpsError(
+        'failed-precondition',
+        `Product status is '${current.status}', expected 'pending'`,
+      );
+    }
+
+    const nowMs = Date.now();
+    const patch: Record<string, unknown> = {
+      status: action,
+      reviewedAt: nowMs,
+      reviewedBy: uid,
+    };
+    if (action === 'rejected' && rejectionReason) {
+      patch.rejectionReason = rejectionReason.trim().slice(0, 500);
+    }
+    await productRef.set(patch, { merge: true });
+
+    return { ok: true, productId: productId.trim(), action };
+  },
+);
+
+/**
+ * PR-NEXT-BUNDLE-K §G — Admin: list pending catalog items.
+ *
+ * Auth: admin claim required.
+ * Returns pending products ordered by proposedAt desc (oldest first
+ * for FIFO review). Optional `limit` param, max 50.
+ */
+export const listPendingCatalogItems = onCall<{ limit?: number }>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Sign in required');
+    const claims = (request.auth?.token ?? {}) as Record<string, unknown>;
+    if (claims.admin !== true) {
+      throw new HttpsError('permission-denied', 'Admin required');
+    }
+
+    const pageSize = typeof request.data?.limit === 'number'
+      ? Math.min(request.data.limit, 50)
+      : 50;
+
+    const snap = await db
+      .collection('products')
+      .where('status', '==', 'pending')
+      .orderBy('proposedAt', 'desc')
+      .limit(pageSize)
+      .get();
+
+    const docs = snap.docs.map(d => ({
+      id: d.id,
+      ...(d.data() as object),
+    })) as MasterProductDoc[];
+
+    const summary = summarizePendingItems(docs);
+    return { ok: true, items: docs, summary };
   },
 );
 

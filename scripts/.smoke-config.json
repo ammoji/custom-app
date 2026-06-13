@@ -9,6 +9,12 @@
     "listShopAttentionReviews",
     "listMyOrders",
     "listShopOrders",
-    "getPartnerPhotoUploadUrl"
+    "getPartnerPhotoUploadUrl",
+    "listMasterCatalogByCategory",
+    "commitShopMenuItem",
+    "commitShopMenuItemsBulk",
+    "proposeMasterCatalogItem",
+    "reviewPendingCatalogItem",
+    "listPendingCatalogItems"
   ]
 }

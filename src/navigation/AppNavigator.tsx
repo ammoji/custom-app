@@ -61,6 +61,12 @@ import ShopOrderDetailScreen from '../screens/shop/ShopOrderDetailScreen';
 import ShopCustomersScreen from '../screens/shop/ShopCustomersScreen';
 import ShopOwnerDashboardScreen from '../screens/shop/ShopOwnerDashboardScreen';
 import ShopSettingsScreen from '../screens/shop/ShopSettingsScreen';
+// PR-NEXT-BUNDLE-K — DO NOT REMOVE. Catalog onboarding screens.
+import BuildCatalogScreen from '../screens/shop/catalog/BuildCatalogScreen';
+import CategoryBrowseScreen from '../screens/shop/catalog/CategoryBrowseScreen';
+import CatalogReviewScreen from '../screens/shop/catalog/CatalogReviewScreen';
+import ProposeCustomItemScreen from '../screens/shop/catalog/ProposeCustomItemScreen';
+import PendingCatalogQueueScreen from '../screens/admin/PendingCatalogQueueScreen';
 
 export type RootStackParamList = {
   Home: undefined;
@@ -171,6 +177,16 @@ export type RootStackParamList = {
   // HOTFIX-RESPOND-OWNER-AND-CARD-NAV §F — DO NOT REMOVE. Dedicated
   // flagged_low attention queue; role selects which callable + OrderDetail.
   AttentionQueue: { role: 'delivery' | 'shop' };
+  // PR-NEXT-BUNDLE-K — Catalog onboarding routes.
+  BuildCatalog: undefined;
+  CategoryBrowse: {
+    categoryId: string;
+    existingDrafts?: import('../types').PriceDraft[];
+    onDraftsUpdated?: (drafts: import('../types').PriceDraft[]) => void;
+  };
+  CatalogReview: { drafts: import('../types').PriceDraft[] };
+  ProposeCustomItem: undefined;
+  PendingCatalogQueue: undefined;
 };
 
 export type ShopRegistrationPrefill = {
@@ -279,6 +295,12 @@ export default function AppNavigator() {
       <Stack.Screen name="RatingAmendment" component={RatingAmendmentScreen} />
       <Stack.Screen name="AttentionQueue" component={AttentionQueueScreen} />
       <Stack.Screen name="PartnerReviews" component={PartnerReviewsScreen} />
+      {/* PR-NEXT-BUNDLE-K — DO NOT REMOVE. Catalog onboarding. */}
+      <Stack.Screen name="BuildCatalog" component={BuildCatalogScreen} />
+      <Stack.Screen name="CategoryBrowse" component={CategoryBrowseScreen} />
+      <Stack.Screen name="CatalogReview" component={CatalogReviewScreen} />
+      <Stack.Screen name="ProposeCustomItem" component={ProposeCustomItemScreen} />
+      <Stack.Screen name="PendingCatalogQueue" component={PendingCatalogQueueScreen} />
     </Stack.Navigator>
   );
 }

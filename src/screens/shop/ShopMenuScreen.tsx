@@ -494,6 +494,16 @@ export default function ShopMenuScreen() {
               owner sees when bulk-adding items; the manual form
               path stays for fixups + one-offs. Disabled in selectMode
               for consistency with the other add path. */}
+          {/* PR-NEXT-BUNDLE-K §F — Build catalog onboarding hub.
+              Guides the owner through pricing master-catalog items
+              by category with swipe + voice input. Sits above the AI
+              scan CTA as the primary "fill your menu fast" path. */}
+          <Button
+            title="🗂 Build catalog (guided)"
+            onPress={() => nav.navigate('BuildCatalog')}
+            disabled={selectMode}
+          />
+          <View style={{ height: spacing.sm }} />
           <Button
             title="📸 Scan rate-list (AI)"
             onPress={() => nav.navigate('ScanMenu')}
