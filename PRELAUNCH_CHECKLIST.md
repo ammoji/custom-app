@@ -1179,6 +1179,54 @@ callables piecemeal.
       auto-restart, incurring a ~5–15s gap between captures. If first-shop retest
       finds the gap intolerable, add `@react-native-voice/voice` for real
       streaming in a separate PR. [HOTFIX-K1 §I — out of scope today]
+- [x] **Catalog PDF + paper workflow (Bundle L).** Closes the "price on
+      paper, not on the phone" gap for older / busy shopkeepers. Pure helpers:
+      `functions/src/catalogPdfHelpers.ts` (`buildCatalogPdfBuffer` via pdfkit +
+      qrcode, `groupItemsByCategory`, `formatItemRow`, `buildQrPayload`,
+      `resolveCategoryIdsForPdf`) + `parseCatalogPagePrices` /
+      `normalizeDevanagariDigits` + `CATALOG_PAGE_EXTRACTION_SYSTEM_PROMPT` in
+      `menuExtractionHelpers.ts` + `mergeScannedPrices` in
+      `src/utils/catalogScanHelpers.ts`. Two new callables in `index.ts`:
+      `generateCatalogPdf` (builds the PDF, uploads to
+      `shops/{shopId}/catalog-pdfs/{stamp}.pdf` with a Firebase download token,
+      5/day quota on `aiQuotas.catalogPdf`, audit log) and
+      `extractCatalogPagePrices` (Claude vision OCR of one filled page → validated
+      `{productId, sellPrice}` pairs, 30/day quota on
+      `aiQuotas.catalogPageExtraction`, reuses the `menuExtraction` kill-switch).
+      Client: `ScanCatalogPagesScreen` (multi-photo pick → resize → sequential
+      per-page OCR with 500ms throttle → `mergeScannedPrices` dedup → build
+      `PriceDraft[]` → `navigate('CatalogReview')`), `BuildCatalogScreen` gains
+      "Print blank catalog" (BottomSheet scope chooser → `Linking.openURL(pdf)` +
+      Toast) and "Scan filled catalog" CTAs, `ScanCatalogPages` route registered.
+      +34 tests (`catalogPdfHelpers`, `catalogPagePrices`, `catalogScanHelpers`).
+      [Bundle L]
+- [ ] **Bundle L deploy + IAM verify** — deploy order (one `--only` per command,
+      run in PowerShell, never auto-run): `firebase deploy --only functions:generateCatalogPdf`
+      then `firebase deploy --only functions:extractCatalogPagePrices`. Then verify
+      `allUsers` invoker binding on BOTH callables via
+      `gcloud run services get-iam-policy generatecatalogpdf --region=asia-south1`
+      and `...extractcatalogpageprices...`. Run
+      `npm run smoke -- --include=generateCatalogPdf,extractCatalogPagePrices`.
+      Then client OTA: `eas update --branch production`. NO rules / indexes /
+      schema changes. `ANTHROPIC_API_KEY` secret already mounted (reused from
+      `extractMenuFromImage`). [Bundle L §H]
+- [ ] **Client-side QR scan (Bundle L follow-up).** The PDF embeds a per-page QR
+      (shopId/page/category/productIds) but the client does NOT scan it on-device
+      — `expo-camera` is not installed and adding it forces a native rebuild
+      (breaks OTA). Today the server identifies pages from the printed Item-ID
+      lines + validates extracted IDs against the approved catalog. If a pilot
+      shop photographs pages out of order and accuracy suffers, add `expo-camera`
+      `scanFromURLAsync` in a dedicated build-bump PR and pass `qrPayload` to the
+      callable (already supported server-side). [Bundle L §D follow-up]
+- [ ] **Storage lifecycle for catalog PDFs (Bundle L follow-up).** Generated PDFs
+      accumulate under `shops/{shopId}/catalog-pdfs/`. The 5/day quota caps growth
+      but there is no TTL cleanup. Add a scheduled prune (e.g. delete PDFs older
+      than 30 days) before scaling past the pilot. [Bundle L follow-up / post-MVP]
+- [ ] **Devin §J Demo 3 (quota) — not unit-tested.** The repo has no callable /
+      emulator harness, so the per-shop PDF quota gate (`resource-exhausted` at the
+      5/day cap) is NOT covered by a unit test. It uses the identical atomic
+      read-then-increment transaction pattern as the shipped `extractMenuFromImage`
+      counter; verify on the post-deploy `npm run smoke` run instead. [Bundle L §J]
 
 ## ðŸ“ Compliance & Distribution
 

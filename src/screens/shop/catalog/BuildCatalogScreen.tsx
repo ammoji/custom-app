@@ -15,6 +15,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
+  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -25,6 +27,8 @@ import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { doc, onSnapshot } from 'firebase/firestore';
 
+import BottomSheet from '../../../components/common/BottomSheet';
+import Toast from '../../../components/common/Toast';
 import { CATEGORIES } from '../../../constants/categories';
 import { colors, radii, spacing, typography } from '../../../constants/theme';
 import { db } from '../../../services/firebase';
@@ -68,6 +72,13 @@ export default function BuildCatalogScreen() {
   >(new Map());
   const [loading, setLoading] = useState(true);
   const [shopId, setShopId] = useState<string | null>(null);
+  // PR-NEXT-BUNDLE-L §C — paper-workflow CTAs (print blank catalog +
+  // scan filled pages).
+  const [printSheetVisible, setPrintSheetVisible] = useState(false);
+  const [generatingPdf, setGeneratingPdf] = useState(false);
+  const [pdfProgress, setPdfProgress] = useState('');
+  const [toastVisible, setToastVisible] = useState(false);
+  const [toastMsg, setToastMsg] = useState('');
 
   // Load shopId from auth claims (available via RNFB custom claims)
   // PR-NEXT-BUNDLE-K — DO NOT REMOVE. Dynamic import avoids web breakage.
@@ -189,6 +200,38 @@ export default function BuildCatalogScreen() {
     navigation.navigate('ProposeCustomItem');
   }
 
+  // PR-NEXT-BUNDLE-L §C — generate the printable catalog PDF, then
+  // hand it to the OS via Linking so the owner can print/save it.
+  const handleGeneratePdf = async (scope: 'all' | 'opened') => {
+    setPrintSheetVisible(false);
+    setGeneratingPdf(true);
+    setPdfProgress('Pulling product list…');
+    try {
+      const categoryIds =
+        scope === 'opened' ? onboardingState?.categoriesCompleted ?? [] : [];
+      setPdfProgress('Rendering pages…');
+      const res = await orderService.generateCatalogPdf({ categoryIds });
+      setPdfProgress('Uploading…');
+      if (res.url) {
+        await Linking.openURL(res.url);
+        setToastMsg(
+          "PDF saved. When you've filled it out, tap 'Scan filled catalog' to upload.",
+        );
+        setToastVisible(true);
+      } else {
+        Alert.alert('Could not generate PDF', 'Please try again.');
+      }
+    } catch (e: unknown) {
+      Alert.alert(
+        'Could not generate PDF',
+        e instanceof Error ? e.message : 'Please try again.',
+      );
+    } finally {
+      setGeneratingPdf(false);
+      setPdfProgress('');
+    }
+  };
+
   if (loading) {
     return (
       <View style={styles.centered}>
@@ -198,6 +241,7 @@ export default function BuildCatalogScreen() {
   }
 
   return (
+    <>
     <ScrollView
       style={styles.root}
       contentContainerStyle={styles.content}
@@ -259,6 +303,37 @@ export default function BuildCatalogScreen() {
         })}
       </View>
 
+      {/* PR-NEXT-BUNDLE-L §C — paper workflow */}
+      <View style={styles.paperSection}>
+        <Text style={styles.proposeTitle}>Prefer paper?</Text>
+        <Text style={styles.proposeBody}>
+          Print a blank catalog, fill in your prices by hand at leisure, then
+          snap a photo of each page to upload.
+        </Text>
+        <Pressable
+          style={[styles.paperBtn, generatingPdf && styles.paperBtnBusy]}
+          onPress={() => setPrintSheetVisible(true)}
+          disabled={generatingPdf}
+        >
+          {generatingPdf ? (
+            <View style={styles.paperBtnBusyRow}>
+              <ActivityIndicator size="small" color={colors.primary} />
+              <Text style={styles.paperBtnText}>
+                {pdfProgress || 'Generating…'}
+              </Text>
+            </View>
+          ) : (
+            <Text style={styles.paperBtnText}>📄 Print blank catalog</Text>
+          )}
+        </Pressable>
+        <Pressable
+          style={styles.paperBtnSecondary}
+          onPress={() => navigation.navigate('ScanCatalogPages')}
+        >
+          <Text style={styles.paperBtnSecondaryText}>📷 Scan filled catalog</Text>
+        </Pressable>
+      </View>
+
       {/* Propose custom item */}
       <View style={styles.proposeSection}>
         <Text style={styles.proposeTitle}>{'Can\u2019t find an item?'}</Text>
@@ -271,6 +346,46 @@ export default function BuildCatalogScreen() {
         </Pressable>
       </View>
     </ScrollView>
+
+    {/* PR-NEXT-BUNDLE-L §C — print scope chooser */}
+    <BottomSheet
+      visible={printSheetVisible}
+      onClose={() => setPrintSheetVisible(false)}
+      keyboardAvoid={false}
+    >
+      <Text style={styles.sheetTitle}>Generate a printable catalog?</Text>
+      <Text style={styles.sheetBody}>
+        We&apos;ll build a PDF with one page per category. Print it, write your
+        prices in the boxes, then scan it back in.
+      </Text>
+      <Pressable
+        style={styles.sheetPrimaryBtn}
+        onPress={() => handleGeneratePdf('all')}
+      >
+        <Text style={styles.sheetPrimaryBtnText}>All categories</Text>
+      </Pressable>
+      <Pressable
+        style={[
+          styles.sheetSecondaryBtn,
+          (onboardingState?.categoriesCompleted?.length ?? 0) === 0 &&
+            styles.sheetBtnDisabled,
+        ]}
+        disabled={(onboardingState?.categoriesCompleted?.length ?? 0) === 0}
+        onPress={() => handleGeneratePdf('opened')}
+      >
+        <Text style={styles.sheetSecondaryBtnText}>
+          Only categories I&apos;ve worked on
+        </Text>
+      </Pressable>
+    </BottomSheet>
+
+    <Toast
+      visible={toastVisible}
+      message={toastMsg}
+      onDismiss={() => setToastVisible(false)}
+      durationMs={5000}
+    />
+    </>
   );
 }
 
@@ -373,4 +488,58 @@ const styles = StyleSheet.create({
     marginTop: spacing.xs,
   },
   proposeBtnText: { ...typography.bodyBold, color: colors.primary },
+  // PR-NEXT-BUNDLE-L §C — paper workflow CTAs.
+  paperSection: {
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.lg,
+    padding: spacing.lg,
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    gap: spacing.sm,
+  },
+  paperBtn: {
+    backgroundColor: colors.bg,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    alignSelf: 'flex-start',
+    marginTop: spacing.xs,
+  },
+  paperBtnBusy: { opacity: 0.7 },
+  paperBtnBusyRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  paperBtnText: { ...typography.bodyBold, color: colors.primary },
+  paperBtnSecondary: {
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    alignSelf: 'flex-start',
+  },
+  paperBtnSecondaryText: { ...typography.bodyBold, color: colors.info },
+  sheetTitle: { ...typography.h3, marginBottom: spacing.sm },
+  sheetBody: {
+    ...typography.body,
+    color: colors.textSecondary,
+    marginBottom: spacing.lg,
+  },
+  sheetPrimaryBtn: {
+    backgroundColor: colors.primary,
+    borderRadius: radii.md,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+    marginBottom: spacing.sm,
+  },
+  sheetPrimaryBtnText: { ...typography.bodyBold, color: colors.bg, fontSize: 16 },
+  sheetSecondaryBtn: {
+    backgroundColor: colors.bg,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+  },
+  sheetSecondaryBtnText: { ...typography.bodyBold, color: colors.textPrimary },
+  sheetBtnDisabled: { opacity: 0.4 },
 });

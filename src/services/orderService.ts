@@ -2381,4 +2381,59 @@ export const orderService = {
     const d = result.data as any;
     return { items: d?.items ?? [], summary: d?.summary ?? { total: 0, byCategory: {}, oldestProposedAt: null } };
   },
+
+  // PR-NEXT-BUNDLE-L §A — DO NOT REMOVE. Generate a printable catalog
+  // PDF (paper workflow). Empty `categoryIds` = all 10 categories.
+  async generateCatalogPdf(payload: {
+    shopId?: string;
+    categoryIds?: string[];
+  }): Promise<{ url: string; pageCount: number; itemCount: number }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('generateCatalogPdf');
+      const result = await fn(payload);
+      const d = result.data as any;
+      return { url: d?.url ?? '', pageCount: d?.pageCount ?? 0, itemCount: d?.itemCount ?? 0 };
+    }
+    const fn = httpsCallable(functions, 'generateCatalogPdf');
+    const result = await fn(payload);
+    const d = result.data as any;
+    return { url: d?.url ?? '', pageCount: d?.pageCount ?? 0, itemCount: d?.itemCount ?? 0 };
+  },
+
+  // PR-NEXT-BUNDLE-L §B — DO NOT REMOVE. OCR a filled catalog page
+  // photo into {productId, sellPrice} pairs (paper workflow scan).
+  async extractCatalogPagePrices(payload: {
+    pageImageBase64: string;
+    imageMediaType?: 'image/jpeg' | 'image/png' | 'image/webp';
+    qrPayload?: {
+      shopId: string;
+      pageNumber: number;
+      categoryId: string;
+      productIds: string[];
+    } | null;
+  }): Promise<{
+    prices: { productId: string; sellPrice: number; confidence: 'high' | 'medium' | 'low' }[];
+    droppedCount: number;
+    pageCategory: string;
+  }> {
+    const empty = { prices: [], droppedCount: 0, pageCategory: '' };
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('extractCatalogPagePrices');
+      const result = await fn(payload);
+      const d = result.data as any;
+      return {
+        prices: d?.prices ?? empty.prices,
+        droppedCount: d?.droppedCount ?? 0,
+        pageCategory: d?.pageCategory ?? '',
+      };
+    }
+    const fn = httpsCallable(functions, 'extractCatalogPagePrices');
+    const result = await fn(payload);
+    const d = result.data as any;
+    return {
+      prices: d?.prices ?? empty.prices,
+      droppedCount: d?.droppedCount ?? 0,
+      pageCategory: d?.pageCategory ?? '',
+    };
+  },
 };

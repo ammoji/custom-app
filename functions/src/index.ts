@@ -82,7 +82,19 @@ import {
   MENU_EXTRACTION_SYSTEM_PROMPT,
   MENU_EXTRACTION_USER_PROMPT,
   parseExtractionResponse,
+  // PR-NEXT-BUNDLE-L §B — DO NOT REMOVE. Catalog-page (paper workflow)
+  // OCR prompt + parser used by `extractCatalogPagePrices`.
+  CATALOG_PAGE_EXTRACTION_SYSTEM_PROMPT,
+  CATALOG_PAGE_EXTRACTION_USER_PROMPT,
+  parseCatalogPagePrices,
 } from './menuExtractionHelpers';
+// PR-NEXT-BUNDLE-L §A — DO NOT REMOVE. Pure PDF builder for the
+// printable catalog (paper workflow). Used by `generateCatalogPdf`.
+import {
+  buildCatalogPdfBuffer,
+  resolveCategoryIdsForPdf,
+  type CatalogPdfItem,
+} from './catalogPdfHelpers';
 // PR 34 — DO NOT REMOVE. Used by `transcribeShopOnboardingAudio`
 // callable for the Hindi/English voice → 7 onboarding fields
 // pipeline. Auto-formatter risk per code-discipline (PR 32 +
@@ -9459,6 +9471,388 @@ export const addExtractedMenuItems = onCall<{
       added: added.length,
       skipped,
       menuItemIds: added,
+    };
+  },
+);
+
+// ────────────────────────────────────────────────────────────
+// PR-NEXT-BUNDLE-L — PDF download + paper workflow
+// ────────────────────────────────────────────────────────────
+//
+// `generateCatalogPdf` — builds a printable PDF of the master
+// catalog (one page per category) so a shop owner can price items
+// on paper instead of on-phone, then scan the filled pages back via
+// `extractCatalogPagePrices`. Both feed the existing Bundle K
+// CatalogReviewScreen → commitShopMenuItemsBulk. Pure helpers live
+// in `catalogPdfHelpers.ts` + `menuExtractionHelpers.ts`.
+
+const CATALOG_PDF_DAILY_QUOTA = 5;
+// One OCR call PER scanned page; a full 10-category scan = 10 calls,
+// so the daily cap is set well above a single full pass (≈3 passes).
+const CATALOG_PAGE_EXTRACTION_DAILY_QUOTA = 30;
+
+export const generateCatalogPdf = onCall<{
+  shopId?: string;
+  categoryIds?: string[];
+}>(
+  {
+    cors: true,
+    enforceAppCheck: false,
+    // pdfkit + qrcode are pure JS but a 10-page PDF + base64 buffer
+    // wants headroom; mirror the extraction callable's allocation.
+    timeoutSeconds: 120,
+    memory: '512MiB',
+  },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+    const isAdmin = auth.token?.admin === true;
+    const isShopOwner = auth.token?.shopOwner === true;
+    if (!isAdmin && !isShopOwner) {
+      throw new HttpsError('permission-denied', 'Shop owner role required');
+    }
+
+    const data = request.data ?? ({} as Record<string, unknown>);
+    const claimShopId = auth.token.shopId as string | undefined;
+    // Shop owners are pinned to their own shop; only admins may
+    // target an arbitrary shopId via the payload.
+    let shopId: string | undefined;
+    if (isAdmin) {
+      shopId = (data.shopId as string | undefined) ?? claimShopId;
+    } else {
+      shopId = claimShopId;
+      if (
+        typeof data.shopId === 'string' &&
+        data.shopId.length > 0 &&
+        data.shopId !== claimShopId
+      ) {
+        throw new HttpsError(
+          'permission-denied',
+          'You can only print a catalog for your own shop.',
+        );
+      }
+    }
+    if (!shopId) {
+      throw new HttpsError('failed-precondition', 'No shopId on your account');
+    }
+
+    const requestedCategories = Array.isArray(data.categoryIds)
+      ? (data.categoryIds as unknown[]).filter(
+          (c): c is string => typeof c === 'string',
+        )
+      : [];
+    const categoryIds = resolveCategoryIdsForPdf(requestedCategories);
+    const categorySet = new Set(categoryIds);
+
+    // Ownership + shop name.
+    const shopSnap = await db.doc(`shops/${shopId}`).get();
+    if (!shopSnap.exists) {
+      throw new HttpsError('not-found', 'Shop not found');
+    }
+    const shopData = shopSnap.data() ?? {};
+    const shopName = (shopData.name as string | undefined) ?? 'Your shop';
+
+    // Per-shop daily quota — atomic increment in a transaction so two
+    // concurrent calls cannot both pass the gate (same pattern as
+    // extractMenuFromImage). PDFs are cheap to generate but accumulate
+    // in Storage, so we cap regardless.
+    const today = new Date().toISOString().slice(0, 10);
+    const quotaRef = db.doc(`aiQuotas/${auth.uid}_${today}`);
+    const usedToday = await db.runTransaction(async tx => {
+      const snap = await tx.get(quotaRef);
+      const current = (snap.data()?.catalogPdf as number | undefined) ?? 0;
+      if (current >= CATALOG_PDF_DAILY_QUOTA) return -1;
+      tx.set(
+        quotaRef,
+        {
+          catalogPdf: current + 1,
+          updatedAt: FieldValue.serverTimestamp(),
+          uid: auth.uid,
+        },
+        { merge: true },
+      );
+      return current + 1;
+    });
+    if (usedToday < 0) {
+      throw new HttpsError(
+        'resource-exhausted',
+        `Daily limit reached (${CATALOG_PDF_DAILY_QUOTA} PDFs). Try again tomorrow.`,
+      );
+    }
+
+    // Read approved master catalog, filter to requested categories in
+    // memory (no composite index needed — master catalog is small).
+    const productsSnap = await db
+      .collection('products')
+      .where('status', '==', 'approved')
+      .get();
+    const items: CatalogPdfItem[] = [];
+    productsSnap.docs.forEach(d => {
+      const p = d.data() as {
+        name?: string;
+        brand?: string | null;
+        category?: string;
+        packSize?: { value?: number; unit?: string };
+        mrp?: number;
+      };
+      if (!p.category || !categorySet.has(p.category)) return;
+      if (typeof p.name !== 'string' || typeof p.mrp !== 'number') return;
+      const packLabel = p.packSize
+        ? `${p.packSize.value ?? ''}${p.packSize.unit ? ` ${p.packSize.unit}` : ''}`.trim()
+        : '';
+      items.push({
+        id: d.id,
+        name: p.name,
+        brand: p.brand ?? null,
+        packLabel,
+        mrp: p.mrp,
+        category: p.category,
+      });
+    });
+
+    if (items.length === 0) {
+      throw new HttpsError(
+        'invalid-argument',
+        'No approved catalog items found for the selected categories.',
+      );
+    }
+
+    // Build the PDF buffer (pure helper; throws on empty input).
+    let pdfBuffer: Buffer;
+    try {
+      pdfBuffer = await buildCatalogPdfBuffer(
+        items,
+        shopName,
+        new Date(),
+        shopId,
+      );
+    } catch (e) {
+      console.error('[generateCatalogPdf] PDF build failed:', e);
+      throw new HttpsError('internal', 'Could not generate the catalog PDF.');
+    }
+
+    const pageCount = new Set(items.map(i => i.category)).size;
+
+    // Upload to Storage with a download token so the returned URL
+    // resolves without a signed-URL expiry (same token pattern as
+    // shop storefront photos). Object name avoids ':' for portability.
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const storagePath = `shops/${shopId}/catalog-pdfs/${stamp}.pdf`;
+    const downloadToken = crypto.randomUUID();
+    const bucket = getStorage().bucket();
+    const file = bucket.file(storagePath);
+    try {
+      await file.save(pdfBuffer, {
+        contentType: 'application/pdf',
+        metadata: {
+          contentType: 'application/pdf',
+          metadata: { firebaseStorageDownloadTokens: downloadToken },
+        },
+      });
+    } catch (e) {
+      console.error('[generateCatalogPdf] Storage upload failed:', e);
+      throw new HttpsError('internal', 'Could not save the catalog PDF.');
+    }
+    const url = buildFirebaseStorageDownloadUrl(
+      bucket.name,
+      storagePath,
+      downloadToken,
+    );
+
+    // Audit log (non-fatal — same fire-and-forget pattern as
+    // extractMenuFromImage).
+    db.collection('aiAuditLog')
+      .add({
+        uid: auth.uid,
+        shopId,
+        feature: 'catalogPdf',
+        itemCount: items.length,
+        pageCount,
+        categoryIds,
+        timestamp: FieldValue.serverTimestamp(),
+      })
+      .catch(e => console.warn('[generateCatalogPdf] audit log failed:', e));
+
+    return {
+      ok: true as const,
+      url,
+      pageCount,
+      itemCount: items.length,
+      usedTodayCount: usedToday,
+      dailyQuota: CATALOG_PDF_DAILY_QUOTA,
+    };
+  },
+);
+
+export const extractCatalogPagePrices = onCall<{
+  shopId?: string;
+  pageImageBase64: string;
+  imageMediaType?: 'image/jpeg' | 'image/png' | 'image/webp';
+  qrPayload?: {
+    shopId: string;
+    pageNumber: number;
+    categoryId: string;
+    productIds: string[];
+  } | null;
+}>(
+  {
+    cors: true,
+    enforceAppCheck: false,
+    secrets: [ANTHROPIC_API_KEY],
+    timeoutSeconds: 120,
+    memory: '512MiB',
+  },
+  async request => {
+    const auth = request.auth;
+    if (!auth) throw new HttpsError('unauthenticated', 'Sign in required');
+    if (auth.token?.shopOwner !== true && auth.token?.admin !== true) {
+      throw new HttpsError('permission-denied', 'Shop owner role required');
+    }
+    const shopId = auth.token.shopId as string | undefined;
+    if (!shopId && auth.token?.admin !== true) {
+      throw new HttpsError('failed-precondition', 'No shopId on your account');
+    }
+
+    // Reuse the menuExtraction kill switch — same OCR family.
+    const killSwitchSnap = await db.doc('aiFeatures/menuExtraction').get();
+    const enabled = killSwitchSnap.exists
+      ? killSwitchSnap.data()?.enabled !== false
+      : true;
+    if (!enabled) {
+      throw new HttpsError(
+        'failed-precondition',
+        'Catalog scanning is temporarily disabled. Try again later.',
+      );
+    }
+
+    const data = request.data ?? ({} as Record<string, unknown>);
+    const pageImageBase64 = data.pageImageBase64;
+    const imageMediaType = data.imageMediaType as
+      | 'image/jpeg'
+      | 'image/png'
+      | 'image/webp'
+      | undefined;
+    if (typeof pageImageBase64 !== 'string' || pageImageBase64.length === 0) {
+      throw new HttpsError('invalid-argument', 'pageImageBase64 required');
+    }
+    if (pageImageBase64.length > MAX_IMAGE_BYTES) {
+      throw new HttpsError(
+        'invalid-argument',
+        `Image too large (${Math.round(pageImageBase64.length / 1024)}KB). Try a smaller photo or crop tighter.`,
+      );
+    }
+
+    // Allowed product IDs: from the QR payload when the client could
+    // read it, else fall back to ALL approved products (the printed
+    // Item-ID lines let Claude identify the page). Validating against
+    // this set means a hallucinated/wrong-page ID can never write.
+    const qr = data.qrPayload as
+      | { categoryId?: string; productIds?: unknown }
+      | null
+      | undefined;
+    let allowedProductIds: string[] = [];
+    let pageCategory = '';
+    if (
+      qr &&
+      Array.isArray(qr.productIds) &&
+      qr.productIds.every(p => typeof p === 'string') &&
+      qr.productIds.length > 0
+    ) {
+      allowedProductIds = qr.productIds as string[];
+      pageCategory = typeof qr.categoryId === 'string' ? qr.categoryId : '';
+    } else {
+      const approvedSnap = await db
+        .collection('products')
+        .where('status', '==', 'approved')
+        .get();
+      allowedProductIds = approvedSnap.docs.map(d => d.id);
+    }
+
+    // Per-shop daily quota — atomic increment in a transaction.
+    const today = new Date().toISOString().slice(0, 10);
+    const quotaRef = db.doc(`aiQuotas/${auth.uid}_${today}`);
+    const usedToday = await db.runTransaction(async tx => {
+      const snap = await tx.get(quotaRef);
+      const current =
+        (snap.data()?.catalogPageExtraction as number | undefined) ?? 0;
+      if (current >= CATALOG_PAGE_EXTRACTION_DAILY_QUOTA) return -1;
+      tx.set(
+        quotaRef,
+        {
+          catalogPageExtraction: current + 1,
+          updatedAt: FieldValue.serverTimestamp(),
+          uid: auth.uid,
+        },
+        { merge: true },
+      );
+      return current + 1;
+    });
+    if (usedToday < 0) {
+      throw new HttpsError(
+        'resource-exhausted',
+        `Daily limit reached (${CATALOG_PAGE_EXTRACTION_DAILY_QUOTA} page scans). Try again tomorrow.`,
+      );
+    }
+
+    // Call Claude vision with the catalog-page prompt.
+    let claudeResult;
+    try {
+      claudeResult = await runClaudeVision({
+        systemPrompt: CATALOG_PAGE_EXTRACTION_SYSTEM_PROMPT,
+        userText: CATALOG_PAGE_EXTRACTION_USER_PROMPT,
+        imageBase64: pageImageBase64,
+        imageMediaType: imageMediaType ?? 'image/jpeg',
+        maxTokens: 4000,
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.error('[extractCatalogPagePrices] Claude call failed:', message);
+      throw new HttpsError(
+        'internal',
+        'Could not read the page. Try retaking with better lighting or angle.',
+      );
+    }
+
+    const parsed = parseCatalogPagePrices(claudeResult.text, allowedProductIds);
+    if (!parsed.ok) {
+      console.warn(
+        `[extractCatalogPagePrices] parse failed for shop ${shopId}: ${parsed.reason}`,
+      );
+      throw new HttpsError(
+        'internal',
+        'AI returned an unexpected response. Try again or retake the photo.',
+      );
+    }
+
+    const costInr = estimateCostInr(
+      claudeResult.inputTokens,
+      claudeResult.outputTokens,
+      claudeResult.model,
+    );
+    db.collection('aiAuditLog')
+      .add({
+        uid: auth.uid,
+        shopId: shopId ?? null,
+        feature: 'catalogPageExtraction',
+        model: claudeResult.model,
+        inputTokens: claudeResult.inputTokens,
+        outputTokens: claudeResult.outputTokens,
+        costInr,
+        pricesExtracted: parsed.prices.length,
+        droppedCount: parsed.droppedCount,
+        timestamp: FieldValue.serverTimestamp(),
+      })
+      .catch(e =>
+        console.warn('[extractCatalogPagePrices] audit log failed:', e),
+      );
+
+    return {
+      ok: true as const,
+      prices: parsed.prices,
+      droppedCount: parsed.droppedCount,
+      pageCategory,
+      usedTodayCount: usedToday,
+      dailyQuota: CATALOG_PAGE_EXTRACTION_DAILY_QUOTA,
     };
   },
 );

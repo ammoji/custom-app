@@ -55,6 +55,9 @@ import AddCustomMenuItemScreen from '../screens/shop/AddCustomMenuItemScreen';
 // via the "📸 Scan rate-list (AI)" CTA. Shop-owner only; the
 // callable enforces the shopOwner claim server-side.
 import ScanMenuScreen from '../screens/shop/ScanMenuScreen';
+// PR-NEXT-BUNDLE-L — DO NOT REMOVE. Paper-workflow scan screen
+// (photograph filled catalog pages → OCR → CatalogReview).
+import ScanCatalogPagesScreen from '../screens/shop/ScanCatalogPagesScreen';
 import ShopMenuItemEditScreen from '../screens/shop/ShopMenuItemEditScreen';
 import ShopMenuScreen from '../screens/shop/ShopMenuScreen';
 import ShopOrderDetailScreen from '../screens/shop/ShopOrderDetailScreen';
@@ -126,6 +129,8 @@ export type RootStackParamList = {
   AddCustomMenuItem: undefined;
   // PR 32 — AI photo-to-catalog wizard.
   ScanMenu: undefined;
+  // PR-NEXT-BUNDLE-L — paper-workflow: scan filled catalog pages.
+  ScanCatalogPages: undefined;
   // PR 5: shop owner self-service for deliveryFee + minOrder.
   // PR 5 hotfix: optional shopId param lets admin target any shop.
   // Without param (shop owner path): server uses claim's shopId.
@@ -277,6 +282,10 @@ export default function AppNavigator() {
         component={AddCustomMenuItemScreen}
       />
       <Stack.Screen name="ScanMenu" component={ScanMenuScreen} />
+      <Stack.Screen
+        name="ScanCatalogPages"
+        component={ScanCatalogPagesScreen}
+      />
       <Stack.Screen name="ShopCustomers" component={ShopCustomersScreen} />
       <Stack.Screen
         name="DeliveryDashboard"

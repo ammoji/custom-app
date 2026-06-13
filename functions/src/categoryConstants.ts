@@ -35,6 +35,37 @@ export const VALID_CATEGORIES = new Set<string>([
 ]);
 
 /**
+ * PR-NEXT-BUNDLE-L — DO NOT REMOVE. Ordered category list + human
+ * labels for the printable catalog PDF (`catalogPdfHelpers.ts`).
+ * The server has no equivalent of the client's `CATEGORIES` array,
+ * and the PDF needs (a) a deterministic page order and (b) a
+ * readable header per page ("CATEGORY: Atta, Rice & Dal").
+ *
+ * MUST stay in sync with `CATEGORIES` in `src/constants/categories.ts`
+ * (same source-of-truth caveat as `VALID_CATEGORIES` above). The
+ * keys MUST exactly match `VALID_CATEGORIES` — the Bundle L PDF
+ * tests pin parity.
+ */
+export const CATEGORY_LABELS_ORDERED: ReadonlyArray<{
+  id: string;
+  label: string;
+}> = [
+  { id: 'atta_rice_dal', label: 'Atta, Rice & Dal' },
+  { id: 'oil_ghee', label: 'Oil & Ghee' },
+  { id: 'dairy_eggs', label: 'Dairy & Eggs' },
+  { id: 'bakery', label: 'Bakery' },
+  { id: 'masala_spices', label: 'Masala & Spices' },
+  { id: 'snacks_biscuits', label: 'Snacks & Biscuits' },
+  { id: 'beverages', label: 'Beverages' },
+  { id: 'personal_care', label: 'Personal Care' },
+  { id: 'household', label: 'Household' },
+  { id: 'fruits_vegetables', label: 'Fruits & Vegetables' },
+];
+
+export const CATEGORY_LABELS: Record<string, string> =
+  Object.fromEntries(CATEGORY_LABELS_ORDERED.map(c => [c.id, c.label]));
+
+/**
  * PR 32.1 + PR 32.2 — category-themed placeholder image URLs.
  * Used by `addExtractedMenuItems` (PR 32 scan path) and
  * `addCustomMenuItem` (PR 6 manual-add path) when the shop owner
