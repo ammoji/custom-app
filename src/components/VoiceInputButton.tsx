@@ -1,7 +1,6 @@
 import {
     AudioModule,
     IOSOutputFormat,
-    RecordingPresets,
     requestRecordingPermissionsAsync,
     setAudioModeAsync,
     useAudioRecorder,
@@ -30,6 +29,9 @@ import { Analytics } from '../services/analytics';
 import { orderService } from '../services/orderService';
 import { Sentry } from '../services/sentry';
 import type { ParsedShopFields } from '../types';
+// HOTFIX-K1 §B — DO NOT REMOVE. Continuous-mode loop decisions live in a
+// pure helper so they can be unit-tested without the audio stack.
+import { decideVoiceLoop, IDLE_TIMEOUT_SEC } from '../utils/voiceLoopHelpers';
 
 /**
  * PR 34 — VoiceInputButton.
@@ -75,6 +77,21 @@ type Props = {
   size?: 'sm' | 'lg';
   // Lets the big CTA show its own label; sm size has no label.
   label?: string;
+  /**
+   * HOTFIX-K1 §B — Continuous capture mode. When true, after each
+   * successful onResult the recorder auto-restarts for the next
+   * utterance (no per-item tap). The caller stops the loop by flipping
+   * `stopSignal` true (set when the user says a stop-word or taps the
+   * parent's stop button).
+   *
+   * Default false — preserves RegisterShopScreen's single-shot
+   * behavior unchanged. Safety nets still apply per utterance: the 30s
+   * MAX_DURATION_SEC cap, plus an IDLE_TIMEOUT_SEC (8s) idle stop
+   * between captures so a forgotten mic doesn't record indefinitely.
+   */
+  continuous?: boolean;
+  /** When `continuous`, parent toggles this true to stop the loop. */
+  stopSignal?: boolean;
 };
 
 const MAX_DURATION_SEC = 30;
@@ -131,6 +148,8 @@ export default function VoiceInputButton({
   disabled,
   size = 'sm',
   label,
+  continuous = false,
+  stopSignal = false,
 }: Props) {
   const recorder = useAudioRecorder(RECORDING_OPTIONS);
   const recorderState = useAudioRecorderState(recorder, 250);
@@ -138,6 +157,13 @@ export default function VoiceInputButton({
   const [elapsed, setElapsed] = useState(0); // seconds
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // HOTFIX-K1 §B — continuous-loop bookkeeping. `stopSignalRef` mirrors the
+  // prop so async callbacks read the latest value; `idleTimerRef` is the
+  // forgotten-mic safety net; `pendingRestartRef` defers the auto-restart
+  // until after the transcribe `finally` resets `busy`.
+  const stopSignalRef = useRef(stopSignal);
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingRestartRef = useRef(false);
 
   // Pulse animation while recording — communicates "actively
   // listening" without requiring a Lottie file or extra dep.
@@ -174,8 +200,54 @@ export default function VoiceInputButton({
     return () => {
       if (tickRef.current) clearInterval(tickRef.current);
       if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+      if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
     };
   }, []);
+
+  // HOTFIX-K1 §B — keep stopSignalRef in sync. When the parent flips
+  // stopSignal true (stop-word or stop button), cancel any pending
+  // auto-restart + idle timer so the loop ends cleanly. When the parent
+  // resets it false (new session), allow restarts again.
+  useEffect(() => {
+    stopSignalRef.current = stopSignal;
+    if (stopSignal) {
+      pendingRestartRef.current = false;
+      if (idleTimerRef.current) {
+        clearTimeout(idleTimerRef.current);
+        idleTimerRef.current = null;
+      }
+    }
+  }, [stopSignal]);
+
+  // HOTFIX-K1 §B — arm the forgotten-mic idle timer. If no further
+  // capture activity happens within IDLE_TIMEOUT_SEC after a restart,
+  // stop the loop and surface 'idle_timeout' so the parent can inform
+  // the user the mic auto-stopped.
+  const armIdleTimer = () => {
+    if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+    idleTimerRef.current = setTimeout(() => {
+      const decision = decideVoiceLoop(
+        { type: 'idleTimeout' },
+        { continuous, stopSignal: stopSignalRef.current },
+      );
+      if (decision.action === 'stop') {
+        pendingRestartRef.current = false;
+        void recorder.stop().catch((e: unknown) => {
+          // Explicit: best-effort stop; a failure here is non-fatal but
+          // must not be swallowed silently (Rule 5 #15).
+          console.warn('[VoiceInputButton] idle-timeout stop failed:', e);
+        });
+        if (decision.errorCode) {
+          onError?.(
+            decision.errorCode,
+            languageCode === 'hi-IN'
+              ? 'माइक अपने आप बंद हो गया। फिर से शुरू करें।'
+              : 'Mic auto-stopped after a pause. Tap start to resume.',
+          );
+        }
+      }
+    }, IDLE_TIMEOUT_SEC * 1000);
+  };
 
   const startRecording = async () => {
     if (disabled || busy || recorderState.isRecording) return;
@@ -258,6 +330,12 @@ export default function VoiceInputButton({
       clearTimeout(stopTimerRef.current);
       stopTimerRef.current = null;
     }
+    // HOTFIX-K1 §B — a capture is happening, so we're no longer idle:
+    // cancel the forgotten-mic timer for this cycle.
+    if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
 
     let uri: string | null = null;
     try {
@@ -320,6 +398,16 @@ export default function VoiceInputButton({
         fields: result.fields,
         parseError: result.parseError,
       });
+
+      // HOTFIX-K1 §B — continuous mode: decide whether to auto-restart
+      // for the next utterance. The actual restart is deferred to the
+      // `finally` below so `busy` is reset first (startRecording bails
+      // while busy is still true).
+      const decision = decideVoiceLoop(
+        { type: 'result' },
+        { continuous, stopSignal: stopSignalRef.current },
+      );
+      pendingRestartRef.current = decision.action === 'restart';
     } catch (e: unknown) {
       const message =
         e instanceof Error ? e.message : 'Please try again.';
@@ -341,9 +429,21 @@ export default function VoiceInputButton({
         error_code: code,
       });
       onError?.(code, message);
+      // HOTFIX-K1 §B — a transcribe error ends the continuous loop; do
+      // not auto-restart into a busted mic / quota wall.
+      pendingRestartRef.current = false;
     } finally {
       setBusy(false);
       setElapsed(0);
+      // HOTFIX-K1 §B — continuous auto-restart, now that `busy` is false.
+      // Re-check stopSignal in case it flipped during transcribe.
+      if (pendingRestartRef.current && !stopSignalRef.current) {
+        pendingRestartRef.current = false;
+        armIdleTimer();
+        void startRecording();
+      } else {
+        pendingRestartRef.current = false;
+      }
     }
   });
 

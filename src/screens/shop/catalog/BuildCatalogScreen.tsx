@@ -7,16 +7,15 @@
  *   - "Propose custom item" link → ProposeCustomItemScreen
  *   - Reads onboardingState/catalog for persistence
  *
- * Each tile navigates to CategoryBrowseScreen with the category ID.
- * After browse the draft list is passed back via `onDraftsUpdated`
- * callback (stored in route params so the hub can refresh counters).
+ * Each tile navigates to the category table view (CategoryListScreen,
+ * PR-NEXT-BUNDLE-K.1) with the category ID. Saving there commits drafts
+ * via CatalogReviewScreen; the hub refreshes counters on focus.
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
-  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -24,20 +23,22 @@ import {
 } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import {
-  collection,
-  doc,
-  getDocs,
-  onSnapshot,
-  where,
-  query,
-} from 'firebase/firestore';
+import { doc, onSnapshot } from 'firebase/firestore';
 
 import { CATEGORIES } from '../../../constants/categories';
 import { colors, radii, spacing, typography } from '../../../constants/theme';
 import { db } from '../../../services/firebase';
-import type { OnboardingCatalogState } from '../../../types';
+import { orderService } from '../../../services/orderService';
+import { listShopMenuMasterCatalogIds } from '../../../services/shopService';
+import type { MasterProduct, OnboardingCatalogState } from '../../../types';
 import type { RootStackParamList } from '../../../navigation/AppNavigator';
+// HOTFIX-K1 §A — DO NOT REMOVE. Tiles show remaining-to-add counts based
+// on the shop's current menu (catalog total minus already-added items).
+import {
+  computeRemainingByCategory,
+  mapMasterProductToRow,
+  type CategoryListItemRow,
+} from '../../../utils/catalogBrowseHelpers';
 
 type NavProp = NativeStackNavigationProp<RootStackParamList>;
 
@@ -60,6 +61,11 @@ export default function BuildCatalogScreen() {
   const [onboardingState, setOnboardingState] =
     useState<OnboardingCatalogState | null>(null);
   const [menuProductIds, setMenuProductIds] = useState<Set<string>>(new Set());
+  // HOTFIX-K1 §A — approved master-catalog items grouped by category, used
+  // (with menuProductIds) to compute the per-tile "X to add" / "All added ✓".
+  const [catalogByCategory, setCatalogByCategory] = useState<
+    Map<string, CategoryListItemRow[]>
+  >(new Map());
   const [loading, setLoading] = useState(true);
   const [shopId, setShopId] = useState<string | null>(null);
 
@@ -85,7 +91,10 @@ export default function BuildCatalogScreen() {
     return () => { unsubAuth?.(); };
   }, []);
 
-  // Subscribe to onboarding state doc
+  // Subscribe to onboarding state doc. HOTFIX-K1 §A — best-effort only: on
+  // native this Web SDK listener may never fire, so the screen no longer
+  // depends on it to clear `loading` (the catalog-totals effect does that).
+  // `totalAdded` falls back to `menuProductIds.size` when this stays null.
   useEffect(() => {
     if (!shopId) return;
     const ref = doc(db, `shops/${shopId}/onboardingState/catalog`);
@@ -102,21 +111,13 @@ export default function BuildCatalogScreen() {
     return unsub;
   }, [shopId]);
 
-  // Load menu product IDs (for progress computation)
+  // Load menu product IDs (for progress computation). HOTFIX-K1 §A —
+  // routes through the shared `listShopMenuMasterCatalogIds` service so it
+  // uses the native-safe callable path (raw getDocs hangs on this RN setup).
   const loadMenuIds = useCallback(async () => {
     if (!shopId) return;
     try {
-      const snap = await getDocs(
-        query(
-          collection(db, `shops/${shopId}/menu`),
-          where('deletedAt', '==', null),
-        ),
-      );
-      const ids = new Set<string>();
-      snap.docs.forEach(d => {
-        const pid = d.data().productId as string | null;
-        if (pid) ids.add(pid);
-      });
+      const ids = await listShopMenuMasterCatalogIds(shopId);
       setMenuProductIds(ids);
     } catch (e: unknown) {
       // Best-effort: progress tiles degrade gracefully with stale count.
@@ -131,13 +132,57 @@ export default function BuildCatalogScreen() {
     }, [loadMenuIds]),
   );
 
+  // HOTFIX-K1 §A — load approved master-catalog totals (grouped by category)
+  // once. Uses the `listMasterCatalogByCategory` callable per category (the
+  // same native-safe path CategoryListScreen uses) instead of a raw getDocs
+  // over `products`, which hangs on this RN setup. Best-effort: tile counts
+  // degrade to blank on a read failure rather than blocking the hub (explicit
+  // catch + warn — Rule 5 #15).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const map = new Map<string, CategoryListItemRow[]>();
+        const results = await Promise.all(
+          CATEGORIES.map(async cat => {
+            const res = await orderService.listMasterCatalogByCategory({
+              category: cat.id,
+              pageSize: 200,
+            });
+            return { category: cat.id, items: (res.items ?? []) as MasterProduct[] };
+          }),
+        );
+        if (cancelled) return;
+        results.forEach(({ category, items }) => {
+          map.set(category, items.map(mapMasterProductToRow));
+        });
+        setCatalogByCategory(map);
+      } catch (e: unknown) {
+        console.warn('[BuildCatalog] load catalog totals failed:', e);
+      } finally {
+        // HOTFIX-K1 §A — resolve the loading gate here (this effect uses the
+        // native-safe callable path) rather than depending solely on the
+        // onboardingState `onSnapshot`, whose Web SDK listener hangs on this
+        // RN setup and would otherwise leave the hub stuck on a spinner.
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const totalAdded = onboardingState?.itemsAdded ?? menuProductIds.size;
 
+  // HOTFIX-K1 §A — per-tile remaining-to-add summary.
+  const remainingByCategory = computeRemainingByCategory(
+    catalogByCategory,
+    menuProductIds,
+  );
+
   function handleCategoryPress(categoryId: string) {
-    navigation.navigate('CategoryBrowse', {
-      categoryId,
-      existingDrafts: [],
-    });
+    // PR-NEXT-BUNDLE-K.1 — table view replaces the swipe-card browse.
+    navigation.navigate('CategoryList', { categoryId });
   }
 
   function handleProposeCustomItem() {
@@ -179,6 +224,12 @@ export default function BuildCatalogScreen() {
       <View style={styles.grid}>
         {CATEGORIES.map(cat => {
           const icon = CATEGORY_ICONS[cat.id] ?? '📦';
+          const info = remainingByCategory.get(cat.id);
+          const countLabel = info
+            ? info.allAdded
+              ? 'All added ✓'
+              : `${info.remaining} to add`
+            : '';
           return (
             <Pressable
               key={cat.id}
@@ -192,6 +243,17 @@ export default function BuildCatalogScreen() {
               <Text style={styles.tileLabel} numberOfLines={2}>
                 {cat.label}
               </Text>
+              {countLabel !== '' && (
+                <Text
+                  style={[
+                    styles.tileCount,
+                    info?.allAdded && styles.tileCountAllAdded,
+                  ]}
+                  numberOfLines={1}
+                >
+                  {countLabel}
+                </Text>
+              )}
             </Pressable>
           );
         })}
@@ -199,7 +261,7 @@ export default function BuildCatalogScreen() {
 
       {/* Propose custom item */}
       <View style={styles.proposeSection}>
-        <Text style={styles.proposeTitle}>Can't find an item?</Text>
+        <Text style={styles.proposeTitle}>{'Can\u2019t find an item?'}</Text>
         <Text style={styles.proposeBody}>
           Propose a new product for the master catalog. Our team reviews it
           within 24 hours.
@@ -278,6 +340,16 @@ const styles = StyleSheet.create({
     ...typography.caption,
     textAlign: 'center',
     color: colors.textPrimary,
+  },
+  tileCount: {
+    ...typography.caption,
+    fontSize: 10,
+    textAlign: 'center',
+    color: colors.textSecondary,
+  },
+  tileCountAllAdded: {
+    color: colors.success,
+    fontWeight: '700',
   },
   proposeSection: {
     margin: spacing.lg,

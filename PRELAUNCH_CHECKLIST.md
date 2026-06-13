@@ -1099,19 +1099,52 @@ callables piecemeal.
       New `shops/{shopId}/onboardingState/{docId}` rule: owner + admin read,
       writes server-only. [Bundle K §A]
 - [x] **Shop-owner UI** — `BuildCatalogScreen` hub (10 category tiles + items-
-      added counter, reads `onboardingState/catalog`) then `CategoryBrowseScreen`
-      (swipe right/tap to add, swipe left/tap to skip; inline price input +
-      `VoicePriceCapture` modal) then `CatalogReviewScreen` (bulk commit, edit /
-      remove drafts). Reachable via "Build catalog (guided)" CTA on
-      `ShopMenuScreen`. Pure helpers in `src/utils/catalogBrowseHelpers.ts`
-      (`deriveCardAction`, `nextItemIndex`, `partitionDraftsForBulkCommit`,
-      `computeCategoryProgress`, `isCategoryComplete`, `formatPackLabel`).
-      [Bundle K §C/§E/§F]
-- [x] **Voice price capture** — `src/components/catalog/VoicePriceCapture.tsx`
-      reuses PR-34 `VoiceInputButton` (single_field STT) then applies pure
-      `parseVoicePriceInput(text, lang)` (`src/utils/voicePriceHelpers.ts`)
-      — Hindi + English spoken-number + transliteration + Arabic-digit
-      parsing, confidence scoring, price 1-99999 range guard. [Bundle K §D]
+      added counter, reads `onboardingState/catalog`) then `CategoryListScreen`
+      then `CatalogReviewScreen` (bulk commit, edit / remove drafts). Reachable
+      via "Build catalog (guided)" CTA on `ShopMenuScreen`. Pure helpers in
+      `src/utils/catalogBrowseHelpers.ts` (`partitionDraftsForBulkCommit`,
+      `formatPackLabel`). [Bundle K §C/§E/§F]
+- [x] **Catalog browse = Excel-style table view** — Bundle K's one-item-per-
+      screen swipe deck (`CategoryBrowseScreen`) was replaced by
+      `CategoryListScreen`: a scrollable table, one row per master-catalog item,
+      each with an inline ₹ field + one-tap "✓ MRP" pill. Skipping is the default
+      (un-priced rows aren't committed). New pure helpers
+      (`findNextUnpricedRow`, `findFirstUnpricedRow`, `computeCategoryProgress`
+      [reshaped to `{priced,total,percentage}`], `validateInlinePrice`,
+      `mapMasterProductToRow`, `buildBulkCommitItems`). [Bundle K.1 §A/§B/§E/§F]
+- [x] **Voice price capture (rewired for table)** —
+      `src/components/catalog/VoicePriceCapture.tsx` is now a persistent top-bar
+      element (not a modal): tap [🎙 Start voice], read prices row-by-row, the
+      focus auto-advances to the next un-priced row after each high-confidence
+      capture; "skip"/"next" advances, "stop"/"done" exits. Still reuses PR-34
+      `VoiceInputButton` (single_field STT) + `parseVoicePriceInput` via the pure
+      `decideVoiceCapture`/`classifyVoiceUtterance` helpers. [Bundle K §D, K.1 §C]
+- [x] **HOTFIX-K1 §A — catalog hides already-added items** — `CategoryListScreen`
+      reads the shop's menu on mount (`listShopMenuMasterCatalogIds`) and filters
+      out items the shop already has (`filterCatalogByExistingMenu`). Catalog is a
+      picker for NEW items only; existing items are edited from the Menu screen.
+      Empty list when all added → "You've already added every item" + a Go to Menu
+      CTA. `BuildCatalog` tiles show "X to add" / "All added ✓" via
+      `computeRemainingByCategory`. Menu-read failure falls back to the full
+      catalog (non-blocking, explicit catch). [HOTFIX-K1 §A]
+- [x] **HOTFIX-K1 §A native-safety correction** — the initial pass used raw Web
+      SDK `getDocs` for the menu/catalog reads, which **hangs on native** (Expo
+      SDK 54 + RN 0.81 + static frameworks — same root cause as
+      `orderService.listMine`). Fixed: `listShopMenuMasterCatalogIds` branches
+      native→`listMyShopMenu` callable / web→`getDocs`; `BuildCatalogScreen` uses
+      that service for menu IDs and the `listMasterCatalogByCategory` callable
+      (per category) for tile totals. Also decoupled `BuildCatalogScreen`'s
+      `loading` gate from the `onboardingState` `onSnapshot` (Web SDK listener
+      that can never fire on native) so the hub renders on device. [HOTFIX-K1 §A fix]
+- [x] **HOTFIX-K1 §B — continuous (single-tap-per-category) voice** —
+      `VoiceInputButton` gained `continuous` + `stopSignal` props (default false,
+      so RegisterShopScreen's two call sites are unchanged). In continuous mode
+      the recorder auto-restarts after each transcript so the shopkeeper speaks
+      prices back-to-back without per-item taps; a stop-word / stop button latches
+      `stopSignal`, and an 8s idle timeout (`IDLE_TIMEOUT_SEC`) auto-stops a
+      forgotten mic with code `idle_timeout`. Restart-vs-stop logic is the pure
+      `decideVoiceLoop` helper (`src/utils/voiceLoopHelpers.ts`). Known trade-off:
+      ~5–15s server round-trip between captures (no streaming STT dep). [HOTFIX-K1 §B]
 - [x] **Custom item proposal + admin review** — `ProposeCustomItemScreen`
       (shop owner) then `PendingCatalogQueueScreen` (admin approve/reject with
       reason). Admin queue reachable via "Pending catalog items" HomeScreen
@@ -1128,15 +1161,24 @@ callables piecemeal.
       new callables via gcloud. Run `backfill-products-status.ts --execute` and
       `cleanup-master-catalog-price-field.ts --execute` against dev AFTER rules
       deploy. [Bundle K deploy]
-- [ ] **Catalog browse pagination at scale** — `listMasterCatalogByCategory`
-      pages at 50 with cursor; current master catalog is ~33 items so single
-      page. Revisit cursor UX in `CategoryBrowseScreen` if any category crosses
-      ~100 items. [Bundle K follow-up / post-MVP]
-- [ ] **Onboarding progress per-category %** — `computeCategoryProgress` helper
-      is built + tested but `BuildCatalogScreen` tiles currently show only the
-      global items-added count, not per-category bars. Wire per-tile progress
-      once `listMasterCatalogByCategory` totals are cached client-side.
-      [Bundle K follow-up]
+- [ ] **Catalog browse pagination at scale** — `CategoryListScreen` loads a
+      single page of up to 200 items (current master catalog is ~33). Add cursor
+      paging / virtualization to the table if any category crosses a few hundred
+      items. [Bundle K / K.1 follow-up / post-MVP]
+- [x] **Pre-fill previously-saved prices — resolved by design (HOTFIX-K1 §A).**
+      Per pilot feedback, the catalog no longer re-shows items already in the
+      shop's menu, so there is nothing to pre-fill: existing items (and their
+      prices) are edited from the Menu screen only. The earlier "seed
+      `priceDrafts` from the menu" follow-up is therefore obsolete. [HOTFIX-K1 §A]
+- [x] **Onboarding progress per-category counts (HOTFIX-K1 §A).**
+      `BuildCatalogScreen` tiles now show remaining-to-add counts ("X to add" /
+      "All added ✓") from `computeRemainingByCategory`. A richer per-tile %
+      progress bar remains a nice-to-have but the count covers the core need.
+      [Bundle K / HOTFIX-K1 follow-up]
+- [ ] **True streaming STT for voice pricing** — continuous mode chunks via
+      auto-restart, incurring a ~5–15s gap between captures. If first-shop retest
+      finds the gap intolerable, add `@react-native-voice/voice` for real
+      streaming in a separate PR. [HOTFIX-K1 §I — out of scope today]
 
 ## ðŸ“ Compliance & Distribution
 

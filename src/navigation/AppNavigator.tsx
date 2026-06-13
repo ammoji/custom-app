@@ -63,7 +63,9 @@ import ShopOwnerDashboardScreen from '../screens/shop/ShopOwnerDashboardScreen';
 import ShopSettingsScreen from '../screens/shop/ShopSettingsScreen';
 // PR-NEXT-BUNDLE-K — DO NOT REMOVE. Catalog onboarding screens.
 import BuildCatalogScreen from '../screens/shop/catalog/BuildCatalogScreen';
-import CategoryBrowseScreen from '../screens/shop/catalog/CategoryBrowseScreen';
+// PR-NEXT-BUNDLE-K.1 — DO NOT REMOVE. Replaces the deleted swipe-card
+// browse with the Excel-style table view.
+import CategoryListScreen from '../screens/shop/catalog/CategoryListScreen';
 import CatalogReviewScreen from '../screens/shop/catalog/CatalogReviewScreen';
 import ProposeCustomItemScreen from '../screens/shop/catalog/ProposeCustomItemScreen';
 import PendingCatalogQueueScreen from '../screens/admin/PendingCatalogQueueScreen';
@@ -179,11 +181,7 @@ export type RootStackParamList = {
   AttentionQueue: { role: 'delivery' | 'shop' };
   // PR-NEXT-BUNDLE-K — Catalog onboarding routes.
   BuildCatalog: undefined;
-  CategoryBrowse: {
-    categoryId: string;
-    existingDrafts?: import('../types').PriceDraft[];
-    onDraftsUpdated?: (drafts: import('../types').PriceDraft[]) => void;
-  };
+  CategoryList: { categoryId: string };
   CatalogReview: { drafts: import('../types').PriceDraft[] };
   ProposeCustomItem: undefined;
   PendingCatalogQueue: undefined;
@@ -297,7 +295,7 @@ export default function AppNavigator() {
       <Stack.Screen name="PartnerReviews" component={PartnerReviewsScreen} />
       {/* PR-NEXT-BUNDLE-K — DO NOT REMOVE. Catalog onboarding. */}
       <Stack.Screen name="BuildCatalog" component={BuildCatalogScreen} />
-      <Stack.Screen name="CategoryBrowse" component={CategoryBrowseScreen} />
+      <Stack.Screen name="CategoryList" component={CategoryListScreen} />
       <Stack.Screen name="CatalogReview" component={CatalogReviewScreen} />
       <Stack.Screen name="ProposeCustomItem" component={ProposeCustomItemScreen} />
       <Stack.Screen name="PendingCatalogQueue" component={PendingCatalogQueueScreen} />

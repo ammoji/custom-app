@@ -189,6 +189,8 @@ _Customer panel last updated: 2026-06-10_
 | Menu search | Search across own menu | PR 17 | shipped |
 | Recent search history | Per-shop search history surfaces as chips | ENH-3 | shipped |
 | Item photo upload | Per-item image with library/camera | PR 11 | shipped |
+| Guided catalog onboarding | `BuildCatalog` hub → per-category **table view** (`CategoryList`): inline ₹ field + one-tap MRP + voice pricing → `CatalogReview` bulk commit. Catalog now **hides items already in the shop's menu** (it's a picker for new items only; existing items are edited via the Menu screen). Category tiles show "X to add" / "All added ✓" based on the shop's current menu. | Bundle K, K.1, HOTFIX-K1 §A | shipped |
+| Voice price capture (table) | **Single-tap-per-category**: tap once to start, speak prices for each row in turn (focus auto-advances after each capture), say "stop"/"बंद"/"done" or tap stop to end. Continuous recorder auto-restarts between utterances; safety auto-stop after 8s of silence prevents forgotten-mic battery drain. | Bundle K.1 §C, HOTFIX-K1 §B | shipped |
 
 ### 2.4 Shop settings
 

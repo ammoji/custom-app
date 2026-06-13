@@ -7,7 +7,24 @@
  * logic + validation.
  */
 
-import type { CategoryId } from '../../src/constants/categories';
+// PR-NEXT-BUNDLE-K — DO NOT REMOVE. CategoryId is inlined here rather
+// than imported from `../../src/constants/categories` because cross-
+// boundary imports widen tsc rootDir → compiled output lands at
+// lib/functions/src/index.js instead of lib/index.js, which Firebase
+// can't find. The two definitions must be kept in sync manually until
+// a shared types package exists; if categories change in src/constants,
+// update this list too. Source: src/constants/categories.ts.
+type CategoryId =
+  | 'atta_rice_dal'
+  | 'oil_ghee'
+  | 'dairy_eggs'
+  | 'bakery'
+  | 'masala_spices'
+  | 'snacks_biscuits'
+  | 'beverages'
+  | 'personal_care'
+  | 'household'
+  | 'fruits_vegetables';
 
 // ── Shared types ────────────────────────────────────────────────────────────
 

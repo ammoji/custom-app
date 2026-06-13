@@ -1,6 +1,6 @@
 import { firebase as nativeFirebase } from '@react-native-firebase/app';
 import '@react-native-firebase/functions';
-import { collection, doc, getDoc, getDocs } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore';
 import { Platform } from 'react-native';
 import { GeoPoint, Shop } from '../types';
 import { haversineKm } from '../utils/distance';
@@ -143,3 +143,50 @@ export const shopService = {
     }
   },
 };
+
+/**
+ * HOTFIX-K1 §A — Returns the set of masterCatalogIds (the `productId`
+ * field on each `shops/{shopId}/menu` doc) already present in the shop's
+ * menu. Used by CategoryListScreen to hide items the shop has already
+ * added — catalog is for new items only; existing items are edited via
+ * ShopMenuScreen.
+ *
+ * Native goes through the `listMyShopMenu` callable (Web SDK Firestore
+ * hangs on this RN setup); web reads the menu subcollection directly.
+ * Custom items (productId === null) are excluded in both paths.
+ */
+export async function listShopMenuMasterCatalogIds(
+  shopId: string,
+): Promise<Set<string>> {
+  const ids = new Set<string>();
+
+  if (isNative) {
+    // Native MUST go through a callable: the Web SDK Firestore client is
+    // incompatible with this RN setup (Expo SDK 54 + RN 0.81 + static
+    // frameworks) and hangs — same root cause as orderService.listMine /
+    // shopService.getNearbyShops. `listMyShopMenu` is server-scoped to the
+    // caller's `claims.shopId`, so `shopId` is implied (kept in the
+    // signature for the web path + call-site clarity).
+    const fn = getNativeFunctions().httpsCallable('listMyShopMenu');
+    const result = await fn();
+    const items =
+      (result.data as { productId?: string | null }[]) ?? [];
+    items.forEach(it => {
+      if (it.productId) ids.add(it.productId);
+    });
+    return ids;
+  }
+
+  // Web Plan B: the Web SDK Firestore read works here.
+  const snap = await getDocs(
+    query(
+      collection(db, `shops/${shopId}/menu`),
+      where('deletedAt', '==', null),
+    ),
+  );
+  snap.docs.forEach(d => {
+    const pid = (d.data() as { productId?: string | null }).productId;
+    if (pid) ids.add(pid);
+  });
+  return ids;
+}
