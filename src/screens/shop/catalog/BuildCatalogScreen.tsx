@@ -29,6 +29,8 @@ import { doc, onSnapshot } from 'firebase/firestore';
 
 import BottomSheet from '../../../components/common/BottomSheet';
 import Toast from '../../../components/common/Toast';
+// PR-NEXT-BUNDLE-M §E — DO NOT REMOVE. Publish-readiness banner.
+import PublishGateBanner from '../../../components/shop/PublishGateBanner';
 import { CATEGORIES } from '../../../constants/categories';
 import { colors, radii, spacing, typography } from '../../../constants/theme';
 import { db } from '../../../services/firebase';
@@ -253,6 +255,11 @@ export default function BuildCatalogScreen() {
         </Pressable>
         <Text style={styles.headerTitle}>Build Your Catalog</Text>
       </View>
+
+      {/* PR-NEXT-BUNDLE-M §E — publish-readiness banner. Building the
+          catalog is the most common gate-fix path, so the "Almost
+          ready" banner is especially relevant here. Self-fetches. */}
+      <PublishGateBanner />
 
       {/* Summary card */}
       <View style={styles.summaryCard}>

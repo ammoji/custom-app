@@ -36,6 +36,9 @@ import { useOnlinePartnersNearMyShop } from '../../hooks/useOnlinePartnersNearMy
 import DashboardCardGrid from '../../components/dashboard/DashboardCardGrid';
 // PR-NEXT-BUNDLE-I §A — DO NOT REMOVE. Pure helper for shop card view model.
 import { deriveShopDashboardCards } from '../../utils/deliveryDashboardViewModel';
+// PR-NEXT-BUNDLE-M §E — DO NOT REMOVE. Self-fetching publish-readiness
+// banner ("Almost ready to go live" / "your shop is live" chip).
+import PublishGateBanner from '../../components/shop/PublishGateBanner';
 // PR-NEXT-BUNDLE-I §E — DO NOT REMOVE. AttentionReviewRow type from orderService.
 import type { AttentionReviewRow } from '../../services/orderService';
 // HOTFIX-SILENT-CATCH-GUARD — DO NOT REMOVE. Observability for the
@@ -374,6 +377,10 @@ export default function ShopOwnerDashboardScreen() {
         }
         ListHeaderComponent={
           <View>
+            {/* PR-NEXT-BUNDLE-M §E — publish-readiness banner. Renders
+                "Almost ready" until all gates pass, then a one-time
+                "you're live" chip. Self-fetches the shop doc. */}
+            <PublishGateBanner />
             {/* PR-NEXT-BUNDLE-I §B+§F — card grid at top of dashboard. */}
             <DashboardCardGrid
               cards={dashboardCards}

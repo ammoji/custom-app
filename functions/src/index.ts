@@ -17,6 +17,7 @@ import { setGlobalOptions } from 'firebase-functions/v2';
 import {
     onDocumentCreated,
     onDocumentUpdated,
+    onDocumentWritten,
 } from 'firebase-functions/v2/firestore';
 import { HttpsError, onCall, onRequest } from 'firebase-functions/v2/https';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
@@ -54,6 +55,25 @@ import {
 // tsc complains "Cannot find name 'buildAuditLogEntry' / 'AuditLogInput'
 // / 'validateBulkMenuRequest'", re-add THESE TWO LINES below.
 import { AuditLogInput, buildAuditLogEntry } from './auditLogHelpers';
+// PR-NEXT-BUNDLE-M — DO NOT REMOVE. The pure publish-gate evaluator
+// is shared by the `onShopMenuWrite` / `onShopUpdate` triggers, the
+// `recomputeShopPublishStatus` + `forceShopPublishOverride` callables,
+// and the `listShopsPublic` filter. If tsc complains "Cannot find
+// name 'evaluateShopPublishStatus' / 'PublishGateInput'", re-add this
+// line — the auto-formatter has eaten helper imports before (R2).
+import {
+  evaluateShopPublishStatus,
+  filterPublishableShops,
+  type PublishGateInput,
+} from './shopPublishHelpers';
+// PR-NEXT-BUNDLE-M — DO NOT REMOVE. Pure auth/validation deciders for
+// the `recomputeShopPublishStatus` + `forceShopPublishOverride`
+// callables (Validator-Result posture; keeps the callables thin +
+// unit-testable without the emulator).
+import {
+  decideRecomputeAuth,
+  validateForceOverrideInput,
+} from './shopPublishGateHelpers';
 import { validateBulkMenuRequest } from './bulkMenuHelpers';
 // PR-NEXT-ENH-2 (finding #5 follow-up) — DO NOT REMOVE. Used by the
 // new `bulkRemoveMenuItems` callable below to validate shopOwner
@@ -8003,6 +8023,164 @@ async function readShowAllShopsFlag(): Promise<boolean> {
   }
 }
 
+// ────────────────────────────────────────────────────────────────────
+// PR-NEXT-BUNDLE-M — Shop publish gate.
+//
+// A shop is only customer-visible once it meets every publish-readiness
+// requirement (status active, >= N menu items, hours set, location
+// verified). The decision lives in the pure helper
+// `evaluateShopPublishStatus`; this file owns the IO: reading the shop
+// doc + menu count + the configurable minimum, and denormalizing the
+// result onto `shop.isPublishable + publishGateState`.
+// ────────────────────────────────────────────────────────────────────
+
+const DEFAULT_MIN_MENU_ITEMS_FOR_PUBLISH = 5;
+
+/**
+ * Read `appConfig/pilotConfig.minMenuItemsForPublish` (default 5).
+ * Resilient: any read error or non-positive value falls back to the
+ * default so a config hiccup can never set an absurd threshold.
+ */
+async function readMinMenuItemsForPublish(): Promise<number> {
+  try {
+    const snap = await db.doc('appConfig/pilotConfig').get();
+    if (!snap.exists) return DEFAULT_MIN_MENU_ITEMS_FOR_PUBLISH;
+    const raw = (snap.data() as { minMenuItemsForPublish?: unknown } | undefined)
+      ?.minMenuItemsForPublish;
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+      return Math.floor(raw);
+    }
+    return DEFAULT_MIN_MENU_ITEMS_FOR_PUBLISH;
+  } catch (err) {
+    console.warn('[pilotConfig] minMenuItems read failed; defaulting', {
+      err: (err as Error)?.message,
+    });
+    return DEFAULT_MIN_MENU_ITEMS_FOR_PUBLISH;
+  }
+}
+
+/**
+ * Read `appConfig/pilotConfig.showUnpublishedShops` (default FALSE).
+ * The family-testing escape hatch: when true, `listShopsPublic`
+ * bypasses the publish-gate filter so test shops show up before
+ * they're fully populated. Same secure-default posture as
+ * `readShowAllShopsFlag` — a missing/unreadable doc keeps the gate
+ * ACTIVE so unpublished shops never leak to real customers.
+ */
+async function readShowUnpublishedShopsFlag(): Promise<boolean> {
+  try {
+    const snap = await db.doc('appConfig/pilotConfig').get();
+    if (!snap.exists) return false;
+    const data = snap.data() as { showUnpublishedShops?: unknown } | undefined;
+    return data?.showUnpublishedShops === true;
+  } catch (err) {
+    console.warn('[pilotConfig] showUnpublishedShops read failed; default false', {
+      err: (err as Error)?.message,
+    });
+    return false;
+  }
+}
+
+/**
+ * Count a shop's live (non-soft-deleted) menu items. Mirrors the
+ * `deletedAt == null` in-memory filter every menu-listing surface uses
+ * (`listMyShopMenu`, `listShopMenuPublic`, etc.) — a Firestore
+ * `where('deletedAt','==',null)` would silently exclude legacy items
+ * that simply lack the field.
+ */
+async function countLiveMenuItems(shopId: string): Promise<number> {
+  const snap = await db.collection(`shops/${shopId}/menu`).get();
+  let count = 0;
+  for (const doc of snap.docs) {
+    const data = doc.data() as { deletedAt?: unknown };
+    if (data.deletedAt == null) count += 1;
+  }
+  return count;
+}
+
+/**
+ * Build the pure-helper input from a shop doc + computed menu count +
+ * the configurable minimum. Hours live at
+ * `registrationData.hours.{open,close}` ("HH:mm"); location +
+ * verification are top-level fields stamped at approval time.
+ */
+function buildPublishGateInput(
+  shop: Record<string, unknown>,
+  menuItemCount: number,
+  minMenuItems: number,
+): PublishGateInput {
+  const reg = shop.registrationData as
+    | { hours?: { open?: unknown; close?: unknown } }
+    | undefined;
+  const hours = reg?.hours;
+  const loc = shop.location as { lat?: unknown; lng?: unknown } | null | undefined;
+  return {
+    shopStatus: (shop.status as string | undefined) ?? 'pending',
+    menuItemCount,
+    hoursOpen: typeof hours?.open === 'string' ? hours.open : null,
+    hoursClose: typeof hours?.close === 'string' ? hours.close : null,
+    location:
+      loc && typeof loc === 'object'
+        ? {
+            lat: typeof loc.lat === 'number' ? loc.lat : undefined,
+            lng: typeof loc.lng === 'number' ? loc.lng : undefined,
+          }
+        : null,
+    locationVerifiedAt:
+      typeof shop.locationVerifiedAt === 'number'
+        ? shop.locationVerifiedAt
+        : null,
+    forcePublishOverride: shop.forcePublishOverride === true,
+    minMenuItems,
+  };
+}
+
+/**
+ * Recompute + denormalize the publish gate for one shop. Shared by
+ * the triggers, the manual-recompute callable, and the backfill
+ * script. Returns the gate result for the caller to inspect/log.
+ *
+ * Idempotent: writes `isPublishable + publishGateState` with a fresh
+ * `computedAt`. The `onShopUpdate` trigger guards against re-firing on
+ * its own write (see the changed-fields gate there).
+ */
+async function recomputeShopPublishStatusImpl(
+  shopId: string,
+): Promise<{ found: boolean; isPublishable?: boolean; missing?: string[] }> {
+  const shopRef = db.doc(`shops/${shopId}`);
+  const shopSnap = await shopRef.get();
+  if (!shopSnap.exists) return { found: false };
+  const shop = shopSnap.data() as Record<string, unknown>;
+
+  const [menuItemCount, minMenuItems] = await Promise.all([
+    countLiveMenuItems(shopId),
+    readMinMenuItemsForPublish(),
+  ]);
+
+  const result = evaluateShopPublishStatus(
+    buildPublishGateInput(shop, menuItemCount, minMenuItems),
+  );
+
+  await shopRef.set(
+    {
+      isPublishable: result.isPublishable,
+      publishGateState: {
+        missing: result.missing,
+        menuItemCount,
+        signal: result.signal,
+        computedAt: Date.now(),
+      },
+    },
+    { merge: true },
+  );
+
+  return {
+    found: true,
+    isPublishable: result.isPublishable,
+    missing: result.missing,
+  };
+}
+
 export const listShopsPublic = onCall<{ userLocation?: LatLng }>(
   { cors: true, enforceAppCheck: false },
   async request => {
@@ -8031,7 +8209,214 @@ export const listShopsPublic = onCall<{ userLocation?: LatLng }>(
       showAll,
       customerHasLocation: !!userLocation,
     });
-    return { shops: visible };
+    // PR-NEXT-BUNDLE-M — publish-gate filter. Shops not yet publishable
+    // are hidden from customers regardless of service radius (Rule 5
+    // fail-closed: `isPublishable !== true` — undefined/null hides the
+    // shop). `forcePublishOverride` shops already read `isPublishable:
+    // true` from their denormalized gate, so they pass here. The
+    // `showUnpublishedShops` flag is the family-testing bypass.
+    const showUnpublished = await readShowUnpublishedShopsFlag();
+    const publishable = filterPublishableShops(
+      visible as { isPublishable?: boolean | null }[],
+      showUnpublished,
+    );
+    return { shops: publishable };
+  },
+);
+
+// ────────────────────────────────────────────────────────────────────
+// PR-NEXT-BUNDLE-M — triggers + callables that keep `isPublishable` in
+// sync with the gate inputs.
+// ────────────────────────────────────────────────────────────────────
+
+/**
+ * The publish-gate INPUT fields on the shop doc. When any of these
+ * change we must recompute. Deliberately EXCLUDES the gate OUTPUT
+ * fields (`isPublishable`, `publishGateState`) and the override
+ * bookkeeping fields — those are written BY the recompute / the admin
+ * callable, so reacting to them would be an infinite loop. The
+ * override callable performs its own recompute after flipping the
+ * flag, so `forcePublishOverride` is not watched here either.
+ */
+function publishGateInputSignature(
+  shop: Record<string, unknown> | undefined,
+): string {
+  const reg = shop?.registrationData as
+    | { hours?: { open?: unknown; close?: unknown } }
+    | undefined;
+  const loc = shop?.location as { lat?: unknown; lng?: unknown } | null | undefined;
+  return JSON.stringify({
+    status: shop?.status ?? null,
+    hoursOpen: reg?.hours?.open ?? null,
+    hoursClose: reg?.hours?.close ?? null,
+    lat: loc?.lat ?? null,
+    lng: loc?.lng ?? null,
+    locationVerifiedAt: shop?.locationVerifiedAt ?? null,
+  });
+}
+
+/**
+ * Fires on any write to a shop's menu sub-collection. Adding,
+ * removing, or soft-deleting an item changes the live count, which is
+ * a gate input → recompute. Cheap: one collection read + one shop
+ * write.
+ */
+export const onShopMenuWrite = onDocumentWritten(
+  { document: 'shops/{shopId}/menu/{itemId}', region: 'asia-south1' },
+  async event => {
+    const shopId = event.params.shopId;
+    try {
+      await recomputeShopPublishStatusImpl(shopId);
+    } catch (err) {
+      console.error('[onShopMenuWrite] recompute failed', {
+        shopId,
+        err: (err as Error)?.message,
+      });
+    }
+  },
+);
+
+/**
+ * Fires on update to the shop doc itself. Recomputes ONLY when a gate
+ * INPUT field changed (status / hours / location / locationVerifiedAt)
+ * — see `publishGateInputSignature`. This is the infinite-loop guard:
+ * the recompute writes back `isPublishable + publishGateState`, which
+ * re-fires this trigger, but those output fields are not in the
+ * signature so the second pass is a no-op and the loop terminates.
+ */
+export const onShopUpdate = onDocumentUpdated(
+  { document: 'shops/{shopId}', region: 'asia-south1' },
+  async event => {
+    const shopId = event.params.shopId;
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!after) return;
+    if (
+      publishGateInputSignature(before) === publishGateInputSignature(after)
+    ) {
+      // No gate-input field changed — this write was the recompute's
+      // own output (or an unrelated field like ratingAvg). Skip.
+      return;
+    }
+    try {
+      await recomputeShopPublishStatusImpl(shopId);
+    } catch (err) {
+      console.error('[onShopUpdate] recompute failed', {
+        shopId,
+        err: (err as Error)?.message,
+      });
+    }
+  },
+);
+
+/**
+ * Manual recompute trigger for admin debugging + the backfill script,
+ * and a "my banner is stale, refresh it" button for the shop owner.
+ * Auth: admin OR the shop owner of that exact shop.
+ */
+export const recomputeShopPublishStatus = onCall<{ shopId?: string }>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const auth = request.auth;
+    const decision = decideRecomputeAuth({
+      signedIn: !!auth,
+      isAdmin: auth?.token?.admin === true,
+      isShopOwner: auth?.token?.shopOwner === true,
+      claimShopId: (auth?.token?.shopId as string | undefined) ?? null,
+      requestedShopId:
+        typeof request.data?.shopId === 'string' ? request.data.shopId : null,
+    });
+    if (!decision.ok) {
+      throw new HttpsError(decision.code, decision.message);
+    }
+
+    const result = await recomputeShopPublishStatusImpl(decision.shopId);
+    if (!result.found) {
+      throw new HttpsError('not-found', 'Shop not found');
+    }
+    return {
+      isPublishable: result.isPublishable === true,
+      missing: result.missing ?? [],
+    };
+  },
+);
+
+/**
+ * Admin-only escape hatch. Sets / clears `forcePublishOverride` on a
+ * shop (e.g. a test shop or a known edge case) and triggers a
+ * recompute so `isPublishable` flips immediately. A non-empty reason
+ * is required when enabling; audit-logged.
+ */
+export const forceShopPublishOverride = onCall<{
+  shopId?: string;
+  override?: boolean;
+  reason?: string;
+}>(
+  { cors: true, enforceAppCheck: false, region: 'asia-south1' },
+  async request => {
+    const auth = request.auth;
+    const validation = validateForceOverrideInput({
+      signedIn: !!auth,
+      isAdmin: auth?.token?.admin === true,
+      shopId: request.data?.shopId,
+      override: request.data?.override,
+      reason: request.data?.reason,
+    });
+    if (!validation.ok) {
+      throw new HttpsError(validation.code, validation.message);
+    }
+    const { shopId, override, reason } = validation;
+
+    const shopRef = db.doc(`shops/${shopId}`);
+    const shopSnap = await shopRef.get();
+    if (!shopSnap.exists) {
+      throw new HttpsError('not-found', 'Shop not found');
+    }
+
+    if (override) {
+      await shopRef.set(
+        {
+          forcePublishOverride: true,
+          forcePublishOverrideSetAt: Date.now(),
+          forcePublishOverrideSetBy: auth!.uid,
+          forcePublishOverrideReason: reason,
+        },
+        { merge: true },
+      );
+    } else {
+      await shopRef.set(
+        {
+          forcePublishOverride: false,
+          forcePublishOverrideSetAt: Date.now(),
+          forcePublishOverrideSetBy: auth!.uid,
+          forcePublishOverrideReason: FieldValue.delete(),
+        },
+        { merge: true },
+      );
+    }
+
+    // Recompute immediately so the denormalized gate + customer
+    // visibility reflect the override without waiting on the trigger.
+    const result = await recomputeShopPublishStatusImpl(shopId);
+
+    // Best-effort audit log; non-fatal (same posture as the other
+    // admin governance callables).
+    await writeAuditLog({
+      actorUid: auth!.uid,
+      actorRole: 'admin',
+      actionType: override
+        ? 'shop.force_publish_override_set'
+        : 'shop.force_publish_override_remove',
+      targetType: 'shop',
+      targetId: shopId,
+      reason: override ? reason : undefined,
+      metadata: { isPublishable: result.isPublishable === true },
+    });
+
+    return {
+      ok: true,
+      isPublishable: result.isPublishable === true,
+    };
   },
 );
 

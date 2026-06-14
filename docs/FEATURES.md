@@ -192,6 +192,7 @@ _Customer panel last updated: 2026-06-10_
 | Guided catalog onboarding | `BuildCatalog` hub → per-category **table view** (`CategoryList`): inline ₹ field + one-tap MRP + voice pricing → `CatalogReview` bulk commit. Catalog now **hides items already in the shop's menu** (it's a picker for new items only; existing items are edited via the Menu screen). Category tiles show "X to add" / "All added ✓" based on the shop's current menu. | Bundle K, K.1, HOTFIX-K1 §A | shipped |
 | Voice price capture (table) | **Single-tap-per-category**: tap once to start, speak prices for each row in turn (focus auto-advances after each capture), say "stop"/"बंद"/"done" or tap stop to end. Continuous recorder auto-restarts between utterances; safety auto-stop after 8s of silence prevents forgotten-mic battery drain. | Bundle K.1 §C, HOTFIX-K1 §B | shipped |
 | Catalog PDF + paper workflow | Shop owners tap **"Print blank catalog"** on `BuildCatalog` → `generateCatalogPdf` builds a printable PDF (one page per category, product name + brand + pack + MRP + a blank "Your price" box per row, plus a per-page QR encoding shopId/page/category/productIds). They print, fill prices by hand, then **"Scan filled catalog"** (`ScanCatalogPages`) photographs each page → `extractCatalogPagePrices` (Claude vision) reads the handwriting → extracted prices land in the existing `CatalogReview` for commit. Same convergence as voice/inline/scan-menu. Quotas: 5 PDFs/day + 30 page-scans/day per shop (`aiQuotas`). | Bundle L | shipped |
+| Publish gate | A shop is **not visible to customers until all publish-readiness requirements are met**: status active, ≥5 menu items (configurable via `appConfig/pilotConfig.minMenuItemsForPublish`), opening hours set, and a verified location. Server-authoritative: `evaluateShopPublishStatus` runs in the `onShopMenuWrite` / `onShopUpdate` triggers + `recomputeShopPublishStatus` callable and denormalizes `isPublishable` + `publishGateState` onto the shop doc; `listShopsPublic` hides any shop whose `isPublishable !== true` (Rule 5 fail-closed). The owner sees an **"Almost ready to go live"** banner (`PublishGateBanner` on dashboard + `BuildCatalog`) listing exactly what's missing with one-tap CTAs; when the last gate flips, the shop appears in customer listings automatically — no admin action. `appConfig/pilotConfig.showUnpublishedShops` is a family-testing bypass. | Bundle M | shipped |
 
 ### 2.4 Shop settings
 
@@ -315,6 +316,8 @@ _Delivery panel last updated: 2026-06-10_
 | Side-by-side location check | Owner-typed address vs reverse-geocoded pin shown side-by-side | SHOP-LOCATION-EDIT §C | shipped |
 | Shop detail (admin) | Full shop record + KYC + location + rating rollup | PR 4, PR 31 | shipped |
 | Drill-in to shop reviews | Tap `⭐ 4.7 (2)` → ShopReviewsScreen in admin mode (sees flagged_low too) | Bundle E §E | shipped |
+| Publish-state filter + chips | `ShopManagement` has filter chips `[All] [Live] [Awaiting publish] [Pending approval] [Suspended]`; each row shows a publish chip (🟢 Live / 🟡 Almost ready (N missing) / ⚪ Forced). "Awaiting publish" = approved but not yet publishable. | Bundle M §F | shipped |
+| Force-publish override | `ShopDetailManagement` "Publish gate" section: bottom-sheet form (required reason) to `forceShopPublishOverride` a test shop / edge case past the gate; audit-logged. A second control removes the override. | Bundle M §F | shipped |
 
 ### 4.3 Delivery partner moderation
 
@@ -342,6 +345,8 @@ _Delivery panel last updated: 2026-06-10_
 | `appConfig/pilotStatus.isLive` | Locks all reset scripts; flip when first real money order lands | PR 39.2 | flagged (off) |
 | `appConfig/ratingAlerts.*` | Per-role thresholds + cooldown configuration | PR-4 | flagged |
 | AI feature kill-switches | Per-feature toggles for any AI integration | PR 34 | flagged |
+| `appConfig/pilotConfig.minMenuItemsForPublish` | Minimum live menu items a shop needs to publish (default 5) | Bundle M | flagged |
+| `appConfig/pilotConfig.showUnpublishedShops` | Family-testing bypass: show not-yet-publishable shops to customers (default false) | Bundle M | flagged (off) |
 
 _Admin panel last updated: 2026-06-10_
 

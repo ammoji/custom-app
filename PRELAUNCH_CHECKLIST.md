@@ -1227,6 +1227,53 @@ callables piecemeal.
       5/day cap) is NOT covered by a unit test. It uses the identical atomic
       read-then-increment transaction pattern as the shipped `extractMenuFromImage`
       counter; verify on the post-deploy `npm run smoke` run instead. [Bundle L §J]
+- [x] **Shop publish gate (Bundle M).** Closes the launch-day "approved
+      shop with an empty menu is visible to customers" embarrassment. A shop is
+      customer-visible only when status active + ≥5 live menu items
+      (`appConfig/pilotConfig.minMenuItemsForPublish`) + hours set + verified
+      location. Pure helper `evaluateShopPublishStatus`
+      (`functions/src/shopPublishHelpers.ts`, byte-identical client mirror at
+      `src/utils/shopPublishHelpers.ts`) + `filterPublishableShops` +
+      `formatPublishMissingForBanner` + `isShopPublishable` (Rule 5 fail-closed:
+      `undefined`→hidden). Server: `onShopMenuWrite` + `onShopUpdate` triggers
+      (infinite-loop-guarded via `publishGateInputSignature`) +
+      `recomputeShopPublishStatus` + `forceShopPublishOverride` callables
+      (thin over `decideRecomputeAuth` / `validateForceOverrideInput` in
+      `shopPublishGateHelpers.ts`), `listShopsPublic` filters on `isPublishable`.
+      Client: `PublishGateBanner` ("Almost ready" + one-tap CTAs) on
+      ShopOwnerDashboard + BuildCatalog; admin `ShopManagement` filter chips +
+      per-row publish chip; `ShopDetailManagement` force-publish bottom-sheet.
+      +32 tests. NO rules/indexes/schema changes. [Bundle M]
+- [ ] **Bundle M deploy + IAM verify** — deploy order (one `--only` per command,
+      PowerShell, never auto-run): `cd functions; npm run build; cd ..` then
+      `firebase deploy --only functions:listShopsPublic`,
+      `...functions:recomputeShopPublishStatus`,
+      `...functions:forceShopPublishOverride`, `...functions:onShopMenuWrite`,
+      `...functions:onShopUpdate`. Verify `allUsers` invoker on the TWO new
+      callables (`recomputeshoppublishstatus`, `forceshoppublishoverride`) via
+      `gcloud run services get-iam-policy ... --region=asia-south1` (triggers
+      have no IAM; `listShopsPublic` already public). Then
+      `npm run smoke -- --include=listShopsPublic,recomputeShopPublishStatus,forceShopPublishOverride`.
+      [Bundle M §I]
+- [ ] **Bundle M backfill (run AFTER functions deploy).**
+      `npx tsx scripts/backfill-shop-publishable.ts --admin-uid=<uid>` (dry-run)
+      then `... --execute` against dev. Until this runs, the Rule 5 fail-closed
+      default hides EVERY existing shop from customers. [Bundle M §G]
+- [ ] **🚨 LAUNCH-DAY (PR 39.2): family-testing escape hatch for Bundle M.**
+      The 2 test shops likely lack 5+ menu items, so the backfill marks them
+      unpublishable and family testers will see ZERO shops. Pick ONE before the
+      client OTA: **(A, preferred)** force-publish each test shop from the admin
+      app (`forceShopPublishOverride`, reason "test shop — family testing"); or
+      **(B)** set `appConfig/pilotConfig.showUnpublishedShops: true` for testing,
+      then **flip it back to false on real-customer launch day**. DO NOT leave
+      both off or family sees no shops. [Bundle M §G / §I step 6]
+- [ ] **Bundle M follow-up: swapped-pin detection is coordinate-range only.**
+      `evaluateShopPublishStatus` mirrors `validateShopLocationForApproval`
+      (lat∈[-90,90], lng∈[-180,180]) + requires `locationVerifiedAt`. A
+      same-hemisphere lat/lng swap inside India (both values stay in range) is
+      NOT caught by coordinates alone — the verified-at backstop covers it for
+      now. If a real swapped-pin bug slips through, add an India-bounds
+      plausibility heuristic in a follow-up. [Bundle M §A follow-up]
 
 ## ðŸ“ Compliance & Distribution
 

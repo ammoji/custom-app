@@ -2436,4 +2436,42 @@ export const orderService = {
       pageCategory: d?.pageCategory ?? '',
     };
   },
+
+  // PR-NEXT-BUNDLE-M — DO NOT REMOVE. Manually recompute a shop's
+  // publish gate (admin or the shop owner of that shop). Used by the
+  // "Refresh" affordance on the shop-owner "Almost ready" banner.
+  async recomputeShopPublishStatus(payload?: {
+    shopId?: string;
+  }): Promise<{ isPublishable: boolean; missing: string[] }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('recomputeShopPublishStatus');
+      const result = await fn(payload ?? {});
+      const d = result.data as any;
+      return { isPublishable: d?.isPublishable === true, missing: d?.missing ?? [] };
+    }
+    const fn = httpsCallable(functions, 'recomputeShopPublishStatus');
+    const result = await fn(payload ?? {});
+    const d = result.data as any;
+    return { isPublishable: d?.isPublishable === true, missing: d?.missing ?? [] };
+  },
+
+  // PR-NEXT-BUNDLE-M — DO NOT REMOVE. Admin-only escape hatch to
+  // force-publish (or un-force) a shop regardless of gates. A reason
+  // is required when enabling.
+  async forceShopPublishOverride(payload: {
+    shopId: string;
+    override: boolean;
+    reason?: string;
+  }): Promise<{ ok: boolean; isPublishable: boolean }> {
+    if (isNative) {
+      const fn = getNativeFunctions().httpsCallable('forceShopPublishOverride');
+      const result = await fn(payload);
+      const d = result.data as any;
+      return { ok: d?.ok === true, isPublishable: d?.isPublishable === true };
+    }
+    const fn = httpsCallable(functions, 'forceShopPublishOverride');
+    const result = await fn(payload);
+    const d = result.data as any;
+    return { ok: d?.ok === true, isPublishable: d?.isPublishable === true };
+  },
 };

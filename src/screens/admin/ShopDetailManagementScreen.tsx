@@ -15,6 +15,7 @@ import {
     View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import BottomSheet from '../../components/common/BottomSheet';
 import Button from '../../components/common/Button';
 import EmptyState from '../../components/common/EmptyState';
 import Loader from '../../components/common/Loader';
@@ -35,6 +36,9 @@ import { formatOrderTime } from '../../utils/format';
 import { formatResolvedAddress } from '../../utils/formatResolvedAddress';
 import { openMapsForCoords } from '../../utils/openMapsForCoords';
 import { reverseGeocodeLabel } from '../../utils/reverseGeocodeLabel';
+// PR-NEXT-BUNDLE-M §F — DO NOT REMOVE. Fail-closed publish read for the
+// force-publish override section gate + status copy.
+import { isShopPublishable } from '../../utils/shopPublishHelpers';
 
 // PR 31.1 — mirror of the KYC slot ordering + labels from
 // `ShopRegistrationDetailScreen`. Kept inline (instead of a shared
@@ -85,6 +89,10 @@ export default function ShopDetailManagementScreen() {
   const [pendingResolved, setPendingResolved] = useState<string | null>(null);
   const [showSuspendModal, setShowSuspendModal] = useState(false);
   const [reason, setReason] = useState('');
+  // PR-NEXT-BUNDLE-M §F — force-publish override form state.
+  const [showForceSheet, setShowForceSheet] = useState(false);
+  const [forceReason, setForceReason] = useState('');
+  const [forcePending, setForcePending] = useState(false);
   // PR 31.1 — KYC docs viewer state. Mirrors the pattern PR 31
   // added to `ShopRegistrationDetailScreen`: fetch signed-read
   // URLs once the admin is verified, render a 2x2 grid, tap a
@@ -368,6 +376,69 @@ export default function ShopDetailManagementScreen() {
     } finally {
       setPending(null);
     }
+  };
+
+  // PR-NEXT-BUNDLE-M §F — force-publish override (bypass the publish
+  // gate for test shops / known edge cases). A non-empty reason is
+  // required server-side; we mirror that gate here for a friendlier
+  // error. On success the server recomputes, so we refetch the shop.
+  const handleForcePublishConfirm = async () => {
+    if (!shop) return;
+    const trimmed = forceReason.trim();
+    if (!trimmed) {
+      Alert.alert('Reason required', 'Please describe why you are force-publishing.');
+      return;
+    }
+    setForcePending(true);
+    try {
+      await orderService.forceShopPublishOverride({
+        shopId: shop.id,
+        override: true,
+        reason: trimmed,
+      });
+      setShowForceSheet(false);
+      setForceReason('');
+      const list = await orderService.listAllShops();
+      const next = list.find(s => s.id === shop.id);
+      if (next) setShop(next);
+      Alert.alert('Force-published', `${shop.name} is now visible to customers.`);
+    } catch (e: any) {
+      Alert.alert('Could not force-publish', e?.message ?? 'Please try again.');
+    } finally {
+      setForcePending(false);
+    }
+  };
+
+  const handleRemoveOverride = async () => {
+    if (!shop) return;
+    Alert.alert(
+      'Remove force-publish?',
+      `${shop.name} will go back to the normal publish gate. If it hasn't met all requirements, it will disappear from customer listings.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove override',
+          style: 'destructive',
+          onPress: async () => {
+            setForcePending(true);
+            try {
+              await orderService.forceShopPublishOverride({
+                shopId: shop.id,
+                override: false,
+              });
+              const list = await orderService.listAllShops();
+              const next = list.find(s => s.id === shop.id);
+              if (next) setShop(next);
+              Alert.alert('Override removed', 'The normal publish gate now applies.');
+            } catch (e: any) {
+              Alert.alert('Could not remove', e?.message ?? 'Please try again.');
+            } finally {
+              setForcePending(false);
+            }
+          },
+        },
+      ],
+    );
   };
 
   if (!isAdmin) {
@@ -762,6 +833,58 @@ export default function ShopDetailManagementScreen() {
               size="lg"
             />
           )}
+          {/* PR-NEXT-BUNDLE-M §F — force-publish override. Shown when
+              the shop isn't publishable OR is already force-published,
+              so an admin can flip a test shop / known edge case live
+              (or reverse it). Hidden for pending/rejected shops. */}
+          {(status === 'active' || status === 'suspended') &&
+            (!isShopPublishable(shop) || shop.forcePublishOverride === true) && (
+              <View style={[styles.card, styles.forceCard]}>
+                <Text style={styles.label}>Publish gate</Text>
+                {shop.forcePublishOverride === true ? (
+                  <>
+                    <Text style={styles.helper}>
+                      ⚪ Force-published — the normal gate (menu items,
+                      hours, location) is bypassed.
+                      {shop.forcePublishOverrideReason
+                        ? `\nReason: ${shop.forcePublishOverrideReason}`
+                        : ''}
+                    </Text>
+                    <View style={{ height: spacing.md }} />
+                    <Button
+                      title={forcePending ? 'Working…' : 'Remove override'}
+                      variant="secondary"
+                      onPress={handleRemoveOverride}
+                      loading={forcePending}
+                      disabled={forcePending}
+                      size="lg"
+                    />
+                  </>
+                ) : (
+                  <>
+                    <Text style={styles.helper}>
+                      🟡 This shop hasn&apos;t met all publish requirements
+                      {(shop.publishGateState?.missing?.length ?? 0) > 0
+                        ? ` (${shop.publishGateState?.missing?.length} missing)`
+                        : ''}
+                      , so customers can&apos;t see it yet. Force-publish only
+                      for test shops or known edge cases.
+                    </Text>
+                    <View style={{ height: spacing.md }} />
+                    <Button
+                      title="Force publish override"
+                      variant="secondary"
+                      onPress={() => {
+                        setForceReason('');
+                        setShowForceSheet(true);
+                      }}
+                      disabled={forcePending}
+                      size="lg"
+                    />
+                  </>
+                )}
+              </View>
+            )}
           {status === 'rejected' && (
             // PR 31.1 — surface the rejectedReason + rejectedAt so
             // admin has the decision history at hand (previously
@@ -814,7 +937,7 @@ export default function ShopDetailManagementScreen() {
             <Text style={styles.modalTitle}>Suspend shop</Text>
             <Text style={styles.modalSubtitle}>
               The owner will be notified with this reason. Existing
-              orders will continue but new customers won't see this shop.
+              orders will continue but new customers won&apos;t see this shop.
             </Text>
             <TextInput
               value={reason}
@@ -843,6 +966,44 @@ export default function ShopDetailManagementScreen() {
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* PR-NEXT-BUNDLE-M §F — force-publish override form (Rule 13:
+          bottom-anchored modal uses the safe-area-aware BottomSheet). */}
+      <BottomSheet
+        visible={showForceSheet}
+        onClose={() => {
+          if (!forcePending) setShowForceSheet(false);
+        }}
+      >
+        <Text style={styles.modalTitle}>Force-publish this shop?</Text>
+        <Text style={styles.modalSubtitle}>
+          This bypasses the publish gate (menu items, hours, location).
+          Use only for test shops or known edge cases.
+        </Text>
+        <TextInput
+          value={forceReason}
+          onChangeText={setForceReason}
+          placeholder="Reason (required)"
+          placeholderTextColor={colors.textSecondary}
+          style={styles.modalInput}
+          multiline
+          numberOfLines={3}
+        />
+        <View style={{ height: spacing.md }} />
+        <Button
+          title={forcePending ? 'Force-publishing…' : 'Force publish'}
+          onPress={handleForcePublishConfirm}
+          loading={forcePending}
+          disabled={forcePending}
+        />
+        <View style={{ height: spacing.sm }} />
+        <Button
+          title="Cancel"
+          variant="ghost"
+          onPress={() => setShowForceSheet(false)}
+          disabled={forcePending}
+        />
+      </BottomSheet>
 
       {/* PR 31.1 — KYC tap-to-zoom modal. Signed-read URL is valid
           for 1 hour from `getShopKycReadUrls`; well within a single
@@ -896,6 +1057,11 @@ const styles = StyleSheet.create({
   warningCard: {
     backgroundColor: colors.danger + '11',
     borderColor: colors.danger,
+  },
+  // PR-NEXT-BUNDLE-M §F — force-publish override card.
+  forceCard: {
+    borderLeftWidth: 4,
+    borderLeftColor: colors.warning,
   },
   name: { ...typography.h2 },
   // PR-NEXT-BUNDLE-E §E — drill-in hint under the rating badge.

@@ -1,4 +1,11 @@
 import { CategoryId } from '../constants/categories';
+// PR-NEXT-BUNDLE-M — DO NOT REMOVE. The `publishGateState.missing`
+// field on the Shop type below is typed against the canonical
+// publish-requirement union owned by the pure helper. Keeping the
+// type imported (rather than re-declaring it here) guarantees the
+// Shop doc shape and the gate stay in lockstep. If tsc complains
+// "Cannot find name 'PublishRequirementKey'", re-add this line.
+import type { PublishRequirementKey } from '../utils/shopPublishHelpers';
 
 export type Unit = 'kg' | 'g' | 'litre' | 'ml' | 'piece' | 'packet' | 'dozen';
 
@@ -172,6 +179,30 @@ export type Shop = {
   // Schema-additive; absent on legacy shops.
   lowRatingThreshold?: number | null;
   lowRatingNotificationsEnabled?: boolean | null;
+  // PR-NEXT-BUNDLE-M — denormalized publish-gate result, kept in sync
+  // by `recomputeShopPublishStatus` (callable) + `onShopMenuWrite` +
+  // `onShopUpdate` triggers. UI + the `listShopsPublic` customer
+  // filter read this; the client does NOT recompute it. Rule 5
+  // fail-closed: `undefined`/`null` reads as NOT publishable (see
+  // `isShopPublishable`), so a backfill gap or a brand-new shop is
+  // hidden from customers rather than accidentally shown empty.
+  isPublishable?: boolean;
+  // PR-NEXT-BUNDLE-M — last-computed gate result for diagnostics +
+  // the shop-owner "Almost ready" banner.
+  publishGateState?: {
+    missing: PublishRequirementKey[];
+    menuItemCount: number;
+    signal: 'force_override' | 'all_met' | 'missing_requirements';
+    computedAt: number;
+  };
+  // PR-NEXT-BUNDLE-M — admin escape hatch. Set by the admin-only
+  // `forceShopPublishOverride` callable to flip a test shop or a
+  // known-quirky shop to publishable regardless of gates. Same
+  // pattern as PR 48 `showAllShops`.
+  forcePublishOverride?: boolean;
+  forcePublishOverrideSetAt?: number;
+  forcePublishOverrideSetBy?: string; // admin UID
+  forcePublishOverrideReason?: string;
 };
 
 // Returned by `listAllUsers` callable. Mirrors the subset of
